@@ -1,165 +1,150 @@
-# Minus — HDCP 1.4 Setup for Radxa Rock 5B Plus
+# Minus
 
-Automated HDCP 1.4 enablement for the HDMI RX (input) port on the Rock 5B Plus.
+**An open-source HDMI "streaming stick" that sits between your streaming device and your TV, detects ads in real time with on-device ML, and replaces them with something better — like Spanish vocabulary practice.**
 
-Once configured, the device can capture HDCP-protected video from sources like FireTV, Roku, PS5, Xbox, Apple TV, and other consumer HDMI devices at up to 4K@60Hz.
+No cloud. No subscriptions. No data leaves your living room. Everything — OCR, a fine-tuned vision-language model, and speech recognition — runs on the device itself.
 
-## Requirements
+![Minus blocking an ad and showing a Spanish vocabulary card instead](docs/images/blocking-overlay.jpg)
 
-- Radxa Rock 5B Plus running Debian Bookworm
-- A valid HDCP 1.4 sink key file (`.bin`, exactly 308 bytes)
-- Root access on the device
+*An ad break, as seen through Minus: the ad is muted and hidden behind a vocabulary card, with a live (greyscale) preview in the corner so you know when it's safe to come back.*
 
-## Quick Start
+## How it works
 
-```bash
-cd /home/radxa/Minus/hdcp
-sudo ./setup_hdcp_device.sh /path/to/your_hdcp_key.bin
+Minus is a 4K@60fps HDMI passthrough. Your Roku / Fire TV / Google TV plugs into Minus, and Minus plugs into your TV. Three ML signals watch the stream and vote on whether an ad is playing:
+
+```
+┌──────────────┐     ┌────────────────────┐     ┌─────────────────────┐
+│   HDMI IN    │────▶│     ustreamer      │────▶│  HDMI OUT to TV     │
+│ (Roku, etc.) │     │ (MPP hw encoding)  │     │  (DRM/KMS, 60fps)   │
+└──────────────┘     └────────┬───────────┘     └─────────────────────┘
+                              │ snapshots + audio
+              ┌───────────────┼────────────────┐
+              ▼               ▼                ▼
+     ┌────────────────┐ ┌──────────────┐ ┌──────────────┐
+     │  PaddleOCR     │ │  minus-v0.1  │ │  Moonshine   │
+     │  RK3588 NPU    │ │  (VLM)       │ │  ASR (CPU)   │
+     │  reads ad UI   │ │  Axera NPU   │ │  hears ad    │
+     │  text ~400ms   │ │  ~370ms      │ │  language    │
+     └────────────────┘ └──────────────┘ └──────────────┘
+              └───────────────┼────────────────┘
+                              ▼
+                    blocking decision engine
+              (mute + overlay, typically < 2s to react)
 ```
 
-The script handles the entire setup automatically:
+- **OCR** (PaddleOCR on the RK3588's NPU) reads on-screen ad UI: "Skip in 5", "Ad 2 of 3", countdown timers — including the character misreads OCR makes on real TVs.
+- **[minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1)** — our fine-tuned 450M-parameter vision-language model (based on LFM2.5-VL) running on an Axera AX8850 NPU — looks at the frame and decides *"is this an advertisement?"* in ~370ms, no text required.
+- **ASR** (Moonshine tiny-en on CPU) listens for marketing language as a confirmation signal.
 
-1. **Validates** the key file (correct size, type ID, KSV bit parity)
-2. **Converts** the key to the byte order the hardware expects (little-endian byte-swap)
-3. **Installs U-Boot with OP-TEE** (BL32 firmware required for HDCP key loading)
-4. **Patches the device tree** to enable HDCP hardware, add the vendor storage partition, and set the `hdcp1x-enable` flag
-5. **Compiles the kernel module** on-device if kernel headers are available (or uses a pre-compiled fallback)
-6. **Deploys** the key and kernel module for automatic loading on boot
-7. **Creates a systemd service** so HDCP starts automatically after every reboot
+When the votes say "ad": audio mutes instantly, the screen switches to a 60fps overlay (rendered in the hardware JPEG encoder — no desktop stack, no X11), and you get a Spanish word to learn instead. When the ad ends — typically within a second — the show comes back.
 
-After the reboot, HDCP is active. No further configuration needed.
+## The model
 
-## Verifying HDCP
+The heart of Minus is **minus-v0.1**, published on Hugging Face: **[TheGarageDev/Minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1)**.
 
-```bash
-# Check HDCP status
-cat /sys/class/misc/hdmirx_hdcp/support   # Should be: 1
-cat /sys/class/misc/hdmirx_hdcp/enable    # Should be: 1
-cat /sys/class/misc/hdmirx_hdcp/status    # Should be: HDCP1.4: Authenticated success
+It's a fine-tune of [LiquidAI's LFM2.5-VL-450M](https://huggingface.co/LiquidAI) trained on frames captured from real TV streams, compiled into fused-layer models for the Axera NPU. Inference is *prefill-only* — the answer is read directly from the logits, no token generation — which makes latency deterministic.
 
-# Check service
-systemctl status hdcp-enable.service      # Should be: active (exited)
+| Metric | Value |
+|---|---|
+| Accuracy (800-image holdout) | **97.0%** |
+| Ad recall | 94.8% |
+| Non-ad recall (false-positive resistance) | **99.2%** |
+| Inference latency | ~0.37s per frame, deterministic |
+| Parameters | 450M |
 
-# Check module
-lsmod | grep vendor_fix                   # Should show vendor_fix
-```
+The same model also classifies screen state (playing / paused / menu / dialog / screensaver) for autonomous mode.
 
-## Capturing Video
+## Features
 
-Connect an HDCP source to the HDMI RX port, then:
+- **Real-time ad blocking** — OCR + VLM + ASR triangulation, with a battle-tested decision engine (anti-flicker, static-screen suppression, transition-frame holds, frozen-stream detection)
+- **Ad replacement, not just blocking** — Spanish vocabulary cards (750+ entries), trivia, haikus, or a photo screensaver of your own pictures
+- **4K@60fps passthrough** — zero-copy VPU/RGA pipeline in a [patched ustreamer](https://github.com/garagehq/ustreamer), ~5% CPU
+- **Instant audio mute** during ads, with automatic recovery watchdogs
+- **Web UI** — live feed, pause controls, detection history, screenshot review, settings — from any device on your network
+- **Streaming device remotes** — Fire TV (ADB), Roku (ECP), Google TV (ADB) integration, including automatic "Skip Ad" pressing
+- **Autonomous mode** — keeps YouTube playing unattended on a schedule to collect training data, guided by the VLM
+- **Extras** — IR blaster for HDMI switches, WS2812B status LED strip, WiFi captive portal for setup, HDCP 1.4 capture support
 
-```bash
-# Capture a single frame
-gst-launch-1.0 v4l2src device=/dev/video0 num-buffers=1 \
-  ! videoconvert ! jpegenc ! filesink location=/tmp/capture.jpg
+## Web UI
 
-# Continuous stream to display
-gst-launch-1.0 v4l2src device=/dev/video0 \
-  ! videoconvert ! autovideosink
+| Desktop | Mobile |
+|---|---|
+| ![Minus web UI on desktop](docs/images/webui-home.png) | ![Minus web UI on mobile](docs/images/webui-mobile.png) |
 
-# Record to file
-gst-launch-1.0 v4l2src device=/dev/video0 \
-  ! video/x-raw,format=NV16 ! videoconvert \
-  ! x264enc ! mp4mux ! filesink location=/tmp/recording.mp4
-```
+The dark-terminal web UI runs on the device (Flask) and gives you the live feed, block/pause controls, per-detection history, a Tinder-style screenshot review flow for improving the training data, device remote controls, and every setting — no app required.
 
-> **Note:** The HDMI RX uses the multiplanar V4L2 API. Use GStreamer — `ffmpeg` does not support multiplanar capture on this device.
+## Hardware
 
-## HDCP Key Requirements
+| Component | Notes |
+|---|---|
+| [Radxa Rock 5B+](https://radxa.com/products/rock5/5bp/) | RK3588 SoC — HDMI input port, NPU for OCR, VPU for 4K60 JPEG encoding |
+| Axera AX8850 accelerator (M.2) | Runs minus-v0.1; ~370ms per inference |
+| HDMI cables | Source → Minus → TV |
+| *Optional:* IR LED on GPIO | Controls an HDMI switch for multi-device setups |
+| *Optional:* WS2812B 8-LED strip | Status indicator (idle / blocking / error / …) |
+| *Optional:* HDCP 1.4 sink key | For capturing HDCP-protected sources — see [hdcp/](hdcp/README.md) |
 
-The key file must be:
-- Exactly **308 bytes**
-- Raw DCP LLC format: `type_id(4 bytes) + KSV(5 bytes) + device_keys(280 bytes) + padding(19 bytes)`
-- Type ID must be `0x02000000` (Sink/Receiver)
-- KSV must have exactly 20 ones and 20 zeros in binary (HDCP 1.4 spec requirement)
-- Each device should use a **unique key** — do not reuse keys across devices
+No display server, no desktop environment — Minus talks straight to DRM/KMS and the hardware encoders.
 
-## Files
-
-| File | Description |
-|------|-------------|
-| `setup_hdcp_device.sh` | Setup script — run with `sudo` and pass your key file |
-| `u-boot-rk2410_2017.09-1_arm64.deb` | U-Boot package with OP-TEE/BL32 for Rock 5B Plus |
-| `vendor_fix.c` | Kernel module source — compiled on-device automatically by the setup script |
-| `vendor_fix.ko` | Pre-compiled kernel module (fallback if on-device compilation isn't available) |
-
-## Kernel Module Compilation
-
-The `vendor_fix.ko` kernel module must match the running kernel version. The setup script handles this automatically:
-
-1. **If kernel headers are installed** (`linux-headers-$(uname -r)`): the script compiles `vendor_fix.c` on-device for the exact running kernel. No cross-compilation needed.
-
-2. **If kernel headers are NOT available**: the script falls back to the pre-compiled `vendor_fix.ko`. This may fail if the kernel version doesn't match.
-
-3. **If the module already exists and matches the running kernel**: the script skips compilation entirely.
-
-To install kernel headers manually:
-```bash
-sudo apt install linux-headers-$(uname -r)
-```
-
-To force recompilation on the next run, delete the existing module:
-```bash
-rm /home/radxa/vendor_fix.ko
-sudo ./setup_hdcp_device.sh /path/to/your_key.bin
-```
-
-## Troubleshooting
-
-### `support` returns 0
-
-| Check | Command | Meaning |
-|-------|---------|---------|
-| OP-TEE loaded? | `ls /dev/tee0` | If missing, U-Boot install failed — re-run setup |
-| vnvm partition? | `cat /proc/mtd \| grep vnvm` | If missing, DTB patch failed |
-| hdcp1x-enable? | `ls /proc/device-tree/hdmirx-controller@fdee0000/hdcp1x-enable` | If missing, DTB patch failed |
-| Service running? | `systemctl status hdcp-enable.service` | Should be `active (exited)` |
-| Module loaded? | `lsmod \| grep vendor_fix` | If missing, module failed to load (kernel mismatch?) |
-
-### Status shows "Authenticated failed"
-
-The HDCP handshake was attempted but the key was rejected. Possible causes:
-- Invalid or corrupted key file
-- Key not in the correct 308-byte DCP format
-- Key reused from a revoked device
-
-### Status shows "Unknown status"
-
-No HDCP source is connected, or the source hasn't initiated the handshake yet. This is normal when nothing is plugged into the HDMI RX port. Plug in an HDCP source (FireTV, Roku, etc.) and check again after a few seconds.
-
-### Black frame captured
-
-If `status` shows `Authenticated success` but captures are black, the source may be using HDCP 2.x instead of 1.4. This setup only supports HDCP 1.4. Most consumer devices fall back to 1.4 automatically.
-
-### No HDMI signal detected
+## Getting started
 
 ```bash
-v4l2-ctl -d /dev/video0 --get-dv-timings
-# If "Link has been severed": unplug and replug the HDMI cable
-# If "No locks available": the signal is unstable, replug and wait a few seconds
+git clone https://github.com/garagehq/Minus-streaming-stick.git /home/radxa/Minus
+cd /home/radxa/Minus
+
+# Install system + Python dependencies (GStreamer, fonts, rknnlite, axengine, ...)
+# then build the patched ustreamer:
+git clone https://github.com/garagehq/ustreamer.git /home/radxa/ustreamer-garagehq
+cd /home/radxa/ustreamer-garagehq && make WITH_MPP=1
+cp ustreamer /home/radxa/ustreamer-patched
+
+# Download the model
+# → https://huggingface.co/TheGarageDev/Minus-v0.1
+#   into /home/radxa/axera_models/minus-v0.1/
+
+# Run directly:
+cd /home/radxa/Minus && sudo python3 minus.py
+
+# ...or install as a service that starts on boot:
+sudo ./install.sh
 ```
 
-### Module fails to load (kernel mismatch)
+The full dependency list and deployment walkthrough live in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Model paths and thresholds are configurable via environment variables (`MINUS_VLM_MODEL_DIR`, `MINUS_OCR_MODEL_DIR`, and many more — see [CLAUDE.md](CLAUDE.md) for the exhaustive tuning reference).
 
-If `dmesg | grep vendor_fix` shows version errors:
-```bash
-# Install kernel headers and re-run the setup
-sudo apt install linux-headers-$(uname -r)
-rm /home/radxa/vendor_fix.ko
-sudo ./setup_hdcp_device.sh /path/to/your_key.bin
-```
+Minus auto-detects the connected HDMI output, resolution, DRM plane, and audio device at startup, and works with both 4K and 1080p displays.
 
-### SD card interference
+## Documentation
 
-If an SD card with a Radxa image is plugged in, U-Boot may load the unmodified device tree from the SD card instead of eMMC. The setup script handles this automatically, but for best results remove the SD card.
+| Document | Description |
+|---|---|
+| [docs/FEATURES.md](docs/FEATURES.md) | Complete feature list |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and data flow |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Setting up a new device from scratch |
+| [docs/API.md](docs/API.md) | Web UI REST API |
+| [docs/ASR.md](docs/ASR.md) | Audio-based ad confirmation |
+| [docs/AUDIO.md](docs/AUDIO.md) | Audio passthrough pipeline |
+| [docs/AESTHETICS.md](docs/AESTHETICS.md) | Visual design guide |
+| [docs/IR_TRANSMITTER.md](docs/IR_TRANSMITTER.md) | IR blaster for HDMI switches |
+| [docs/STATUS_LEDS.md](docs/STATUS_LEDS.md) | WS2812B status strip |
+| [hdcp/README.md](hdcp/README.md) | HDCP 1.4 setup for the HDMI input |
+| [CLAUDE.md](CLAUDE.md) | Deep-dive engineering notes — detection tuning, every hard-won bug fix |
 
-### Boot device detection
+## Related projects
 
-The script auto-detects whether the device boots from eMMC or SD card and flashes U-Boot to the correct device. If you move the SD card to a different slot or change boot media, re-run the setup script.
+- **[Minus-chrome-extension](https://github.com/garagehq/Minus-chrome-extension)** — the same idea for your browser: on-device ML ad blocking as a Chrome extension.
+- **[garagehq/ustreamer](https://github.com/garagehq/ustreamer)** — our ustreamer fork with RK3588 MPP hardware encoding, NV12/NV24/BGR24 capture, and the 60fps blocking-overlay compositor.
+- **[TheGarageDev/Minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1)** — the model, on Hugging Face.
 
-## Re-running the Script
+## Support
 
-The script is idempotent — it detects components that are already installed and skips them. Safe to re-run at any time, for example:
-- To update the HDCP key
-- After a kernel update (recompiles the module automatically)
-- After moving to different boot media
+Minus is free, open-source, and runs entirely on your own hardware — no ads (obviously), no tracking, no server bills passed on to you. If it has saved you from a few unskippable ad breaks, you can buy me a coffee ☕:
+
+<a href="https://buymeacoffee.com/cyrilengmann" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50" width="210"></a>
+
+> **[buymeacoffee.com/cyrilengmann](https://buymeacoffee.com/cyrilengmann)**
+
+## License
+
+- **Code:** [GPL-3.0](LICENSE)
+- **Documentation:** [CC BY-SA 4.0](LICENSE-DOCS)
+- **Hardware designs:** [CERN-OHL-S-2.0](LICENSE-HARDWARE)

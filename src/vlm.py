@@ -1,8 +1,9 @@
 """
 VLM (Vision Language Model) integration for Minus.
 
-Uses LFM2.5-VL-450M-ft-v2-fused-v2 on the Axera LLM 8850 NPU for ad
-detection AND autonomous-mode screen-state classification.
+Uses minus-v0.1 (fine-tuned LFM2.5-VL-450M, iter28 — published at
+https://huggingface.co/TheGarageDev/Minus-v0.1) on the Axera LLM 8850
+NPU for ad detection AND autonomous-mode screen-state classification.
 
 Both `detect_ad()` and `query_image()` are prefill-only on the 16
 fused decoder layers — no autoregressive decode, no KV cache state
@@ -39,7 +40,7 @@ Migration notes vs FastVLM-0.5B iter4 (the previous model):
     strings in `_build_prompt_ids()` without recalibrating.
 
 Reference: /home/radxa/axera_models/LFM2/MINUS_INTEGRATION_GUIDE.md
-Working standalone: /home/radxa/axera_models/LFM2/LFM2-450M-ft-v2-fused-v2/infer_vlm_fused.py
+Working standalone: /home/radxa/axera_models/minus-v0.1/infer_vlm_fused.py
 
 Model is loaded ONCE at startup (~8s) and kept running.
 """
@@ -173,7 +174,7 @@ class VLMManager:
                 logger.error(f"{label} not found: {p}")
                 return
 
-        logger.info(f"VLM using LFM2.5-VL at: {LFM_MODEL_DIR}")
+        logger.info(f"VLM using minus-v0.1 (LFM2.5-VL) at: {LFM_MODEL_DIR}")
 
     # ------------------------------------------------------------------
     # Loading
