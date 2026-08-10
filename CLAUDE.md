@@ -190,7 +190,7 @@ sudo systemctl start minus
 ```bash
 # Paths (override defaults for different installations)
 MINUS_USTREAMER_PATH=/path/to/ustreamer     # Default: /home/radxa/ustreamer-patched
-MINUS_VLM_MODEL_DIR=/path/to/vlm/models     # Default: /home/radxa/axera_models/LFM2/LFM2-450M-ft-v2-fused-v2
+MINUS_VLM_MODEL_DIR=/path/to/vlm/models     # Default: /home/radxa/axera_models/minus-v0.1
 MINUS_OCR_MODEL_DIR=/path/to/ocr/models     # Default: /home/radxa/rknn-llm/.../paddleocr
 
 # Timing thresholds
@@ -583,13 +583,13 @@ Unlike the old GStreamer approach (limited to ~4fps), the ustreamer blocking mod
 
 Both modes share the same model. Concurrent callers (detection loop calling `detect_ad`, autonomous mode calling `query_image`) are serialized by `VLMProcess._call_lock` so they cannot cross responses on the shared queue or race on the timeout / latency state. See *VLMProcess Cross-Thread Race* under Known Issues for the full rationale.
 
-LFM2.5-VL fused-v2 on-disk layout:
+minus-v0.1 on-disk layout (fine-tuned LFM2.5-VL-450M iter28, published at https://huggingface.co/TheGarageDev/Minus-v0.1; renamed from `LFM2/LFM2-450M-ft-iter28` in Aug 2026):
 ```
-/home/radxa/axera_models/LFM2/LFM2-450M-ft-v2-fused-v2/
+/home/radxa/axera_models/minus-v0.1/
 ├── vision_encoder_512.axmodel              # Vision encoder (input "pixel_values")
 ├── fused_models/
-│   ├── l0_conv_fused.axmodel               # 10× conv layers (l0,l1,l3,l4,l6,l7,l9,l11,l13,l15)
-│   └── l2_attn_fused.axmodel               # 6× attn layers  (l2,l5,l8,l10,l12,l14)
+│   ├── l{0,1,3,4,6,7,9,11,13,15}_conv_fused.axmodel   # 10× conv layers
+│   └── l{2,5,8,10,12,14}_attn_fused.axmodel           # 6× attn layers
 ├── decode_models/
 │   └── post_d.axmodel                      # Post/LM-head (no per-layer decode models shipped)
 ├── embed.npy                               # Embedding table (FP32, mmap'd, 256MB)
@@ -682,7 +682,7 @@ pkill -9 ustreamer    # Kill orphaned ustreamer
 
 **VLM not loading:**
 - Check Axera card: `axcl_smi`
-- Verify model files exist in `/home/radxa/axera_models/LFM2/LFM2-450M-ft-v2-fused-v2/`
+- Verify model files exist in `/home/radxa/axera_models/minus-v0.1/`
 - Ensure Python dependencies: `pip3 show axengine`
 
 **OCR not detecting:**

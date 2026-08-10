@@ -1,6 +1,6 @@
 [Unit]
 Description=Minus - HDMI Ad Blocker
-Documentation=https://github.com/garagehq/minus
+Documentation=https://github.com/garagehq/Minus-streaming-stick
 After=multi-user.target
 Conflicts=gdm.service gdm3.service lightdm.service sddm.service
 StartLimitIntervalSec=300

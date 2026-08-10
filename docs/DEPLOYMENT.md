@@ -26,7 +26,7 @@ This guide covers deploying Minus as a systemd service on Radxa/RK3588 hardware.
 
 ```bash
 cd /home/radxa
-git clone https://github.com/garagehq/Minus.git
+git clone https://github.com/garagehq/Minus-streaming-stick.git
 cd Minus
 ```
 
