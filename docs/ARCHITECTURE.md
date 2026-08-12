@@ -41,7 +41,7 @@
 - **Memory**: 8GB+ recommended
 
 ### Secondary NPU: Axera LLM 8850
-- **Purpose**: LFM2.5-VL-450M (ft-v2-fused-v2) inference — prefill-only, no decode
+- **Purpose**: minus-v0.1 (fine-tuned LFM2.5-VL-450M) inference — prefill-only, no decode
 - **Connection**: USB/PCIe to RK3588
 - **Memory**: Dedicated NPU memory
 - **Performance**: ~0.37s per inference (deterministic)
@@ -90,7 +90,7 @@ a long-lived child process:
 - `OCRProcess` (`src/ocr_worker.py`) loads the RKNN model once, processes
   requests via a `multiprocessing.Queue`, and has a **hard 1.0s timeout**
   backed by worker-process kill-and-restart with exponential backoff.
-- `VLMProcess` (`src/vlm_worker.py`) loads LFM2.5-VL-450M once (17
+- `VLMProcess` (`src/vlm_worker.py`) loads minus-v0.1 once (17
   axengine sessions: 1 vision + 16 fused decoder layers + 1 post, plus
   a 256MB mmap of the embedding table), and uses a **soft/hard timeout**
   split: soft (1.5s) returns `"TIMEOUT"` to the caller while letting the
