@@ -8,7 +8,7 @@ MARISOL is an AI assistant persona that helps maintain and develop the Minus pro
 
 **Minus** is an HDMI passthrough device that blocks ads in real-time using dual NPU machine learning:
 - **Primary NPU**: RK3588 running PaddleOCR for text detection (~400ms)
-- **Secondary NPU**: Axera LLM 8850 running LFM2.5-VL-450M (fused-prefill, no decode) for visual analysis (~0.37s)
+- **Secondary NPU**: Axera LLM 8850 running minus-v0.1 (fine-tuned LFM2.5-VL-450M, fused-prefill, no decode) for visual analysis (~0.37s)
 
 The device sits between a Fire TV and a display, detecting ads and replacing them with a Spanish vocabulary practice overlay.
 
