@@ -1849,10 +1849,44 @@ class WebUI:
             try:
                 muted = False
                 if hasattr(self.minus, 'audio') and self.minus.audio:
-                    muted = getattr(self.minus.audio, '_muted', False)
+                    muted = getattr(self.minus.audio, 'is_muted', False)
                 return jsonify({'muted': muted})
             except Exception as e:
                 logger.error(f"Error getting audio status: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/audio/check')
+        def api_audio_check():
+            """End-to-end audio health check (Home tab Check Audio button).
+
+            Walks capture -> pipeline -> mute -> ALSA playback and returns
+            a human-readable verdict plus the raw signals.
+            """
+            try:
+                if hasattr(self.minus, 'audio') and self.minus.audio:
+                    diag = self.minus.audio.get_diagnostics()
+                    diag['success'] = True
+                    return jsonify(diag)
+                return jsonify({'success': False, 'error': 'Audio not initialized'}), 500
+            except Exception as e:
+                logger.error(f"Error checking audio: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/audio/restart', methods=['POST'])
+        def api_audio_restart():
+            """Force a full audio pipeline rebuild (Home tab Restart Audio button).
+
+            Recovers the silent-but-healthy-looking state where the HDMI-TX
+            audio lane died during a modeset (~1-2s audio dropout).
+            """
+            try:
+                if hasattr(self.minus, 'audio') and self.minus.audio:
+                    result = self.minus.audio.restart(reason="web UI")
+                    logger.info(f"[WebUI] Audio restart: {result.get('message', result.get('error', 'unknown'))}")
+                    return jsonify(result)
+                return jsonify({'success': False, 'error': 'Audio not initialized'}), 500
+            except Exception as e:
+                logger.error(f"Error restarting audio: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
         @self.app.route('/api/audio/sync-reset', methods=['POST'])

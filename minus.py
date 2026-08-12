@@ -643,7 +643,11 @@ class Minus:
             # form) the static-promo false-hold class that the weak-keyword
             # layer originally guarded; home-screen detection still suppresses
             # home/browse tiles. Revert by moving 'sponsored' back to WEAK.
-            'sponsored',
+            # 'sponsored (fuzzy)' carries the same strength — it is the same
+            # signal read through an OCR misread ("Sponoed" on a live Netflix
+            # static ad card, Aug 2026), and without STRONG status the static
+            # suppressor keeps the card unblocked.
+            'sponsored', 'sponsored (fuzzy)',
         })
         self.STRONG_AD_HOLD_SECONDS = 5.0
         self.last_strong_ad_time = 0.0
@@ -677,7 +681,8 @@ class Minus:
         # "BUY" in a caption) do NOT match any name below, so single-frame
         # fast-fire here reintroduces none of the FP risk the guard prevents.
         self.DEFINITIVE_AD_KEYWORD_NAMES = (
-            self.STRONG_AD_KEYWORD_NAMES - frozenset({'sponsored'}))
+            self.STRONG_AD_KEYWORD_NAMES
+            - frozenset({'sponsored', 'sponsored (fuzzy)'}))
 
         self.vlm_prev_frame = None
         self.vlm_prev_frame_had_ad = False
@@ -1047,6 +1052,10 @@ class Minus:
                     # Resume watchdog and restart pipeline (source is available again)
                     self.audio.resume_watchdog()
                     self.audio.unmute()
+                    # The pipeline start above did a modeset; a PCM that kept
+                    # streaming (or opened) during link training has a dead
+                    # TX audio lane — re-prepare it once things settle.
+                    self._schedule_audio_reprepare(reason="hdmi recovery")
                 logger.info("[Recovery] HDMI recovery complete")
                 self._set_led_state('idle')
             else:
@@ -2574,6 +2583,16 @@ class Minus:
             cleaned.append('vocab')
         self._system_settings['replacement_modes'] = sorted(set(cleaned))
         self._save_system_settings()
+        # Apply immediately: a locked-in kind from the current/last ad break
+        # that is now disabled must not survive into the next rotation or
+        # the next block (the 30s style-cooldown would otherwise keep
+        # serving e.g. facts after the user turned facts off).
+        _ad_blocker = getattr(self, 'ad_blocker', None)
+        if _ad_blocker and hasattr(_ad_blocker, 'invalidate_replacement_lock'):
+            try:
+                _ad_blocker.invalidate_replacement_lock()
+            except Exception as e:
+                logger.warning(f"Failed to invalidate replacement lock: {e}")
         return {'success': True, 'replacement_modes': self._system_settings['replacement_modes']}
 
     def _load_vlm_model(self) -> bool:
@@ -2918,7 +2937,46 @@ class Minus:
                 else:
                     logger.warning("Audio passthrough failed to start")
 
+        # Re-prepare HDMI-TX audio after the modeset settles. The display
+        # pipeline start above just performed a modeset; if the audio PCM
+        # was opened before/while the TX link was training, its audio lane
+        # is dead even though buffers flow (see _schedule_audio_reprepare).
+        if display_ok:
+            self._schedule_audio_reprepare(reason="display pipeline started")
+
         return display_ok
+
+    def _schedule_audio_reprepare(self, delay=4.0, reason="post-modeset"):
+        """One-shot delayed audio pipeline restart after a display modeset.
+
+        Root cause (Aug 2026 "no audio after boot/recovery"): the rockchip
+        HDMI-TX driver programs its audio lane (audio infoframe + audio
+        clock regen) only at PCM prepare time. When the audio pipeline
+        opens the PCM while the TX link is still training — the video
+        modeset happens within the same second at signal recovery — the
+        stream plays into a dead audio lane and never self-heals. Nothing
+        above ALSA can see it: buffers flow, hw_ptr advances, the ALSA
+        state is RUNNING, so the buffer-flow watchdog stays green. The
+        only reliable recovery is closing and reopening the PCM after the
+        link has settled, so we always do a one-shot audio restart a few
+        seconds after the display pipeline comes up. Costs ~1-2s of audio
+        during an event (boot / HDMI recovery) where audio was down anyway.
+        """
+        if not self.audio:
+            return
+
+        def _reprepare():
+            time.sleep(delay)
+            try:
+                if (self.audio and self.audio.is_running
+                        and not getattr(self.audio, '_playback_fakesink', False)):
+                    logger.info(f"[Audio] Re-preparing HDMI-TX audio ({reason})")
+                    self.audio.restart(reason=f"re-prepare: {reason}")
+            except Exception as e:
+                logger.warning(f"[Audio] Re-prepare failed: {e}")
+
+        threading.Thread(target=_reprepare, daemon=True,
+                         name="audio-reprepare").start()
 
     def start_display(self):
         """Start ustreamer and display pipeline."""
@@ -3238,8 +3296,31 @@ class Minus:
                 # re-detects fresh within ~1-2 cycles (brief, rare) rather
                 # than the screen staying frozen for minutes (catastrophic).
                 _hit_max = blocking_elapsed >= self.MAX_BLOCKING_DURATION
+                # Frozen-early needs BOTH timers: the text frozen ≥30s AND
+                # the block itself active ≥30s. The original implementation
+                # only checked the (global) frozen-text timer, which
+                # accumulates while NOT blocking — observed live: a real
+                # Netflix static sponsored card ("Sponsored | Skip | 90+",
+                # text legitimately static) pre-accumulated 36s of frozen
+                # time, so the block it finally triggered was force-stopped
+                # 0.5s in and then freeze-suppressed while the ad played on.
                 _hit_frozen = (self._ocr_text_frozen_for
-                               >= self.FROZEN_EARLY_SECONDS)
+                               >= self.FROZEN_EARLY_SECONDS
+                               and blocking_elapsed >= self.FROZEN_EARLY_SECONDS)
+                if _hit_frozen:
+                    # Audio veto: a live static ad card carries real audio
+                    # (music/voiceover); a genuinely stuck upstream stream is
+                    # silent. With audio content present, trust that this is
+                    # a real ad and let the MAX cap bound the worst case.
+                    try:
+                        if (self.audio and self.audio.get_status()
+                                .get('recent_level', 0.0) >= 0.01):
+                            _hit_frozen = False
+                            logger.debug(
+                                "[SAFEGUARD] Frozen-early veto: audio content "
+                                "present — treating static ad frame as live ad")
+                    except Exception:
+                        pass
                 if (self.ad_detected and not should_stop
                         and (_hit_max or _hit_frozen)):
                     if _hit_frozen and not _hit_max:

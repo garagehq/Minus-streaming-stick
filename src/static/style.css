@@ -707,6 +707,31 @@ section h2, .firetv-header h2, .apps-section h2, .network-section h2,
     color: #fff;
 }
 
+/* Audio check/restart result line (Home tab) */
+.audio-check-result {
+    margin-top: 10px;
+    font-size: 0.8rem;
+    font-family: var(--font-body);
+    color: var(--text-secondary);
+    word-break: break-word;
+}
+
+.audio-check-result.hidden {
+    display: none;
+}
+
+.audio-check-result.ok {
+    color: var(--success);
+}
+
+.audio-check-result.warn {
+    color: var(--warning);
+}
+
+.audio-check-result.fail {
+    color: var(--danger);
+}
+
 .resume-controls {
     display: flex;
     flex-direction: column;

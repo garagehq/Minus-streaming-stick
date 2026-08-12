@@ -139,9 +139,9 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
                     response_queue.put(('ok', result))
                     last_inference_time = time.time()
                 elif request_type == 'check_ad':
-                    # OCR + keyword check
+                    # OCR + keyword check (check_ad_keywords returns a 4-tuple)
                     ocr_results = ocr.ocr(frame_rgb)
-                    is_ad, keywords = ocr.check_ad_keywords(ocr_results)
+                    is_ad, keywords, _texts, _terminal = ocr.check_ad_keywords(ocr_results)
                     response_queue.put(('ok', (is_ad, keywords, ocr_results)))
                     last_inference_time = time.time()
                 else:
@@ -312,137 +312,17 @@ class OCRProcess:
         Check OCR results for ad-related keywords.
         This runs locally (not in worker) since it's just string matching.
 
+        Delegates to PaddleOCR.check_ad_keywords (src/ocr.py) — the single
+        source of truth. This class used to carry its own copy of the
+        keyword lists and patterns, and that copy silently drifted stale
+        TWICE (missing "Ad1:09" timestamp handling in May 2026; missing
+        the 'skip'/'sponsor'/'promoted'/Spanish keywords in Aug 2026 —
+        real ads on screen matched nothing while the boot log printed the
+        rich list from ocr.py). Do not reintroduce a local copy. See
+        CLAUDE.md, "OCR Worker Keyword-Pattern Drift".
+
         Returns:
             Tuple of (found_ad, matched_keywords, all_texts, is_terminal)
         """
-        # Ad keyword lists (from PaddleOCR)
-        AD_KEYWORDS_EXACT = [
-            'skip ad', 'skip ads', 'skip in', 'video will play after ad',
-            # 'ad in' removed: normalizes to 'adin' which matches inside 'loading'
-            # (lo-ADIN-g), 'reading' (re-AD-IN-g), etc. The specific patterns
-            # for "Ad N of M", "Ad N" countdown, and "ad with timestamp" catch
-            # legitimate cases.
-            'shop now', 'learn more', 'sponsored', 'advertisement',
-            'download now', 'install now', 'get the app', 'free download',
-            'limited time', 'offer ends', 'dont miss', "don't miss",
-            'buy now', 'order now', 'sign up', 'subscribe now',
-            'visit advertiser', 'visitadvertiser',  # YouTube pre-roll CTA
-        ]
-        AD_KEYWORDS_WORD = [
-            'ad', 'ads',
-        ]
-        AD_EXCLUSIONS = [
-            'skip recap', 'skip intro', 'skip credits', 'skip opening',
-            'add to', 'add it', 'already added', 'address', 'add new',
-            'additionally', 'adaptive', 'advanced', 'advantage',
-            # Minus overlay messages (Fire TV notifications)
-            'ad skipping enabled', 'ad skipping', 'adskipping',
-        ]
-        # Fuzzy "Skip Intro" — OCR often swaps 'i' with '1'/'l'/'I'. Covers
-        # "Skip Intro", "Sk1p Intro", "Skip 1ntro", "Sk1p 1ntro", "Sk1p1ntro".
-        SKIP_INTRO_FUZZY_RE = re.compile(r's[kK][i1lI]p\s*[i1lI]ntro', re.IGNORECASE)
-        TERMINAL_PATTERNS = [
-            r'^\$\s*',
-            r'^>\s*',
-            r'^#\s*',
-            r'def\s+\w+\s*\(',
-            r'class\s+\w+',
-        ]
-
-        matched = []
-        all_texts = []
-
-        for result in ocr_results:
-            text = result['text']
-            all_texts.append(text)
-
-            text_lower = text.lower()
-            text_clean = ''.join(c for c in text_lower if c.isalnum())
-
-            # Exclusion gate FIRST — prevents e.g. "skip in" (AD_KEYWORDS_EXACT
-            # substring) from matching "Skip Intro" before we can exclude it.
-            is_excluded = (
-                any(excl in text_lower or excl.replace(' ', '') in text_clean
-                    for excl in AD_EXCLUSIONS)
-                or SKIP_INTRO_FUZZY_RE.search(text_lower) is not None
-            )
-            if is_excluded:
-                continue
-
-            # Check exact phrase keywords
-            for keyword in AD_KEYWORDS_EXACT:
-                keyword_clean = ''.join(c for c in keyword if c.isalnum())
-                if keyword in text_lower or keyword_clean in text_clean:
-                    matched.append((keyword, text))
-                    break
-
-            # Check word-boundary keywords
-            for keyword in AD_KEYWORDS_WORD:
-                pattern = r'\b' + re.escape(keyword) + r'\b'
-                if re.search(pattern, text_lower):
-                    matched.append((keyword, text))
-                    break
-
-            # Fuzzy matches for common OCR misreads
-            if 'skipad' in text_clean or 'skipads' in text_clean:
-                if ('skipad', text) not in matched and ('skipads', text) not in matched:
-                    matched.append(('skip ad (fuzzy)', text))
-
-            if 'shopnow' in text_clean or 'shpnow' in text_clean:
-                matched.append(('shop now (fuzzy)', text))
-
-            # "Ad 1 of 2" pattern
-            if re.search(r'ad\s*\d+\s*of\s*\d+', text_lower) or re.search(r'ad\d+of\d+', text_clean):
-                matched.append(('ad X of Y', text))
-
-            # "Ad 10" countdown pattern
-            if re.search(r'^ad\s*\d+$', text_lower.strip()):
-                matched.append(('ad countdown', text))
-
-            # "Ad | 0:30", "Ad0:30", "Ad1:09" timestamp pattern. Accept the
-            # following common OCR misreads:
-            #   0 ↔ o ↔ O   (zero vs letter o)
-            #   1 ↔ l ↔ I ↔ i  (one vs lowercase L vs uppercase i)
-            #   : ↔ ; ↔ .   (colon misreads)
-            # Two ways "ad" can appear: at a word boundary ("Ad 0:30") OR
-            # immediately followed by a digit-like char + separator
-            # ("Ad1:09"). The latter is critical — when OCR drops the space
-            # between "Ad" and the timer, \bad\b fails because the digit is a
-            # word character, and we'd lose the entire ad-timestamp signal.
-            # Mirrors src/ocr.py:595 — keep these in sync.
-            has_ad = (re.search(r'\bad\b', text_lower)
-                      or re.search(r'ad[0-9oOlIi][:;.]', text_lower))
-            has_timestamp = re.search(r'[0-9oOlIi][:;.][0-9oOlIi][0-9oOlIi]', text_lower)
-            if has_ad and has_timestamp:
-                matched.append(('ad with timestamp', text))
-
-        # Cross-element check
-        if not matched and len(all_texts) <= 5:
-            combined = ' '.join(all_texts).lower()
-            # Apply the same exclusions to combined text
-            combined_clean = ''.join(c for c in combined if c.isalnum())
-            is_combined_excluded = (
-                any(excl in combined or excl.replace(' ', '') in combined_clean
-                    for excl in AD_EXCLUSIONS)
-                or SKIP_INTRO_FUZZY_RE.search(combined) is not None
-            )
-            if not is_combined_excluded:
-                # Mirrors src/ocr.py:612 — keep in sync.
-                has_ad_word = (re.search(r'\bad\b', combined)
-                               or re.search(r'ad[0-9oOlIi][:;.]', combined))
-                has_timestamp = re.search(r'[0-9oOlIi][:;.][0-9oOlIi][0-9oOlIi]', combined)
-                if has_ad_word and has_timestamp:
-                    matched.append(('ad with timestamp (cross-element)', combined[:50]))
-
-        # Check for terminal content
-        is_terminal = False
-        if all_texts:
-            for text in all_texts:
-                for pattern in TERMINAL_PATTERNS:
-                    if re.match(pattern, text.strip()):
-                        is_terminal = True
-                        break
-                if is_terminal:
-                    break
-
-        return len(matched) > 0, matched, all_texts, is_terminal
+        from ocr import PaddleOCR
+        return PaddleOCR.check_ad_keywords(ocr_results)

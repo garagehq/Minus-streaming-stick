@@ -225,12 +225,16 @@ class TestOCROverlayExclusion(unittest.TestCase):
     self-trigger the blocker. Exclusions must cover both modules."""
 
     def test_ad_exclusions_include_minus_overlay_text(self):
-        from ocr_worker import _ocr_worker_main  # noqa: F401 — module loads
+        # The overlay exclusions live in the single source of truth
+        # (PaddleOCR in src/ocr.py); ocr_worker delegates to it instead of
+        # carrying its own copy (which twice drifted stale — see CLAUDE.md,
+        # "OCR Worker Keyword-Pattern Drift").
+        from ocr import PaddleOCR
+        for excl in ('ad skipping enabled', 'ad skipping', 'adskipping'):
+            self.assertIn(excl, PaddleOCR.AD_EXCLUSIONS)
         import ocr_worker
         src = Path(ocr_worker.__file__).read_text()
-        self.assertIn("'ad skipping enabled'", src)
-        self.assertIn("'ad skipping'", src)
-        self.assertIn("'adskipping'", src)
+        self.assertIn('PaddleOCR.check_ad_keywords(ocr_results)', src)
 
     def test_ocr_module_skips_minus_overlay_text(self):
         """`check_ad_keywords` must ignore ad-looking text that matches the

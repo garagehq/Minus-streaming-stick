@@ -1268,11 +1268,15 @@ class DRMAdBlocker:
     def _pick_content_kind(self):
         """Choose which kind of content to show next.
 
-        If a per-block lock is active, return it. Otherwise weighted-random.
+        If a per-block lock is active, return it. Otherwise roll a fresh
+        lock honouring the user's enabled replacement modes — never pick
+        from the unfiltered kind list, or a disabled kind (e.g. facts
+        toggled off in Settings) can reappear mid-block.
         """
-        if getattr(self, '_locked_content_kind', None):
-            return self._locked_content_kind
-        return random.choices(self._CONTENT_KINDS, weights=self._CONTENT_KIND_WEIGHTS, k=1)[0]
+        kind = getattr(self, '_locked_content_kind', None)
+        if not kind:
+            kind = self._roll_replacement_mode()
+        return kind
 
     def _roll_replacement_mode(self):
         """Pick a content kind at the start of an ad break.
@@ -1304,14 +1308,29 @@ class DRMAdBlocker:
     def _get_enabled_replacement_modes(self):
         """Read ``replacement_modes`` preferences from the Minus instance.
 
-        Defaults to {'vocab', 'fact', 'haiku'} (text kinds on, photos off).
+        Defaults to {'vocab', 'fact'} (text kinds on, photos off).
         """
         if self.minus and hasattr(self.minus, 'get_replacement_modes'):
             try:
                 return set(self.minus.get_replacement_modes())
             except Exception as e:
                 logger.debug(f"[DRMAdBlocker] get_replacement_modes failed: {e}")
-        return {'vocab', 'fact', 'haiku'}
+        return {'vocab', 'fact'}
+
+    def invalidate_replacement_lock(self):
+        """Drop a locked content kind that settings no longer allow.
+
+        Called by Minus.set_replacement_modes so a toggle in the web UI
+        takes effect at the next rotation / next block, not after the
+        30s cooldown lapses. Re-rolls immediately (instead of clearing)
+        so a mid-block rotation always has a valid kind to render.
+        """
+        locked = getattr(self, '_locked_content_kind', None)
+        if locked and locked not in self._get_enabled_replacement_modes():
+            self._locked_content_kind = self._roll_replacement_mode()
+            logger.info(
+                f"[DRMAdBlocker] Replacement settings changed — "
+                f"re-rolled locked kind {locked} -> {self._locked_content_kind}")
 
     def _render_vocab(self, header):
         vocab = random.choice(VOCABULARY_COMBINED)
@@ -1979,8 +1998,13 @@ class DRMAdBlocker:
             # we reuse it — avoids flip-flopping between styles during an
             # ad cluster). If the user has enabled 'photos' mode and uploaded
             # at least one photo, we may roll into photo-cycling instead.
+            # The reused kind MUST still be enabled in settings: without that
+            # check, disabling e.g. facts mid-ad-pod kept serving facts from
+            # the stale lock until the cooldown lapsed (or a restart).
             now = time.time()
-            reused = bool(self._locked_content_kind) and now <= self._content_kind_lock_until
+            reused = (bool(self._locked_content_kind)
+                      and now <= self._content_kind_lock_until
+                      and self._locked_content_kind in self._get_enabled_replacement_modes())
             if not reused:
                 self._locked_content_kind = self._roll_replacement_mode()
             logger.info(f"[DRMAdBlocker] Starting blocking ({source}) kind={self._locked_content_kind} {'reused' if reused else 'rolled'} lock_until_in={self._content_kind_lock_until - now:.1f}s")

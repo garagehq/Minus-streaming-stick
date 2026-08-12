@@ -196,6 +196,18 @@
                 </div>
             </section>
 
+            <!-- Audio Controls -->
+            <section class="test-section">
+                <div class="test-controls">
+                    <span class="test-label">Audio:</span>
+                    <div class="test-buttons">
+                        <button onclick="checkAudio()" class="test-btn" id="audio-check-btn">Check Audio</button>
+                        <button onclick="restartAudio()" class="test-btn" id="audio-restart-btn">Restart Audio</button>
+                    </div>
+                </div>
+                <div id="audio-check-result" class="audio-check-result hidden"></div>
+            </section>
+
             <!-- Debug Snapshot -->
             <section class="debug-section">
                 <div class="debug-controls">
@@ -1586,6 +1598,56 @@
                 if (!response.ok) throw new Error('Stop test failed');
             } catch (error) {
                 console.error('Stop test failed:', error);
+            }
+        }
+
+        // =========================================================================
+        // Audio Controls
+        // =========================================================================
+
+        async function checkAudio() {
+            const el = document.getElementById('audio-check-result');
+            el.className = 'audio-check-result';
+            el.textContent = 'Checking audio...';
+            try {
+                const response = await fetch('/api/audio/check');
+                const d = await response.json();
+                if (!d.success) throw new Error(d.error || 'check failed');
+                let text = d.verdict;
+                if (d.ok) {
+                    el.classList.add(d.source_silent ? 'warn' : 'ok');
+                    const level = (d.recent_level !== undefined) ? d.recent_level.toFixed(3) : '?';
+                    text += ` [level ${level} | ${d.muted ? 'MUTED' : 'unmuted'} | ALSA ${d.alsa_playback_state}]`;
+                } else {
+                    el.classList.add('fail');
+                    if (d.problems && d.problems.length > 1) {
+                        text = d.problems.join(' · ');
+                    }
+                    text += ' — try Restart Audio';
+                }
+                el.textContent = text;
+            } catch (error) {
+                el.classList.add('fail');
+                el.textContent = 'Audio check failed: ' + error.message;
+            }
+        }
+
+        async function restartAudio() {
+            const el = document.getElementById('audio-check-result');
+            const btn = document.getElementById('audio-restart-btn');
+            el.className = 'audio-check-result';
+            el.textContent = 'Restarting audio pipeline...';
+            btn.disabled = true;
+            try {
+                const response = await fetch('/api/audio/restart', { method: 'POST' });
+                const d = await response.json();
+                if (!d.success) throw new Error(d.error || 'restart failed');
+                el.textContent = d.message + ' — re-checking in 5s...';
+                setTimeout(() => { btn.disabled = false; checkAudio(); }, 5000);
+            } catch (error) {
+                el.classList.add('fail');
+                el.textContent = 'Audio restart failed: ' + error.message;
+                btn.disabled = false;
             }
         }
 

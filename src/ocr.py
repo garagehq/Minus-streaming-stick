@@ -200,13 +200,20 @@ class CTCLabelDecode:
 class PaddleOCR:
     """PaddleOCR using RKNN models for NPU acceleration."""
 
-    # Ad-related keywords to detect (must be distinct/clear ad indicators)
-    # Note: 'ad' alone is too generic - only match 'skip ad', 'ad:', etc.
-    # Note: 'learn more' removed - too common in YouTube UI (recommended videos, etc.)
+    # Ad-related keywords to detect (must be distinct/clear ad indicators).
+    # THE single source of truth — OCRProcess (src/ocr_worker.py) delegates
+    # here. These lists and the worker's used to be separate copies and
+    # drifted BOTH ways (worker missing 'skip'/'sponsor'/Spanish; this list
+    # missing 'skip in'/'learn more'/bare 'ad' that minus.py's strong/weak
+    # keyword-name sets reference). Merged Aug 2026 — keep it that way.
     AD_KEYWORDS_EXACT = [
-        'skip ad', 'skip ads', 'skipad', 'skipads',
+        'skip ad', 'skip ads', 'skipad', 'skipads', 'skip in',
+        'video will play after ad',
         'sponsored', 'advertisement', 'ad break',
-        'shop now', 'buy now',
+        'shop now', 'buy now', 'learn more',
+        'download now', 'install now', 'get the app', 'free download',
+        'limited time', 'offer ends', 'dont miss', "don't miss",
+        'order now', 'sign up', 'subscribe now',
         'promoted',  # Twitter/social media promoted ads
         'visit advertiser', 'visitadvertiser',  # YouTube pre-roll CTA
         # Note: 'promo' removed - too broad, matches 'Promote' button
@@ -217,8 +224,8 @@ class PaddleOCR:
     ]
     # Keywords that need word boundary matching (avoid matching inside words)
     AD_KEYWORDS_WORD = [
+        'ad', 'ads',  # word-boundary so 'loading'/'adobe' cannot match
         'skip', 'sponsor',
-        # Note: 'ad' removed - too short, matches OCR noise. Use pattern match instead.
         # Spanish word-boundary keywords
         'patroci',  # Catches patrocinado, patrocinador, etc.
     ]
@@ -228,7 +235,11 @@ class PaddleOCR:
     AD_EXCLUSIONS = [
         'skip recap', 'skiprecap',  # Netflix "Skip Recap" button
         'skip intro', 'skipintro',  # Streaming "Skip Intro" button
+        'skip credits', 'skip opening',  # end-credits / anime opening buttons
         'saltar intro', 'saltarintro',  # Spanish "Skip Intro"
+        # 'Add ...' UI phrases that OCR can mangle toward bare 'ad'
+        'add to', 'add it', 'already added', 'address', 'add new',
+        'additionally', 'adaptive', 'advanced', 'advantage',
         # Minus overlay messages (prevent self-triggering)
         'ad skipping enabled', 'ad skipping', 'adskipping',
         'ad detection active', 'ad detection actiue',  # Status overlay (OCR misreads V as U)
@@ -489,7 +500,8 @@ class PaddleOCR:
         r'git\s+(status|commit|push|pull)', # git commands
     ]
 
-    def is_terminal_content(self, all_texts):
+    @classmethod
+    def is_terminal_content(cls, all_texts):
         """
         Check if the detected text appears to be terminal/development content.
 
@@ -507,7 +519,7 @@ class PaddleOCR:
         combined_text = ' '.join(all_texts)
         combined_lower = combined_text.lower()
 
-        for pattern in self.TERMINAL_INDICATORS:
+        for pattern in cls.TERMINAL_INDICATORS:
             if re.search(pattern, combined_text, re.IGNORECASE):
                 terminal_matches += 1
 
@@ -523,7 +535,7 @@ class PaddleOCR:
         # Check if multiple ad keywords appear together (likely showing our code)
         # Note: Don't double-count related keywords (e.g., "sponsored" contains "sponsor")
         matched_keywords = set()
-        for kw in self.AD_KEYWORDS_EXACT + self.AD_KEYWORDS_WORD:
+        for kw in cls.AD_KEYWORDS_EXACT + cls.AD_KEYWORDS_WORD:
             if kw in combined_lower:
                 # Skip if a longer keyword already matched this same text
                 already_matched = any(kw in mk or mk in kw for mk in matched_keywords if mk != kw)
@@ -548,9 +560,16 @@ class PaddleOCR:
 
         return False
 
-    def check_ad_keywords(self, ocr_results):
+    @classmethod
+    def check_ad_keywords(cls, ocr_results):
         """
         Check OCR results for ad-related keywords.
+
+        THE single source of truth for keyword matching. OCRProcess
+        (src/ocr_worker.py) delegates here — production hit repeated
+        "keyword-pattern drift" bugs while it kept its own copy (see
+        CLAUDE.md, OCR Worker Keyword-Pattern Drift), so do NOT
+        reintroduce a second implementation.
 
         Returns:
             Tuple of (found_ad, matched_keywords, all_texts, is_terminal)
@@ -570,21 +589,21 @@ class PaddleOCR:
             # This prevents Minus overlay text from triggering false positives
             is_excluded = (
                 any(excl in text_lower or excl.replace(' ', '') in text_clean
-                    for excl in self.AD_EXCLUSIONS)
-                or self.SKIP_INTRO_FUZZY_RE.search(text_lower) is not None
+                    for excl in cls.AD_EXCLUSIONS)
+                or cls.SKIP_INTRO_FUZZY_RE.search(text_lower) is not None
             )
             if is_excluded:
                 continue  # Skip all pattern matching for this text element
 
             # Check exact phrase keywords (can appear anywhere)
-            for keyword in self.AD_KEYWORDS_EXACT:
+            for keyword in cls.AD_KEYWORDS_EXACT:
                 keyword_clean = ''.join(c for c in keyword if c.isalnum())
                 if keyword in text_lower or keyword_clean in text_clean:
                     matched.append((keyword, text))
                     break
 
             # Check word-boundary keywords (must be whole word)
-            for keyword in self.AD_KEYWORDS_WORD:
+            for keyword in cls.AD_KEYWORDS_WORD:
                 # Use word boundary regex
                 pattern = r'\b' + re.escape(keyword) + r'\b'
                 if re.search(pattern, text_lower):
@@ -600,6 +619,13 @@ class PaddleOCR:
                 matched.append(('skip ad (fuzzy-spad)', text))
             if 'foad' in text_clean and len(text_clean) < 10:  # Short text with foad
                 matched.append(('skip ad (fuzzy-foad)', text))
+
+            # Fuzzy "Sponsored" — OCR drops/mangles interior letters on
+            # stylized ad chyrons ("Sponoed", "Sponsoed", "Sponsred").
+            # Guards: (?<!re) rejects (cor)responded, (?!ged) rejects sponged.
+            if ('sponsored' not in text_clean
+                    and re.search(r'(?<!re)spon(?!ged)[a-z]{0,3}ed', text_clean)):
+                matched.append(('sponsored (fuzzy)', text))
 
             # Fuzzy matches for "Shop now" - frequently misread
             if 'shopnow' in text_clean or 'shpnow' in text_clean:
@@ -641,8 +667,8 @@ class PaddleOCR:
             # Check exclusions for combined text too
             is_combined_excluded = (
                 any(excl in combined or excl.replace(' ', '') in combined_clean
-                    for excl in self.AD_EXCLUSIONS)
-                or self.SKIP_INTRO_FUZZY_RE.search(combined) is not None
+                    for excl in cls.AD_EXCLUSIONS)
+                or cls.SKIP_INTRO_FUZZY_RE.search(combined) is not None
             )
             if not is_combined_excluded:
                 has_ad_word = re.search(r'\bad\b', combined) or re.search(r'ad[0-9oOlIi][:;.]', combined)
@@ -651,7 +677,7 @@ class PaddleOCR:
                     matched.append(('ad with timestamp (cross-element)', combined[:50]))
 
         # Check if this appears to be terminal content
-        is_terminal = self.is_terminal_content(all_texts)
+        is_terminal = cls.is_terminal_content(all_texts)
 
         return len(matched) > 0, matched, all_texts, is_terminal
 

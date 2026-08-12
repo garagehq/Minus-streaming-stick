@@ -3042,3 +3042,105 @@ ldconfig'
 
 If the box ever gets re-imaged from the same source the symlinks may
 break again; the snippet above is idempotent.
+
+### Silent HDMI-TX audio after boot/recovery — post-modeset re-prepare (Aug 2026)
+
+**Symptom:** video passthrough works, every internal audio signal is green
+(pipeline PLAYING, buffers flowing, `recent_level` showing real content,
+unmuted, ALSA playback `state: RUNNING`, `hw_ptr` advancing, jack on, ELD
+ok) — but the TV plays no sound. Survives indefinitely; the buffer-flow
+watchdog never fires because nothing it can observe is wrong.
+
+**Root cause:** the rockchip HDMI-TX driver programs its audio lane
+(audio infoframe + audio clock regen) only at PCM *prepare* time. During
+signal recovery / boot, `start_display_pipeline` starts the video
+pipeline (modeset) and the audio pipeline within the same second; if the
+PCM opens while the TX link is still training, the stream plays into a
+dead audio lane and never self-heals. This is the same mechanism behind
+the old "Restart audio pipeline (required after TV power cycle)" note in
+the DPMS fix — only nothing re-ran that restart on the ordinary
+signal-recovery path.
+
+**Fix (`minus.py::_schedule_audio_reprepare`):** one-shot delayed (4s)
+`audio.restart()` scheduled after every display-pipeline bring-up
+(`start_display_pipeline` success path and `_on_hdmi_restored` resume
+path). Closing/reopening the PCM after the link settles re-programs the
+TX audio lane. Skipped when playback is on fakesink (TV off). Costs
+~1-2s of audio right after events where audio was down anyway.
+
+**Recovery/diagnosis tooling (Home tab):** *Check Audio* button →
+`GET /api/audio/check` (`AudioPassthrough.get_diagnostics()`: pipeline
+state, mute, buffer age, capture RMS, kernel-side ALSA state, fakesink
+flag, verdict); *Restart Audio* button → `POST /api/audio/restart`
+(`AudioPassthrough.restart()`, no backoff penalty). Also fixed
+`/api/audio/status` reading the nonexistent `_muted` attr (always False);
+it now reads `is_muted`.
+
+### OCR keyword lists unified — worker drift eliminated (Aug 2026)
+
+**Symptom (live):** a real Netflix static ad card reading "Sponsored |
+BEEF | Skip | 90+" produced ZERO OCR matches — only VLM saw the ad. The
+boot log ("OCR watching for ad keywords: [... 'skip', 'sponsor', ...]")
+printed `PaddleOCR`'s rich list, but production matching ran
+`OCRProcess.check_ad_keywords`'s SEPARATE stale copy whose word list was
+just `['ad', 'ads']` — no 'skip', 'sponsor', 'promoted', 'patroci', no
+Spanish keywords.
+
+**Fix:** the duplicate is GONE (the "deeper fix" promised in *OCR Worker
+Keyword-Pattern Drift*). `PaddleOCR.check_ad_keywords` /
+`is_terminal_content` are now classmethods and THE single source of
+truth; `OCRProcess.check_ad_keywords` is a two-line delegation. The
+class lists were merged as the UNION of both copies (they had drifted
+BOTH ways — ocr.py was missing 'skip in', 'learn more', 'video will play
+after ad', bare 'ad'/'ads', and the 'skip credits'/'add to' exclusions
+that minus.py's strong/weak keyword-name sets and the worker relied on).
+Also new: `sponsored (fuzzy)` matcher (`(?<!re)spon(?!ged)[a-z]{0,3}ed`
+on cleaned text — catches OCR misreads like "Sponoed"; guards reject
+"responded"/"sponged"), added to `STRONG_AD_KEYWORD_NAMES` (same signal
+as 'sponsored') but excluded from `DEFINITIVE_AD_KEYWORD_NAMES` (keeps
+the 2-frame dwell, same rationale as exact 'sponsored').
+
+### Frozen-early safeguard killed real static ads (Aug 2026)
+
+**Symptom (live):** the same Netflix "Sponsored | Skip | 90+" card — a
+real ad whose on-screen text legitimately never changes — was blocked
+for 0.5s, then `[SAFEGUARD] Force-stopping vlm block after 1s — OCR text
+frozen 36s`, then freeze-suppressed while the ad played on unblocked.
+
+**Root cause:** `_hit_frozen` checked only the GLOBAL frozen-text timer,
+which accumulates while NOT blocking. CLAUDE.md documented the intent as
+"a block has been active with frozen OCR text for ≥30s" but the
+implementation dropped the block-relative half — so a block starting on
+an already-static ad was killed on its first safeguard evaluation.
+
+**Fix:** `_hit_frozen` now requires BOTH `_ocr_text_frozen_for ≥ 30s`
+AND `blocking_elapsed ≥ 30s`, plus an **audio veto**: if capture
+`recent_level ≥ 0.01` (real audio content — ad music/voiceover), the
+frozen-early stop is skipped entirely; a genuinely stuck upstream stream
+is silent, and `MAX_BLOCKING_DURATION` (150s) still bounds any case the
+veto lets through. Consequence: a static promo WITH autoplay audio is
+now bounded at 150s (was 30s) — accepted trade for correctly holding
+blocks on real static ad cards.
+
+### Replacement-mode toggles ignored until restart (Aug 2026)
+
+**Symptom:** user disabled "Did You Know" facts in Settings → next ad
+break still showed a fact card; only a service restart made the toggle
+stick.
+
+**Root cause:** the per-ad-break style lock + 30s cooldown
+(`_locked_content_kind` / `_content_kind_lock_until`) reused the locked
+kind at the next block start WITHOUT validating it against the current
+`replacement_modes` — ad pods arrive in <30s clusters, so the stale
+'fact' lock kept winning. Two lesser holes: `_pick_content_kind` fell
+back to the UNFILTERED kind list when no lock was set, and the fallback
+default in `_get_enabled_replacement_modes` still listed removed
+'haiku'.
+
+**Fix:** (1) block-start reuse now requires the locked kind ∈ enabled
+modes; (2) `Minus.set_replacement_modes` calls the new
+`ad_blocker.invalidate_replacement_lock()` which re-rolls a
+no-longer-enabled locked kind immediately (applies mid-block at the next
+rotation); (3) `_pick_content_kind` with no lock rolls via
+`_roll_replacement_mode` (honours enabled modes) instead of the raw
+kind list.

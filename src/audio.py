@@ -34,6 +34,7 @@ Architecture:
 import gc
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -1140,6 +1141,95 @@ class AudioPassthrough:
                 self.bus = None
         finally:
             self._lock.release()
+
+    def restart(self, reason="manual"):
+        """Force a full pipeline rebuild (web UI button / post-modeset re-prepare).
+
+        Closing and reopening the ALSA playback device is what makes the
+        rockchip HDMI-TX driver re-program its audio lane (audio infoframe +
+        clock regen). That re-programming only happens at PCM prepare time,
+        so a stream that was opened while the TX link was still training
+        (TV power-on / video modeset race) plays into a dead audio lane
+        forever — buffers flow, hw_ptr advances, but the TV hears nothing.
+        The buffer-flow watchdog cannot see that state; a rebuild fixes it.
+
+        Returns a dict for the web UI. The actual restart runs in a
+        background thread (~1-2s audio dropout).
+        """
+        if not self.is_running:
+            return {'success': False, 'error': 'Audio not running'}
+        if self._restart_in_progress:
+            return {'success': True, 'message': 'Restart already in progress'}
+        logger.info(f"[AudioPassthrough] Pipeline restart requested ({reason})")
+        # A requested restart is not a failure — skip the backoff penalty
+        # so the rebuild happens after the base delay (~1s), not 2^n.
+        self._consecutive_failures = 0
+        threading.Thread(target=self._restart_pipeline, daemon=True,
+                         name="audio-manual-restart").start()
+        return {'success': True, 'message': 'Audio pipeline restarting (~1-2s dropout)'}
+
+    def get_diagnostics(self):
+        """End-to-end audio health check for the web UI Check Audio button.
+
+        Walks the chain capture -> pipeline -> mute -> ALSA playback device
+        and returns a verdict plus the raw signals, so silent-audio problems
+        can be triaged from the Home tab without shell access.
+        """
+        status = self.get_status()
+        diag = dict(status)
+        diag['is_running'] = self.is_running
+        diag['capture_device'] = self.capture_device
+        diag['playback_device'] = self.playback_device
+        diag['playback_fakesink'] = bool(getattr(self, '_playback_fakesink', False))
+
+        # Kernel-side view of the playback PCM (authoritative — GStreamer
+        # state can lie when PipeWire or a dead thread is involved).
+        alsa_state = 'unknown'
+        try:
+            m = re.match(r'hw:(\d+),(\d+)', self.playback_device or '')
+            if m:
+                path = f"/proc/asound/card{m.group(1)}/pcm{m.group(2)}p/sub0/status"
+                with open(path) as f:
+                    content = f.read()
+            else:
+                content = ''
+            sm = re.search(r'state:\s*(\w+)', content)
+            if sm:
+                alsa_state = sm.group(1)
+        except Exception:
+            alsa_state = 'unavailable'
+        diag['alsa_playback_state'] = alsa_state
+
+        problems = []
+        if not self.is_running:
+            problems.append('audio passthrough is not running')
+        elif status.get('state') != 'playing':
+            problems.append(f"pipeline not playing (state: {status.get('state')})")
+        if diag['playback_fakesink']:
+            problems.append('TV (HDMI-TX) disconnected — playback routed to fakesink')
+        age = status.get('last_buffer_age', -1)
+        if age is not None and (age < 0 or age > 3.0):
+            problems.append('no audio buffers flowing from HDMI input')
+        if status.get('muted'):
+            problems.append('audio is muted (ad block active or stuck mute)')
+        if alsa_state != 'RUNNING' and not diag['playback_fakesink'] and self.is_running:
+            problems.append(f'ALSA playback device not running (state: {alsa_state})')
+
+        # Everything green but the source itself is quiet — not a fault,
+        # but worth surfacing (paused video, menu without autoplay, etc.).
+        source_silent = (not problems
+                         and status.get('recent_level', 0.0) < 0.01)
+        diag['source_silent'] = source_silent
+
+        diag['problems'] = problems
+        diag['ok'] = not problems
+        if problems:
+            diag['verdict'] = problems[0]
+        elif source_silent:
+            diag['verdict'] = 'audio path healthy — source is currently silent'
+        else:
+            diag['verdict'] = 'audio path healthy — sound is flowing to the TV'
+        return diag
 
     def reset_av_sync(self):
         """Manually reset A/V sync by flushing the sync queue.
