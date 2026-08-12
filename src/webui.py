@@ -2460,7 +2460,7 @@ class WebUI:
         def api_vlm_enable():
             """Enable VLM and load the model to the Axera NPU.
 
-            This loads the LFM2.5-VL-450M model which takes ~9-11 seconds.
+            This loads the minus-v0.1 model which takes ~9-11 seconds.
             An overlay notification will show loading progress.
             """
             try:

@@ -2591,7 +2591,7 @@ class Minus:
 
         vlm_loaded = False
         for attempt in range(1, 4):
-            logger.info(f"Loading VLM model (LFM2.5-VL-450M)... attempt {attempt}/3")
+            logger.info(f"Loading VLM model (minus-v0.1)... attempt {attempt}/3")
             try:
                 if self.vlm.load_model():
                     logger.info("VLM model loaded successfully")
