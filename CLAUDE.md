@@ -1075,7 +1075,7 @@ VLM preload loads the model at startup before HDMI signal arrives (configurable 
 - `GET /api/autonomous/logs` - Recent log entries
 - `GET/POST /api/settings/vlm-preload` - VLM preload toggle
 - `GET/POST /api/settings/optimization` - Toggle block-duration falloff, HDMI reconnect grace, and greyscale preview. POST body: `{"key": "block_falloff"|"hdmi_reconnect_grace"|"greyscale_preview", "enabled": true|false}`. Persisted to `~/.minus_system_settings.json`. Setting `greyscale_preview` here propagates to the running ad_blocker immediately via `/blocking/set?preview_grayscale=...` so the current block updates on the fly.
-- `GET/POST /api/settings/replacement-modes` - Which content kinds the blocking overlay rolls into. POST body: `{"modes": ["vocab","fact","haiku","photos"]}`. Server enforces at least one text kind (vocab/fact/haiku) remains enabled. Persisted with the rest of system settings.
+- `GET/POST /api/settings/replacement-modes` - Which content kinds the blocking overlay rolls into. POST body: `{"modes": ["vocab","fact","photos"]}`. Photos-only is allowed (the roll falls back to vocab at runtime if the photo pool is empty); only a fully-empty selection forces `vocab` back on. Persisted with the rest of system settings.
 - `GET/POST /api/media/photos` - List all uploaded photos (GET) or upload a new one (POST multipart with `file` field). Server re-encodes to JPEG (max 1920px long edge, quality 85) under `~/.minus_media/photos/`. Count cap 200, size cap 200 MB (oldest evicted on add).
 - `GET/DELETE /api/media/photos/<id>` - Download JPEG bytes inline (GET) or remove by id (DELETE). Id is sanitized to hex to prevent path traversal.
 

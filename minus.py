@@ -2572,14 +2572,15 @@ class Minus:
     def set_replacement_modes(self, modes: list) -> dict:
         """Persist the user's replacement-mode selection.
 
-        At least one text kind must remain enabled; if the caller tried to
-        disable every text option we force ``vocab`` back on so the overlay
-        has *something* to show when photos run out or aren't enabled.
+        Photos-only IS allowed (the roll in
+        ad_blocker._roll_replacement_mode falls back to vocab at runtime
+        if the photo pool is empty, so there is no risk of a blank
+        overlay). Only a completely empty selection forces ``vocab`` back
+        on — the overlay must have *something* to roll.
         """
         allowed = {'vocab', 'fact', 'photos'}
         cleaned = [m for m in (modes or []) if m in allowed]
-        text_kinds = {'vocab', 'fact'}
-        if not any(m in text_kinds for m in cleaned):
+        if not cleaned:
             cleaned.append('vocab')
         self._system_settings['replacement_modes'] = sorted(set(cleaned))
         self._save_system_settings()

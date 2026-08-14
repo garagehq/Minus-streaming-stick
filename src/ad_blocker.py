@@ -1415,6 +1415,13 @@ class DRMAdBlocker:
             header = "[ BLOCKING ]"
 
         kind = self._pick_content_kind()
+        if kind == 'photos':
+            # Photo-screensaver mode hides the big text card entirely; the
+            # rotation loop supplies the photo backgrounds. Falling through
+            # to vocab here (the pre-Aug-2026 behavior) made block-start and
+            # mid-block source-change updates flash a vocab card into a
+            # photos block — visible as vocab/photos flipping.
+            return ""
         if kind == 'fact':
             return self._render_fact(header)
         return self._render_vocab(header)

@@ -2646,8 +2646,8 @@ class WebUI:
             """Get or set which replacement-mode kinds are enabled.
 
             GET returns the list; POST takes ``{"modes": ["vocab","photos"]}``
-            and persists it via Minus.set_replacement_modes (which enforces
-            at least one text kind).
+            and persists it via Minus.set_replacement_modes. Photos-only is
+            allowed; only a fully-empty selection forces vocab back on.
             """
             try:
                 if request.method == 'GET':

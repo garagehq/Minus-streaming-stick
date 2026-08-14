@@ -1379,12 +1379,13 @@ class TestMinusReplacementModesLogic(unittest.TestCase):
         result = stub.set_replacement_modes([])
         self.assertIn('vocab', result['replacement_modes'])
 
-    def test_photos_only_still_gets_vocab(self):
-        """User picks only photos → vocab is added as the text fallback."""
+    def test_photos_only_is_allowed(self):
+        """Photos-only must persist as-is — the runtime roll falls back to
+        vocab if the photo pool is empty, so the setting layer must not
+        force a text kind back on (it made photos-only untestable)."""
         stub = self._make()
         result = stub.set_replacement_modes(['photos'])
-        self.assertIn('vocab', result['replacement_modes'])
-        self.assertIn('photos', result['replacement_modes'])
+        self.assertEqual(result['replacement_modes'], ['photos'])
 
     def test_unknown_kinds_stripped(self):
         stub = self._make()
