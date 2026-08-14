@@ -16,8 +16,13 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, PropertyMock
 from dataclasses import dataclass
 
-# Add src to path
+# Add src to path, plus the repo root — src/webui.py (and friends) do
+# `from src.xxx import ...` at import time, which resolves in production
+# (minus.py runs from the repo root) but not under script-mode test runs
+# whose sys.path[0] is tests/. Without the root, all webui tests silently
+# skip with "No module named 'src'".
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Try to import numpy, skip image tests if not available
 try:
@@ -1246,10 +1251,10 @@ class TestWebUI:
         ui = WebUI(mock_minus)
 
         with ui.app.test_client() as client:
-            # 0 and 61 are out of range
+            # Valid range is 1-600 minutes (cap raised 60→600 in May 2026)
             response = client.post('/api/pause/0')
             assert response.status_code == 400
-            response = client.post('/api/pause/61')
+            response = client.post('/api/pause/601')
             assert response.status_code == 400
 
     def test_webui_new_routes_registered(self):
@@ -1355,7 +1360,9 @@ class TestWebUI:
         from webui import WebUI
         mock_minus = MagicMock()
         mock_audio = MagicMock()
-        mock_audio._muted = False
+        # The route reads `is_muted` (the real AudioPassthrough attr);
+        # `_muted` never existed and the route was fixed in Aug 2026.
+        mock_audio.is_muted = False
         mock_minus.audio = mock_audio
         ui = WebUI(mock_minus)
 
@@ -4156,8 +4163,8 @@ class TestInputValidation:
         ui = WebUI(mock_minus)
 
         with ui.app.test_client() as client:
-            # Test duration too high
-            response = client.post('/api/pause/100')
+            # Test duration too high (valid range is 1-600 minutes)
+            response = client.post('/api/pause/601')
             assert response.status_code == 400
 
             # Test duration too low

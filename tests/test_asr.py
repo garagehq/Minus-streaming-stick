@@ -39,6 +39,10 @@ import numpy as np
 
 REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO / 'src'))
+# Repo root too: the decision-engine tests `import minus`, which only
+# resolves under `python3 -m unittest tests.test_asr` (cwd on path).
+# This makes script-mode `python3 tests/test_asr.py` work identically.
+sys.path.insert(0, str(REPO))
 
 
 # =============================================================================
@@ -497,18 +501,24 @@ class TestAudioPipelineShape(unittest.TestCase):
         # alsasink is dynamic; not given a name in the pipeline
     ]
 
-    def _build(self, with_tap):
+    def _build(self, with_tap, tx_connected=True):
         # We can't actually start GStreamer in tests reliably, but we
         # CAN construct the pipeline_str by patching parse_launch to
         # capture it. The shape is purely a function of the pipeline
         # string, which is what we care about.
+        # _hdmi_tx_connected is pinned (default: TV present) because on a
+        # headless box the real sysfs probe returns disconnected, which
+        # legitimately swaps alsasink for fakesink and would make these
+        # shape assertions depend on the host's HDMI state.
         from audio import AudioPassthrough
         captured = {}
         def fake_parse_launch(s):
             captured['str'] = s
             raise RuntimeError("fake-parse-launch (test)")
         with patch('audio.Gst.parse_launch', side_effect=fake_parse_launch), \
-             patch('audio.detect_hdmi_capture_device', return_value='hw:4,0'):
+             patch('audio.detect_hdmi_capture_device', return_value='hw:4,0'), \
+             patch.object(AudioPassthrough, '_hdmi_tx_connected',
+                          return_value=tx_connected):
             ap = AudioPassthrough(
                 capture_device='hw:4,0', playback_device='hw:0,0',
                 asr_tap=MagicMock() if with_tap else None
@@ -550,6 +560,16 @@ class TestAudioPipelineShape(unittest.TestCase):
         self.assertEqual(playback_chunk(no_tap), playback_chunk(with_tap),
                          "playback branch changed between no-tap and tap pipelines — "
                          "audio recovery / watchdog assumptions may have broken")
+
+    def test_tx_disconnected_falls_back_to_fakesink(self):
+        """With HDMI-TX off, playback must route to fakesink (keeping
+        HDMI-RX capture + the ASR tap alive) and never open alsasink."""
+        s = self._build(with_tap=True, tx_connected=False)
+        self.assertIn('fakesink', s)
+        self.assertNotIn('alsasink', s)
+        # The capture + tap side must survive the fallback.
+        self.assertIn('alsasrc', s)
+        self.assertIn('asr_sink', s)
 
     def test_tap_branch_is_leaky(self):
         """Slow whisper must NOT backpressure the tee → must NOT delay

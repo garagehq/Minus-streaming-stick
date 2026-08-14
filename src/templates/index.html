@@ -3699,55 +3699,83 @@
         document.addEventListener('mouseup', onEnd);
     }
 
-    async function completeSwipe(direction) {
-        const card = document.querySelector('.review-card:not(.stack-1):not(.stack-2)');
+    // Review actions (swipe approve/classify + undo) serialize their server
+    // calls through this promise chain. Without it, undoReview() could reach
+    // the server while a swipe's POST was still in flight: the server popped
+    // its undo stack, but the client's reviewIndex hadn't advanced yet
+    // (the old completeSwipe only incremented AFTER its fetch resolved), so
+    // `reviewIndex > 0` was false and the counter never moved back —
+    // client/server desync visible as "Undo does nothing" under load.
+    let reviewActionChain = Promise.resolve();
+    function queueReviewAction(fn) {
+        reviewActionChain = reviewActionChain.then(fn, fn);
+        return reviewActionChain;
+    }
+
+    function completeSwipe(direction) {
+        // Exclude cards already flying so a rapid second swipe (before the
+        // 80ms re-render) is dropped instead of double-classifying the same
+        // item with a stale index.
+        const card = document.querySelector('.review-card:not(.stack-1):not(.stack-2):not(.fly-right):not(.fly-left)');
         if (!card) return;
 
         const item = reviewItems[reviewIndex];
+        if (!item) return;
         card.classList.add(`fly-${direction}`);
 
-        if (direction === 'right') {
-            reviewStats.right++;
-            if (reviewConfig.rightAction === 'approve') {
-                await fetch('/api/screenshots/approve', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename: item.name, category: reviewCategory })
-                });
+        const category = reviewCategory;
+        const rightAction = reviewConfig.rightAction;
+        const leftTarget = reviewConfig.leftTarget;
+
+        // Advance synchronously so undo can never observe a stale index;
+        // the server call is queued behind any prior in-flight action.
+        reviewIndex++;
+        if (direction === 'right') reviewStats.right++;
+        else reviewStats.left++;
+
+        queueReviewAction(async () => {
+            if (direction === 'right') {
+                if (rightAction === 'approve') {
+                    await fetch('/api/screenshots/approve', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filename: item.name, category: category })
+                    });
+                } else {
+                    // classify_ads - move to ads
+                    await fetch('/api/screenshots/classify', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filename: item.name, source: category, target: 'ads' })
+                    });
+                }
             } else {
-                // classify_ads - move to ads
                 await fetch('/api/screenshots/classify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename: item.name, source: reviewCategory, target: 'ads' })
+                    body: JSON.stringify({ filename: item.name, source: category, target: leftTarget })
                 });
             }
-        } else {
-            reviewStats.left++;
-            await fetch('/api/screenshots/classify', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: item.name, source: reviewCategory, target: reviewConfig.leftTarget })
-            });
-        }
+        });
 
-        reviewIndex++;
         setTimeout(() => {
             renderReviewStack();
             updateReviewCounter();
         }, 80);  // Fast for rapid swiping
     }
 
-    async function undoReview() {
-        const resp = await fetch('/api/screenshots/undo', { method: 'POST' });
-        const data = await resp.json();
-        if (data.success && reviewIndex > 0) {
-            reviewIndex--;
-            if (data.undone.action === 'classify') reviewStats.left--;
-            else reviewStats.right--;
-            renderReviewStack();
-            updateReviewCounter();
-        }
+    function undoReview() {
+        queueReviewAction(async () => {
+            const resp = await fetch('/api/screenshots/undo', { method: 'POST' });
+            const data = await resp.json();
+            if (data.success && reviewIndex > 0) {
+                reviewIndex--;
+                if (data.undone.action === 'classify') reviewStats.left--;
+                else reviewStats.right--;
+                renderReviewStack();
+                updateReviewCounter();
+            }
+        });
     }
 
     // Keyboard shortcuts for review modal

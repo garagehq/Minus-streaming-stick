@@ -63,13 +63,25 @@ def swipe_card(page, direction='right', distance=150):
 
 
 def open_review_modal(page, category_index=0):
-    """Open the review modal for a category by clicking the review button."""
+    """Open the review modal for a category by clicking the review button.
+
+    Waits on selectors rather than fixed sleeps: on a loaded box (OCR/VLM
+    inference running) the Screenshots tab can take >800ms to render, and a
+    fixed sleep made every test using this helper flaky.
+    """
     page.click('text=Screenshots')
-    page.wait_for_timeout(800)
+    try:
+        page.wait_for_selector('.review-btn', timeout=10000)
+    except Exception:
+        return False
     review_btns = page.query_selector_all('.review-btn')
     if len(review_btns) > category_index:
         review_btns[category_index].click()
-        page.wait_for_timeout(1500)
+        try:
+            page.wait_for_selector('#review-modal.open', timeout=10000)
+        except Exception:
+            return False
+        page.wait_for_timeout(700)  # let the card stack render/settle
         return True
     return False
 
@@ -222,10 +234,16 @@ class TestReviewModalDesktop(unittest.TestCase):
         self.page.wait_for_timeout(600)
         counter_after_swipe = self.page.query_selector('#review-counter').inner_text()
 
-        # Undo
+        # Undo. The undo server call is queued behind the swipe's POST, so
+        # under load (e.g. VLM model loading) it can take >600ms — poll for
+        # the counter change instead of a fixed sleep.
         self.page.click('.review-undo-btn')
-        self.page.wait_for_timeout(600)
-        counter_after_undo = self.page.query_selector('#review-counter').inner_text()
+        counter_after_undo = counter_after_swipe
+        for _ in range(20):
+            self.page.wait_for_timeout(250)
+            counter_after_undo = self.page.query_selector('#review-counter').inner_text()
+            if counter_after_undo != counter_after_swipe:
+                break
 
         self.assertNotEqual(counter_after_swipe, counter_after_undo, "Undo should reverse position")
 
@@ -365,10 +383,15 @@ class TestReviewModalMobile(unittest.TestCase):
         self.page.keyboard.press('ArrowRight')
         self.page.wait_for_timeout(600)
 
+        # The undo server call queues behind the swipe's POST; poll instead
+        # of a fixed sleep so a slow POST under load doesn't flake the test.
         self.page.click('.review-undo-btn')
-        self.page.wait_for_timeout(600)
-
-        counter = self.page.query_selector('#review-counter').inner_text()
+        counter = ''
+        for _ in range(20):
+            self.page.wait_for_timeout(250)
+            counter = self.page.query_selector('#review-counter').inner_text()
+            if '1 of' in counter:
+                break
         self.assertIn('1 of', counter, "Should be back to first card after undo")
 
 
