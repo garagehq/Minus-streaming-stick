@@ -756,7 +756,7 @@ class TestStateManagement(unittest.TestCase):
         status = self.mode.get_status()
         expected_keys = {
             "enabled", "active", "manual_override", "is_scheduled_time",
-            "always_on", "start_hour", "end_hour", "schedule",
+            "always_on", "music_mode", "start_hour", "end_hour", "schedule",
             "current_time_et", "next_window_start", "next_window_end",
             "time_until_window", "fire_tv_connected", "device_type",
             "device_connected", "stats",
@@ -2099,6 +2099,147 @@ class TestShortsDetection(unittest.TestCase):
             mode._frame_capture.capture.return_value = self._pillarboxed_frame()
             self.assertFalse(mode._is_youtube_shorts())
             mode._frame_capture.capture.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
+
+class TestMusicMode(unittest.TestCase):
+    """Tests for the music-videos toggle: persistence, seed deep-link
+    launching, and OCR-evidence drift steering."""
+
+    def test_default_off(self):
+        mode = _make_mode()
+        try:
+            self.assertFalse(mode._music_mode)
+            self.assertFalse(mode.get_status()["music_mode"])
+        finally:
+            _cleanup_mode(mode)
+
+    def test_set_music_mode_persists(self):
+        mode = _make_mode()
+        try:
+            with patch("autonomous_mode.SETTINGS_FILE", Path(mode._test_settings_path)):
+                result = mode.set_music_mode(True)
+                self.assertTrue(result["music_mode"])
+                with open(mode._test_settings_path) as f:
+                    saved = json.load(f)
+                self.assertTrue(saved["music_mode"])
+
+                result = mode.set_music_mode(False)
+                self.assertFalse(result["music_mode"])
+        finally:
+            _cleanup_mode(mode)
+
+    def test_launch_uses_seed_when_music_mode_on(self):
+        """_launch_youtube deep-links a rotating seed when music mode is on."""
+        mode = _make_mode(fire_tv_connected=True)
+        try:
+            ctrl = mode._device_controller
+            ctrl.launch_app_with_content = MagicMock(return_value=True)
+            mode._music_mode = True
+            with patch("autonomous_mode.time.sleep"):
+                self.assertTrue(mode._launch_youtube())
+                self.assertTrue(mode._launch_youtube())
+            calls = ctrl.launch_app_with_content.call_args_list
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0].args[0], 'youtube')
+            # Seeds rotate — consecutive launches use different videos
+            self.assertNotEqual(calls[0].args[1], calls[1].args[1])
+            self.assertIn(calls[0].args[1], mode.MUSIC_VIDEO_SEEDS)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_launch_falls_back_without_deep_link_support(self):
+        """Controllers without launch_app_with_content fall through to the
+        plain launch path (spec'd mock has no such attr)."""
+        mode = _make_mode(fire_tv_connected=True)
+        try:
+            ctrl = MagicMock(spec=['is_connected', 'send_command', 'launch_app'])
+            ctrl.is_connected.return_value = True
+            ctrl.launch_app.return_value = True
+            mode.set_device_controller(ctrl, 'roku')
+            mode._music_mode = True
+            with patch("autonomous_mode.time.sleep"):
+                self.assertTrue(mode._launch_youtube())
+            ctrl.launch_app.assert_called_once_with('youtube')
+        finally:
+            _cleanup_mode(mode)
+
+    def test_launch_plain_when_music_mode_off(self):
+        mode = _make_mode(fire_tv_connected=True)
+        try:
+            ctrl = mode._device_controller
+            ctrl.launch_app_with_content = MagicMock(return_value=True)
+            ctrl.launch_app = MagicMock(return_value=True)
+            mode.set_device_controller(ctrl, 'roku')
+            with patch("autonomous_mode.time.sleep"):
+                mode._launch_youtube()
+            ctrl.launch_app_with_content.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
+    def test_drift_ignores_no_text_cycles(self):
+        """Cycles with no meaningful OCR text are neutral, not misses."""
+        mode = _make_mode()
+        try:
+            mode._music_mode = True
+            mode._ad_blocker.is_visible = False
+            mode._ad_blocker.last_ocr_texts = []
+            for _ in range(10):
+                self.assertFalse(mode._check_music_drift())
+            self.assertEqual(mode._music_no_evidence_checks, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_drift_resets_on_music_evidence(self):
+        mode = _make_mode()
+        try:
+            mode._music_mode = True
+            mode._ad_blocker.is_visible = False
+            mode._music_no_evidence_checks = 3
+            self.assertFalse(mode._check_music_drift(
+                force_text="Luis Fonsi - Despacito ft. Daddy Yankee (Official Video)"))
+            self.assertEqual(mode._music_no_evidence_checks, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_drift_steers_after_threshold(self):
+        """Repeated info-bearing non-music text triggers a seed re-launch."""
+        mode = _make_mode(fire_tv_connected=True)
+        try:
+            ctrl = mode._device_controller
+            ctrl.launch_app_with_content = MagicMock(return_value=True)
+            mode._music_mode = True
+            mode._ad_blocker.is_visible = False
+            non_music = "Inside The Ocean's Greatest Engineering Marvels 69K views"
+            with patch("autonomous_mode.time.sleep"):
+                for i in range(mode._MUSIC_STEER_AFTER - 1):
+                    self.assertFalse(mode._check_music_drift(force_text=non_music))
+                self.assertTrue(mode._check_music_drift(force_text=non_music))
+            ctrl.launch_app_with_content.assert_called_once()
+            self.assertEqual(mode._music_no_evidence_checks, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_drift_skipped_during_ad_block(self):
+        """Ad copy on screen says nothing about the underlying video."""
+        mode = _make_mode()
+        try:
+            mode._music_mode = True
+            mode._ad_blocker.is_visible = True
+            self.assertFalse(mode._check_music_drift(
+                force_text="Shop now at example.com limited time offer"))
+            self.assertEqual(mode._music_no_evidence_checks, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_drift_noop_when_music_mode_off(self):
+        mode = _make_mode()
+        try:
+            mode._ad_blocker.is_visible = False
+            self.assertFalse(mode._check_music_drift(
+                force_text="Some documentary title 1M views"))
+            self.assertEqual(mode._music_no_evidence_checks, 0)
         finally:
             _cleanup_mode(mode)
 

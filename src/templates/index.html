@@ -744,6 +744,13 @@
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
+                    <div class="setting-item" title="Steer playback toward music videos using OCR/VLM — music videos carry far more ads, so more training data per hour">
+                        <span class="setting-label">Music Videos</span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="auto-music-mode" onchange="toggleAutonomousMusicMode(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
                 </div>
                 <div class="autonomous-status" id="autonomous-status-info">
                     <span class="status-text">Status: <span id="autonomous-status-text">Loading...</span></span>
@@ -2394,6 +2401,26 @@
             }
         }
 
+        async function toggleAutonomousMusicMode(enabled) {
+            if (autonomousUIUpdating) return;
+            try {
+                const response = await fetch('/api/autonomous/music-mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+                const data = await response.json();
+                if (data.music_mode !== undefined) {
+                    updateAutonomousModeUI(data);
+                } else {
+                    document.getElementById('auto-music-mode').checked = !enabled;
+                }
+            } catch (error) {
+                document.getElementById('auto-music-mode').checked = !enabled;
+                console.error('Music mode toggle error:', error);
+            }
+        }
+
         async function startAutonomousModeNow() {
             const btn = document.getElementById('autonomous-start-btn');
             btn.disabled = true;
@@ -2456,6 +2483,8 @@
             if (data.start_hour !== undefined) startHour.value = data.start_hour;
             if (data.end_hour !== undefined) endHour.value = data.end_hour;
             if (data.always_on !== undefined) alwaysOn.checked = data.always_on;
+            const musicMode = document.getElementById('auto-music-mode');
+            if (musicMode && data.music_mode !== undefined) musicMode.checked = data.music_mode;
 
             // Hide schedule row when 24/7 mode is enabled
             const scheduleRow = document.getElementById('schedule-time-row');

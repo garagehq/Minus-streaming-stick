@@ -3190,6 +3190,22 @@ class WebUI:
                 logger.error(f"Error toggling night mode: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
+        @self.app.route('/api/autonomous/music-mode', methods=['POST'])
+        def api_autonomous_music_mode():
+            """Toggle music mode - steer autonomous playback toward music
+            videos (higher ad density = more training data per hour)."""
+            try:
+                data = request.get_json() or {}
+                enabled = bool(data.get('enabled', False))
+                if hasattr(self.minus, 'autonomous_mode') and self.minus.autonomous_mode:
+                    result = self.minus.autonomous_mode.set_music_mode(enabled)
+                    logger.info(f"[WebUI] Autonomous music mode: {enabled}")
+                    return jsonify(result)
+                return jsonify({'success': False, 'error': 'Autonomous mode not initialized'}), 500
+            except Exception as e:
+                logger.error(f"Error setting music mode: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
         @self.app.route('/api/autonomous/start', methods=['POST'])
         def api_autonomous_start():
             """Start night mode immediately (manual override)."""

@@ -510,6 +510,40 @@ class RokuController:
             logger.error(f"[Roku] App launch error: {e}")
             return False
 
+    def launch_app_with_content(self, app_name: str, content_id: str) -> bool:
+        """Launch an app deep-linked to a specific content item.
+
+        For YouTube (app 837), content_id is a plain video id — ECP
+        `/launch/837?contentId=<id>` starts that video playing directly.
+
+        Args:
+            app_name: App name (e.g., 'youtube')
+            content_id: App-specific content identifier
+
+        Returns:
+            True if launch command was accepted
+        """
+        app_id = ROKU_APPS.get(app_name.lower())
+        if not app_id:
+            logger.error(f"[Roku] Unknown app: {app_name}. Available: {list(ROKU_APPS.keys())}")
+            return False
+
+        if not self._connected or not self._ip_address:
+            logger.warning("[Roku] Not connected")
+            return False
+
+        try:
+            url = f'http://{self._ip_address}:{ROKU_PORT}/launch/{app_id}?contentId={content_id}'
+            response = requests.post(url, timeout=5)
+            if response.status_code in (200, 202, 204):
+                logger.info(f"[Roku] Launched {app_name} with contentId={content_id}")
+                return True
+            logger.error(f"[Roku] Deep-link launch failed: HTTP {response.status_code}")
+            return False
+        except Exception as e:
+            logger.error(f"[Roku] Deep-link launch error: {e}")
+            return False
+
     def get_active_app(self) -> Optional[str]:
         """Get the currently active app on Roku via ECP.
 

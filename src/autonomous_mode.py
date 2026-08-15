@@ -104,6 +104,31 @@ class AutonomousMode:
     DEFAULT_START_HOUR = 0   # Midnight
     DEFAULT_END_HOUR = 8     # 8 AM
 
+    # Music mode: seed videos to deep-link into when steering toward music
+    # content. All are popular official music videos — YouTube autoplay from
+    # any of them keeps recommending music, which carries a much higher ad
+    # load than general content (the point of the mode: more ad training
+    # data per hour). Rotated round-robin per launch so one dead/aged seed
+    # can't wedge the mode.
+    MUSIC_VIDEO_SEEDS = [
+        'kJQP7kiw5Fk',  # Luis Fonsi - Despacito ft. Daddy Yankee
+        'JGwWNGJdvx8',  # Ed Sheeran - Shape of You
+        'RgKAFK5djSk',  # Wiz Khalifa - See You Again ft. Charlie Puth
+        'OPf0YbXqDm0',  # Mark Ronson - Uptown Funk ft. Bruno Mars
+        'CevxZvSJLk8',  # Katy Perry - Roar
+        '9bZkp7q19f0',  # PSY - Gangnam Style
+    ]
+
+    # OCR text markers that indicate the current video is music. These only
+    # appear when title text is on screen (player overlay, end cards), so
+    # most checks carry no information — see _check_music_drift for how
+    # "no text" cycles are treated as neutral rather than as misses.
+    MUSIC_EVIDENCE_KEYWORDS = [
+        'vevo', 'official video', 'official music video', 'music video',
+        'lyric', 'official audio', 'remix', 'feat.', 'ft.', 'visualizer',
+        'live performance', 'live session', 'acoustic',
+    ]
+
     # When the audio pipeline is unavailable (display off / alsasink can't
     # open), we normally abstain from pause detection to avoid false positives
     # on music streams with static album art. But a genuinely-frozen video
@@ -209,6 +234,16 @@ class AutonomousMode:
         self._ROKU_HOME_VETO_ESCAPE_AT = 6  # ~3 min at the ~33s monitor cycle
         self._MENU_SKIP_ESCAPE_AT = 5
 
+        # Music mode: steer content toward music videos (higher ad density).
+        # When on, every YouTube (re)launch deep-links to a rotating seed
+        # from MUSIC_VIDEO_SEEDS, and the PLAYING branch watches OCR text
+        # for music evidence, re-steering when the autoplay chain drifts to
+        # non-music content. Persisted with the other autonomous settings.
+        self._music_mode = False
+        self._music_seed_index: int = 0
+        self._music_no_evidence_checks: int = 0
+        self._MUSIC_STEER_AFTER = 5  # info-bearing checks w/o music evidence
+
         # Timestamp of the last _is_audio_flowing() == True observation.
         # Destructive guards use _audio_recently_flowing() instead of the
         # instantaneous check: pre-roll ad pods have silent gaps of a few
@@ -235,8 +270,10 @@ class AutonomousMode:
                     self._start_hour = settings.get("start_hour", self.DEFAULT_START_HOUR)
                     self._end_hour = settings.get("end_hour", self.DEFAULT_END_HOUR)
                     self._always_on = settings.get("always_on", False)
+                    self._music_mode = settings.get("music_mode", False)
                     logger.info(f"[AutonomousMode] Loaded settings: enabled={self._enabled}, "
-                               f"schedule={self._start_hour}:00-{self._end_hour}:00, always_on={self._always_on}")
+                               f"schedule={self._start_hour}:00-{self._end_hour}:00, "
+                               f"always_on={self._always_on}, music_mode={self._music_mode}")
         except Exception as e:
             logger.warning(f"[AutonomousMode] Could not load settings: {e}")
 
@@ -248,6 +285,7 @@ class AutonomousMode:
                 "start_hour": self._start_hour,
                 "end_hour": self._end_hour,
                 "always_on": self._always_on,
+                "music_mode": self._music_mode,
                 "last_updated": datetime.now(ET).isoformat(),
             }
             with open(SETTINGS_FILE, "w") as f:
@@ -346,6 +384,23 @@ class AutonomousMode:
             self._log_event(f"Schedule changed to {schedule_desc}")
 
         # Return status OUTSIDE lock (get_status may be slow due to device checks)
+        return self.get_status()
+
+    def set_music_mode(self, enabled: bool) -> dict:
+        """Enable/disable music mode (steer playback toward music videos).
+
+        Music videos carry a much higher ad load on YouTube than general
+        content, so this mode maximizes ad training data per hour. See
+        MUSIC_VIDEO_SEEDS / _check_music_drift for the mechanism.
+        """
+        with self._lock:
+            self._music_mode = bool(enabled)
+            self._music_no_evidence_checks = 0
+            self._save_settings()
+
+        state = "enabled" if self._music_mode else "disabled"
+        logger.info(f"[AutonomousMode] Music mode {state}")
+        self._log_event(f"Music mode {state}")
         return self.get_status()
 
     def is_scheduled_time(self) -> bool:
@@ -501,6 +556,7 @@ class AutonomousMode:
             "manual_override": self._manual_override,
             "is_scheduled_time": is_scheduled,
             "always_on": self._always_on,
+            "music_mode": self._music_mode,
             "start_hour": self._start_hour,
             "end_hour": self._end_hour,
             "schedule": schedule_str,
@@ -737,6 +793,13 @@ class AutonomousMode:
             return False
 
         try:
+            # Music mode: every (re)launch path funnels through here, so a
+            # successful seed deep-link keeps sessions starting in music
+            # land (YouTube autoplay then chains more music). Falls through
+            # to the plain launch when unsupported or the deep-link fails.
+            if self._music_mode and self._launch_music_seed():
+                return True
+
             # Device-specific YouTube launch
             if self._device_type == DEVICE_TYPE_ROKU:
                 return self._launch_youtube_roku()
@@ -750,6 +813,81 @@ class AutonomousMode:
             logger.error(f"[AutonomousMode] Failed to launch YouTube: {e}")
             self.stats.errors += 1
             return False
+
+    def _check_music_drift(self, force_text: str = None) -> bool:
+        """Music mode: watch OCR text for music evidence while playing.
+
+        Called from the verified-PLAYING branch (~2 min cycle). OCR only
+        sees title text occasionally (player overlay, end cards), so most
+        cycles carry no information: a miss is only counted when there IS
+        meaningful text on screen (≥12 chars), the ad blocker is not
+        mid-block (ad copy says nothing about the underlying video), and
+        none of MUSIC_EVIDENCE_KEYWORDS match. After _MUSIC_STEER_AFTER
+        such misses the autoplay chain has demonstrably drifted off music —
+        re-steer with the next seed deep-link. Note this deliberately
+        interrupts a playing video: that is the mode's policy (the video is
+        playing but it isn't music), not a misclassification recovery, and
+        the info-bearing-text requirement is what keeps it from firing on
+        an actual music video that simply shows no title text.
+
+        Returns True if a steer was triggered (for tests).
+        """
+        if not self._music_mode:
+            return False
+        try:
+            if self._ad_blocker is None:
+                return False
+            if getattr(self._ad_blocker, 'is_visible', False):
+                return False  # mid ad-block: OCR text is the ad, not the video
+            if force_text is not None:
+                combined = force_text.lower()
+            else:
+                texts = getattr(self._ad_blocker, 'last_ocr_texts', None) or []
+                combined = ' '.join(str(t) for t in texts).lower()
+            if len(combined.strip()) < 12:
+                return False  # no information this cycle
+            if any(k in combined for k in self.MUSIC_EVIDENCE_KEYWORDS):
+                self._music_no_evidence_checks = 0
+                return False
+            self._music_no_evidence_checks += 1
+            logger.info(f"[AutonomousMode] Music mode: no music evidence in OCR "
+                        f"({self._music_no_evidence_checks}/{self._MUSIC_STEER_AFTER})")
+            if self._music_no_evidence_checks >= self._MUSIC_STEER_AFTER:
+                logger.info("[AutonomousMode] Music mode: drifted off music - steering to seed")
+                self._log_event("Music mode: drifted off music - steering to seed")
+                self._music_no_evidence_checks = 0
+                self._launch_music_seed()
+                return True
+        except Exception as e:
+            logger.debug(f"[AutonomousMode] Music drift check error: {e}")
+        return False
+
+    def _launch_music_seed(self) -> bool:
+        """Deep-link YouTube to the next seed music video (music mode).
+
+        Roku only for now: ECP launch supports ?contentId=<video id>.
+        Controllers without launch_app_with_content return False so the
+        caller proceeds with the plain launch. Rotates MUSIC_VIDEO_SEEDS
+        so one dead/aged seed can't wedge the mode.
+        """
+        ctrl = self._device_controller
+        if not ctrl or not ctrl.is_connected():
+            return False
+        if not hasattr(ctrl, 'launch_app_with_content'):
+            return False
+
+        seed = self.MUSIC_VIDEO_SEEDS[self._music_seed_index % len(self.MUSIC_VIDEO_SEEDS)]
+        self._music_seed_index += 1
+        try:
+            if ctrl.launch_app_with_content('youtube', seed):
+                time.sleep(3)
+                self._music_no_evidence_checks = 0
+                logger.info(f"[AutonomousMode] Music seed launched: {seed}")
+                self._log_event(f"Music seed launched ({seed})")
+                return True
+        except Exception as e:
+            logger.warning(f"[AutonomousMode] Music seed launch failed: {e}")
+        return False
 
     def _launch_youtube_roku(self) -> bool:
         """Launch YouTube on Roku using ECP launch API."""
@@ -2078,6 +2216,7 @@ class AutonomousMode:
                     self._menu_skip_count = 0
                     self._last_screen_state = 'playing'
                     logger.debug("[AutonomousMode] Screen looks good, video is playing")
+                    self._check_music_drift()
                     return False
 
             # Taking an action - reset static counter

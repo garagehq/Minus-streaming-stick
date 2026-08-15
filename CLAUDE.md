@@ -1056,9 +1056,13 @@ PLAYING, PAUSED, DIALOG, MENU, SCREENSAVER
 ```
 This structured prompt returns in ~1.0s (vs 5-22s with descriptive prompts).
 
+**Music mode (Aug 2026):** Settings → Autonomous Mode → *Music Videos* toggle (persisted `music_mode`, API `POST /api/autonomous/music-mode {"enabled": bool}`, surfaced in `GET /api/autonomous`). Steers playback toward music videos — they carry a far higher ad load on YouTube, so more ad training data per hour. Two mechanisms in `src/autonomous_mode.py`:
+- **Seed deep-links on every (re)launch:** all recovery paths funnel through `_launch_youtube()`, which (when music mode is on) deep-links a rotating seed from `MUSIC_VIDEO_SEEDS` via Roku ECP `launch/837?contentId=<video id>` (`RokuController.launch_app_with_content`). YouTube autoplay then chains more music. Non-Roku controllers fall back to the plain launch. Round-robin rotation so one dead seed can't wedge the mode.
+- **OCR drift steering (`_check_music_drift`):** in the verified-PLAYING branch, OCR text is scanned for `MUSIC_EVIDENCE_KEYWORDS` (vevo / official video / lyric / feat. / remix …). Cycles with <12 chars of text are neutral (titles only appear during overlays/end-cards), and text during an active ad block is ignored. After `_MUSIC_STEER_AFTER` (5) info-bearing misses, re-steer with the next seed. Toggling takes effect live — no service restart (verified with 12 Home-injection E2E cycles: 10 on → seed recovery 6-18s each, full rotation; live off → plain launch, no seeds; live on → seeds resume).
+
 **Settings persistence:** `/home/radxa/.minus_autonomous_mode.json`
 ```json
-{"enabled": true, "start_hour": 22, "end_hour": 6, "always_on": false}
+{"enabled": true, "start_hour": 22, "end_hour": 6, "always_on": false, "music_mode": false}
 ```
 
 **System settings:** `/home/radxa/.minus_system_settings.json`
