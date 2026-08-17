@@ -1,5 +1,7 @@
 # Minus
 
+[Video Demo](https://www.instagram.com/p/Db94HswNjMW/)
+
 Minus is an open-source HDMI box that sits between your streaming device and your TV. It watches the video feed, detects ads with ML models running locally on its own NPUs, then mutes and covers them until your show comes back. Instead of the ad you get something useful, like a Spanish vocabulary card.
 
 Nothing leaves your living room. There is no cloud service, no subscription, and no account. The OCR, the vision model, and the speech recognition all run on the device.
