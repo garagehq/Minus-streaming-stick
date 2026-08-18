@@ -1,6 +1,8 @@
 # Minus
 
 [Video Demo](https://www.instagram.com/p/Db94HswNjMW/)
+[Slides From HOPE Talk](https://bit.ly/4hv295g)
+ 
 
 Minus is an open-source HDMI box that sits between your streaming device and your TV. It watches the video feed, detects ads with ML models running locally on its own NPUs, then mutes and covers them until your show comes back. Instead of the ad you get something useful, like a Spanish vocabulary card.
 
