@@ -7,8 +7,11 @@ Handles WiFi connectivity and captive portal AP mode:
 - Connect to networks via NetworkManager
 - Create "Minus" hotspot AP when no WiFi is connected
 - Auto-restart AP if WiFi drops for 30+ seconds
+- Auto-recover from monitor-started AP mode back to a saved network when it
+  reappears (a router reboot must not strand the box on its own hotspot)
 """
 
+import os
 import subprocess
 import logging
 import threading
@@ -32,6 +35,14 @@ AP_INTERFACE = 'wlP2p33s0'  # Will be auto-detected if this fails
 # Timing
 WIFI_CHECK_INTERVAL = 5  # seconds
 WIFI_DISCONNECT_THRESHOLD = 30  # seconds before starting AP
+
+# While a monitor-started hotspot is up, periodically try to get back onto a
+# saved WiFi network. Without this, AP mode is a terminal state: a transient
+# router outage (30s is enough) flips the box to the setup hotspot and it
+# never returns — observed live Aug 2026: a 33s "ssid-not-found" blip left the
+# box stranded in AP mode (no LAN, no Tailscale) for ~30h until a power cycle.
+AP_RECONNECT_RETRY_INTERVAL = int(os.environ.get('MINUS_WIFI_AP_RECONNECT_INTERVAL', '120'))
+AP_RECONNECT_MAX_BACKOFF = 900  # cap for exponential backoff on failed attempts
 
 
 @dataclass
@@ -70,6 +81,13 @@ class WiFiManager:
         self._on_ap_stopped = on_ap_stopped
         self._connecting = False
         self._last_connection_error = ''
+        # True when the AP was started by the monitor (eligible for automatic
+        # recovery back to a saved network). User-initiated hotspots set this
+        # False and are left alone. Defaults True so an AP that appears via
+        # external state sync (get_status) is still recoverable.
+        self._ap_auto_started = True
+        self._ap_last_reconnect_attempt = 0.0
+        self._ap_reconnect_failures = 0
 
         logger.info(f"[WiFi] Initialized with interface: {self._interface}")
 
@@ -520,8 +538,14 @@ class WiFiManager:
         else:
             return {'success': False, 'error': output}
 
-    def start_ap_mode(self) -> Dict[str, Any]:
-        """Start the Minus WiFi access point."""
+    def start_ap_mode(self, auto: bool = False) -> Dict[str, Any]:
+        """Start the Minus WiFi access point.
+
+        ``auto=True`` marks the AP as monitor-started, which makes it eligible
+        for automatic recovery back to a saved network (see
+        ``_maybe_reconnect_from_ap``). User-initiated starts (web UI) keep the
+        hotspot up until the user acts.
+        """
         if self._ap_mode_active:
             return {'success': True, 'message': 'AP already active'}
 
@@ -550,7 +574,9 @@ class WiFiManager:
 
             if success:
                 self._ap_mode_active = True
-                logger.info(f"[WiFi] AP mode started: SSID={AP_SSID}")
+                self._ap_auto_started = auto
+                self._ap_last_reconnect_attempt = time.time()
+                logger.info(f"[WiFi] AP mode started: SSID={AP_SSID} (auto={auto})")
 
                 # Get AP IP for captive portal
                 time.sleep(2)
@@ -675,13 +701,92 @@ class WiFiManager:
                             logger.info("[WiFi] WiFi disconnected, starting timer")
                         elif time.time() - disconnect_time >= WIFI_DISCONNECT_THRESHOLD:
                             logger.info(f"[WiFi] No WiFi for {WIFI_DISCONNECT_THRESHOLD}s, starting AP")
-                            self.start_ap_mode()
+                            self._ap_reconnect_failures = 0
+                            self.start_ap_mode(auto=True)
                             disconnect_time = None
+                    else:
+                        # In AP mode. If the monitor put us here, periodically
+                        # try to get back onto a saved network — AP mode must
+                        # not be a terminal state after a transient router
+                        # outage.
+                        self._maybe_reconnect_from_ap()
 
             except Exception as e:
                 logger.error(f"[WiFi] Monitor error: {e}")
 
             time.sleep(WIFI_CHECK_INTERVAL)
+
+    def _maybe_reconnect_from_ap(self) -> bool:
+        """While a monitor-started hotspot is up, periodically try to rejoin a
+        saved WiFi network.
+
+        Root-cause fix for the Aug 2026 stranding: a 33s router blip
+        ("ssid-not-found") started the hotspot, and nothing ever retried the
+        saved network — the box sat off-network for ~30h until a power cycle.
+
+        The retry is deliberately conservative:
+        - only for an AP the monitor started itself; a user-initiated hotspot
+          or manual disconnect is respected and left alone
+        - skipped while any client is connected to the hotspot (someone is in
+          the middle of captive-portal setup — don't yank it)
+        - a bounce-scan first: the AP only stays down for a full connect
+          attempt when a saved network is actually visible
+        - exponential backoff (up to AP_RECONNECT_MAX_BACKOFF) when a saved
+          network is visible but activation keeps failing (e.g. the router's
+          password changed), so the AP doesn't flap every interval
+
+        Returns True if a reconnect attempt (successful or not) was made.
+        """
+        if not (self._ap_mode_active and self._ap_auto_started):
+            return False
+        if self._connecting:
+            return False
+
+        interval = min(
+            AP_RECONNECT_RETRY_INTERVAL * (2 ** min(self._ap_reconnect_failures, 3)),
+            AP_RECONNECT_MAX_BACKOFF
+        )
+        if time.time() - self._ap_last_reconnect_attempt < interval:
+            return False
+
+        if self._count_ap_clients() > 0:
+            # Someone is using the portal; re-check a full interval from now.
+            self._ap_last_reconnect_attempt = time.time()
+            logger.info("[WiFi] AP-mode recovery deferred: client connected to hotspot")
+            return False
+
+        self._ap_last_reconnect_attempt = time.time()
+        logger.info("[WiFi] AP-mode recovery: scanning for saved networks...")
+        try:
+            networks = self.scan_networks(bounce_ap=True)
+        except Exception as e:
+            logger.warning(f"[WiFi] AP-mode recovery scan failed: {e}")
+            return False
+
+        # scan_networks sorts by signal; entries with signal=0 are saved-but-
+        # not-in-range placeholders, so require a live sighting.
+        visible_saved = [n for n in networks if n.saved and n.signal > 0]
+        if not visible_saved:
+            logger.info("[WiFi] AP-mode recovery: no saved network in range yet")
+            return False
+
+        target = visible_saved[0]
+        logger.info(f"[WiFi] AP-mode recovery: '{target.ssid}' in range "
+                    f"(signal {target.signal}) — attempting reconnect")
+        result = self.connect_saved(target.ssid)
+        if result.get('success'):
+            logger.info(f"[WiFi] AP-mode recovery: reconnected to '{target.ssid}'")
+            self._ap_reconnect_failures = 0
+            return True
+
+        # connect_saved tore the AP down for the attempt; restore it so the
+        # box stays reachable for manual setup.
+        self._ap_reconnect_failures += 1
+        logger.warning(f"[WiFi] AP-mode recovery: reconnect to '{target.ssid}' failed "
+                       f"({result.get('error')}); restoring AP "
+                       f"(failure #{self._ap_reconnect_failures})")
+        self.start_ap_mode(auto=True)
+        return True
 
     def get_last_error(self) -> str:
         """Get the last connection error message."""

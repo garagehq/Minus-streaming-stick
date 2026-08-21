@@ -1104,6 +1104,7 @@ Minus includes a WiFi captive portal system for easy network configuration when 
 3. Setup page shows available networks with signal strength
 4. User selects network and enters password
 5. Minus connects and stops the AP automatically
+6. **Auto-recovery:** while a *monitor-started* AP is up, every 2 min (env `MINUS_WIFI_AP_RECONNECT_INTERVAL`, exponential backoff to 15 min on failed attempts) the monitor bounce-scans and, if a saved network is visible, reconnects to it — so a transient router outage can't strand the box on its own hotspot. Skipped while any client is on the portal or when the AP was started manually via the web UI. See *AP mode was a terminal state* under Known Issues.
 
 **Hotspot Configuration:**
 - **SSID:** `Minus`
@@ -2996,6 +2997,39 @@ Tests: `TestYouTubeTVActivationScreen`, `TestMenuSkipWatchdog`,
 `TestScreensaverLaunchGuards`, `TestKeyboardStuckAudioGuard`,
 `TestDialogDismissAudioGuard` in `tests/test_autonomous_mode.py`;
 `TestKeypressStatusCodes` in `tests/test_roku_reconnect.py`.
+
+### AP mode was a terminal state — 30h network stranding (Fixed - Aug 2026)
+
+**Symptom:** box vanished from the LAN and Tailscale for ~30 hours until a
+manual power cycle. Minus itself (passthrough + ad blocking) kept running
+fine the whole time.
+
+**Root cause (from persistent journal):** Aug 20 10:36:42 the WiFi link to
+"The Garden" timed out (`ssid-not-found` — transient router/AP outage). 33s
+later the wifi_manager monitor hit `WIFI_DISCONNECT_THRESHOLD` (30s) and
+started the "Minus" setup hotspot. `_monitor_loop`'s disconnected branch was
+gated on `if not self._ap_mode_active:` — once in AP mode, **nothing ever
+retried the saved network**. The only exit was a human completing the captive
+portal. NetworkManager couldn't autoconnect either (the radio was occupied
+hosting the hotspot). So a 33s blip = stranded until power cycle.
+
+**Fix (`src/wifi_manager.py`):** `_maybe_reconnect_from_ap()`, called from the
+monitor loop while in AP mode:
+- Only for monitor-started APs — `start_ap_mode(auto=True)` marks them; the
+  web UI's manual AP start / manual-disconnect-then-AP paths (`auto=False`
+  default) are respected and left alone.
+- Every `AP_RECONNECT_RETRY_INTERVAL` (120s, env
+  `MINUS_WIFI_AP_RECONNECT_INTERVAL`), bounce-scan (`scan_networks(bounce_ap=
+  True)`, ~10s AP blip) and only if a saved network is live-visible
+  (`saved and signal > 0`), attempt `connect_saved()` on the strongest one.
+- On failed activation (e.g. changed router password) the AP is restored
+  immediately and the interval backs off exponentially (×2 per failure, cap
+  `AP_RECONNECT_MAX_BACKOFF` 900s) so the hotspot doesn't flap.
+- Deferred while any client is connected to the hotspot (mid-portal-setup)
+  or while `_connecting`.
+
+**Tests:** `tests/test_wifi_ap_recovery.py` — 13 unit tests, all hardware
+mocked (live AP tests are forbidden on this box: they sever remote access).
 
 ### Axera libaxcl_*.so broken symlinks — VLM dead at boot (May 2026)
 
