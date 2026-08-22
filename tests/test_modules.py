@@ -1019,14 +1019,19 @@ class TestAdBlocker:
             pass
 
     def test_set_color_settings_without_pipeline(self):
-        """Test set_color_settings handles missing pipeline."""
+        """Without a pipeline, changes are persisted for the next start
+        (Aug 2026 fix: previously returned an error and discarded them)."""
         try:
             from ad_blocker import DRMAdBlocker
             blocker = DRMAdBlocker.__new__(DRMAdBlocker)
             blocker.pipeline = None
+            blocker._saved_color_settings = {
+                'saturation': 1.0, 'brightness': 0.0, 'contrast': 1.0, 'hue': 0.0}
+            blocker._save_color_settings = MagicMock()
             result = blocker.set_color_settings(saturation=1.5)
-            assert result['success'] is False
-            assert 'error' in result
+            assert result['success'] is True
+            assert result['saturation'] == 1.5
+            blocker._save_color_settings.assert_called_once()
         except ImportError:
             pass
 
