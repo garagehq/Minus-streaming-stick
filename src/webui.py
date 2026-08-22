@@ -1914,7 +1914,7 @@ class WebUI:
         def api_webhooks_get():
             """Get webhook configuration."""
             try:
-                from webhooks import get_webhook_manager
+                from src.webhooks import get_webhook_manager
                 manager = get_webhook_manager()
                 return jsonify({
                     'enabled': manager.enabled,
@@ -1935,7 +1935,7 @@ class WebUI:
             - remove_url: single URL to remove
             """
             try:
-                from webhooks import get_webhook_manager
+                from src.webhooks import get_webhook_manager
                 manager = get_webhook_manager()
                 data = request.get_json() or {}
 
@@ -1965,7 +1965,7 @@ class WebUI:
         def api_webhooks_test():
             """Send a test notification to all webhook URLs."""
             try:
-                from webhooks import get_webhook_manager
+                from src.webhooks import get_webhook_manager
                 manager = get_webhook_manager()
 
                 if not manager.urls:
