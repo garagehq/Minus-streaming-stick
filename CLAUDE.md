@@ -2998,6 +2998,58 @@ Tests: `TestYouTubeTVActivationScreen`, `TestMenuSkipWatchdog`,
 `TestDialogDismissAudioGuard` in `tests/test_autonomous_mode.py`;
 `TestKeypressStatusCodes` in `tests/test_roku_reconnect.py`.
 
+### Thermal-adaptive degradation — stable 30fps + stickier blocking under throttle (Added - Aug 2026)
+
+**Motivation (observed live):** during 4K passthrough the SoC rides its
+~85°C trip (all zones 83-85°C, fan maxed) and the kernel throttles the CPU
+(big cores 2304→1416MHz, `cpufreq-cpu*` cooling states 3-7). The capture/
+encode side stays a rock-solid 60fps (MPP hardware), but the CPU-bound
+display pipeline (souphttpsrc/jpegparse) starves and the display
+**oscillates ~38-43fps**, which looks worse than a steady lower rate.
+Throttled cores also slow OCR/VLM cadence, making the fast-stop blocking
+tuning flip-flop the overlay.
+
+**Design (`src/thermal.py`):**
+- **Detection:** primary signal is the kernel's own verdict — any
+  `cpufreq-*` cooling device with `cur_state > 0` means active throttling
+  (no temperature guesswork; schedutil-idle low clocks can't false-positive).
+  Temperature is the secondary/recovery signal.
+- **Hysteresis (`ThermalGovernor`, pure logic, unit-tested):** enter when
+  throttled OR temp ≥83°C sustained 15s; exit when NOT throttled AND temp
+  ≤75°C sustained 60s (cooling states drop instantly when load shrinks but
+  the SoC is still hot — recovery waits for real cooling). Borderline
+  flapping samples cannot flap the mode. Env: `MINUS_THERMAL_ENTER_C`,
+  `MINUS_THERMAL_EXIT_C`, `MINUS_THERMAL_ENTER_SUSTAIN`,
+  `MINUS_THERMAL_EXIT_SUSTAIN`, `MINUS_THERMAL_CHECK_INTERVAL`,
+  `MINUS_THERMAL_DISABLE=1` to opt out entirely.
+- **Degraded actions (`Minus._on_thermal_change`):**
+  1. **Display capped at a stable ~30fps** via a `framegate` identity
+     element between jpegparse and mppjpegdec — dropping there skips VPU
+     decode + videobalance + queue + kmssink for the dropped frame.
+     **Token-bucket** rate limiter (credit accrues at cap rate, bucket max
+     2.0, epsilon on the spend compare): converges on exactly the cap from
+     any input pacing. A fixed min-interval gate was tried first and
+     measured only ~23fps from the real (jittery-burst) 60fps MJPEG stream;
+     the token bucket measures **30.0fps** with the production probe. Cap
+     via `MINUS_THERMAL_FPS_CAP` (default 30). Instant toggle, no pipeline
+     rebuild.
+  2. **Stickier blocking params** (`Minus.THERMAL_DEGRADED_PARAMS`):
+     OCR_STOP_THRESHOLD 2→4, VLM_STOP_THRESHOLD 2→3,
+     MIN_BLOCKING_DURATION_BASE 3.0→5.0s, floors OCR/BOTH/VLM →
+     2.5/2.5/1.5s. Originals stashed on enter and restored exactly on
+     recovery (double-enter cannot clobber the stash).
+- **Surfaces:** `/api/status` → `thermal_degraded` + `thermal{degraded,
+  temp_c, throttled, forced}`; `/api/health` → `subsystems.thermal` +
+  `thermal_degraded` in issues. Test hook: `POST /api/test/thermal
+  {"degraded": true|false|null}` pins/unpins the mode synchronously.
+
+**Tests:** `tests/test_thermal.py` — 29 tests (governor hysteresis both
+edges + flap immunity, sysfs readers, Minus param swap/restore round-trip,
+framegate token bucket at 60/40/25fps + burst jitter + rate override +
+pipeline-string placement). Live-verified: production probe on the real
+stream = 30.0fps capped / 58.6 uncapped; mode transitions logged and
+surfaced.
+
 ### Color settings (saturation/brightness/contrast/hue) not applying in real time (Fixed - Aug 2026)
 
 **Symptom:** moving the Settings color sliders had no visible effect on the

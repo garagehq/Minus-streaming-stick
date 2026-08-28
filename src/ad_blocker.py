@@ -187,6 +187,18 @@ class DRMAdBlocker:
         self._color_settings_file = Path.home() / '.minus_color_settings.json'
         self._saved_color_settings = self._load_color_settings()
 
+        # Thermal-degraded display cap (see src/thermal.py). When enabled the
+        # framegate identity drops frames before mppjpegdec so the display
+        # runs a STABLE capped rate instead of oscillating ~40fps on
+        # throttled cores. Token-bucket rate limiting: converges on exactly
+        # the cap regardless of input pacing (souphttpsrc delivers MJPEG in
+        # jittery bursts — a fixed min-interval gate measured only ~23fps
+        # from a 60fps source, the token bucket ~30).
+        self._thermal_fps_cap = False
+        self._framegate_rate = max(float(os.environ.get('MINUS_THERMAL_FPS_CAP', '30')), 1.0)
+        self._framegate_credit = 0.0
+        self._framegate_last_ts = None
+
         # Current vocabulary word tracking
         self._current_vocab = None  # (spanish, pronunciation, english, example)
 
@@ -350,7 +362,7 @@ class DRMAdBlocker:
             pipeline_str = (
                 f"souphttpsrc location=http://localhost:{self.ustreamer_port}/stream "
                 f"is-live=true blocksize=524288 timeout=10 retries=-1 keep-alive=true ! "
-                f"multipartdemux ! jpegparse ! mppjpegdec ! video/x-raw,format=NV12 ! "
+                f"multipartdemux ! jpegparse ! identity name=framegate ! mppjpegdec ! video/x-raw,format=NV12 ! "
                 f"{colorbalance_part}"
                 f"queue max-size-buffers=3 leaky=downstream name=videoqueue ! "
                 f"identity name=fpsprobe ! "
@@ -376,6 +388,14 @@ class DRMAdBlocker:
                 srcpad = fpsprobe.get_static_pad('src')
                 srcpad.add_probe(Gst.PadProbeType.BUFFER, self._fps_probe_callback, None)
 
+            # Thermal frame gate: sits BEFORE mppjpegdec so dropping a frame
+            # skips VPU decode and everything downstream. No-op unless
+            # thermal-degraded mode enables the cap (see set_thermal_fps_cap).
+            framegate = self.pipeline.get_by_name('framegate')
+            if framegate:
+                gatepad = framegate.get_static_pad('src')
+                gatepad.add_probe(Gst.PadProbeType.BUFFER, self._framegate_probe, None)
+
             logger.info("[DRMAdBlocker] Pipeline created (ustreamer blocking mode)")
 
         except Exception as e:
@@ -399,6 +419,49 @@ class DRMAdBlocker:
                 self._fps_start_time = current_time
 
         return Gst.PadProbeReturn.OK
+
+    def _framegate_probe(self, pad, info, user_data):
+        """Rate-limit frames ahead of the decoder while thermally degraded.
+
+        Token bucket: credit accrues at the cap rate, one credit spent per
+        forwarded frame, bucket capped at 1 (no burst carry-over). Immune to
+        MJPEG arrival jitter. Runs per buffer — keep it trivial. Frames are
+        independent JPEGs, so dropping here is safe and skips VPU decode +
+        videobalance + queue + kmssink for the dropped frame.
+        """
+        if not self._thermal_fps_cap:
+            return Gst.PadProbeReturn.OK
+        now = time.monotonic()
+        if self._framegate_last_ts is None:
+            self._framegate_last_ts = now
+            self._framegate_credit = 0.0
+            return Gst.PadProbeReturn.OK  # first frame always passes
+        # Bucket capped at 2.0: a 1.0 cap discards fractional surplus (a
+        # 40fps source would forward 1-of-2 = 20fps instead of 3-of-4 =
+        # 30fps); 2.0 banks it while limiting bursts to 2 frames.
+        credit = min(self._framegate_credit
+                     + (now - self._framegate_last_ts) * self._framegate_rate, 2.0)
+        self._framegate_last_ts = now
+        # Epsilon: at exactly 2x the cap rate the accrual is 0.5 + 0.5 which
+        # lands at 0.99999... in float - without tolerance that aliases the
+        # output down to 2/3 of the cap.
+        if credit >= 1.0 - 1e-6:
+            self._framegate_credit = max(credit - 1.0, 0.0)
+            return Gst.PadProbeReturn.OK
+        self._framegate_credit = credit
+        return Gst.PadProbeReturn.DROP
+
+    def set_thermal_fps_cap(self, enabled):
+        """Enable/disable the thermal display-fps cap (idempotent, instant —
+        no pipeline rebuild; the framegate probe just starts/stops dropping)."""
+        enabled = bool(enabled)
+        if enabled == self._thermal_fps_cap:
+            return
+        self._thermal_fps_cap = enabled
+        self._framegate_credit = 0.0
+        self._framegate_last_ts = None
+        logger.warning(f"[DRMAdBlocker] Thermal fps cap "
+                       f"{'ENABLED (~%.0ffps)' % self._framegate_rate if enabled else 'disabled (full rate)'}")
 
     def get_fps(self):
         with self._fps_lock:

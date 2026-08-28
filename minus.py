@@ -308,6 +308,19 @@ class Minus:
     switching between video and blocking overlay.
     """
 
+    # ── Thermal-degraded blocking parameters (src/thermal.py) ─────────────
+    # Swapped in while the kernel is actively throttling the CPU; originals
+    # are restored on recovery. Rationale: throttled cores slow OCR/VLM
+    # cadence, so the normal fast-stop tuning flip-flops the overlay.
+    THERMAL_DEGRADED_PARAMS = {
+        'OCR_STOP_THRESHOLD': 4,            # ~2x no-ad frames to unblock
+        'VLM_STOP_THRESHOLD': 3,
+        'MIN_BLOCKING_DURATION_BASE': 5.0,  # longer default block hold
+        'MIN_BLOCKING_DURATION_FLOOR_OCR': 2.5,
+        'MIN_BLOCKING_DURATION_FLOOR_BOTH': 2.5,
+        'MIN_BLOCKING_DURATION_FLOOR_VLM': 1.5,
+    }
+
     def __init__(self, config: MinusConfig = None):
         if config is None:
             config = MinusConfig()
@@ -513,6 +526,15 @@ class Minus:
         # overlays makes consecutive misses extremely rare.
         self.OCR_STOP_THRESHOLD = 2
         self.VLM_STOP_THRESHOLD = 2
+
+        # ── Thermal-degraded mode (src/thermal.py) ────────────────────────
+        # See class-level THERMAL_DEGRADED_PARAMS. Degraded mode also caps
+        # the display at a stable 30fps via ad_blocker.set_thermal_fps_cap;
+        # everything is restored when the SoC has genuinely cooled
+        # (hysteresis in ThermalGovernor).
+        self.thermal_degraded = False
+        self._thermal_saved_params = None
+        self.thermal_monitor = None
 
         # OCR transience guard. OCR is normally fast-fire (1 frame → block
         # starts). But a single-frame OCR misread — a movie billboard with
@@ -921,6 +943,17 @@ class Minus:
                 logger.warning(f"Health monitor init failed: {e}")
                 self.health_monitor = None
 
+        # Initialize thermal monitor (adaptive degradation under throttle)
+        if os.environ.get('MINUS_THERMAL_DISABLE', '0') != '1':
+            try:
+                from thermal import ThermalMonitor
+                self.thermal_monitor = ThermalMonitor(on_change=self._on_thermal_change)
+                self.thermal_monitor.start()
+                logger.info("Thermal monitor initialized")
+            except Exception as e:
+                logger.warning(f"Thermal monitor init failed: {e}")
+                self.thermal_monitor = None
+
         # Initialize System Notification overlay (for VLM status, etc.)
         self.system_notification = None
         if HAS_OVERLAY:
@@ -952,6 +985,41 @@ class Minus:
         return None, None, None
 
     # ===== Health Recovery Methods =====
+
+    def _on_thermal_change(self, degraded, snapshot):
+        """Enter/exit thermal-degraded mode (called by ThermalMonitor).
+
+        Degraded: swap in the stickier blocking parameters from
+        THERMAL_DEGRADED_PARAMS and cap the display at a stable 30fps.
+        Recovered: restore the exact original parameters and full frame rate.
+        """
+        try:
+            self.thermal_degraded = degraded
+            if degraded:
+                if self._thermal_saved_params is None:
+                    self._thermal_saved_params = {
+                        k: getattr(self, k) for k in self.THERMAL_DEGRADED_PARAMS}
+                for k, v in self.THERMAL_DEGRADED_PARAMS.items():
+                    setattr(self, k, v)
+                logger.warning(
+                    f"[Thermal] DEGRADED mode: display capped ~30fps, "
+                    f"OCR_STOP={self.OCR_STOP_THRESHOLD} VLM_STOP={self.VLM_STOP_THRESHOLD} "
+                    f"min_block_base={self.MIN_BLOCKING_DURATION_BASE}s "
+                    f"(temp={snapshot.get('temp_c')}, throttled={snapshot.get('throttled')})")
+            else:
+                if self._thermal_saved_params is not None:
+                    for k, v in self._thermal_saved_params.items():
+                        setattr(self, k, v)
+                    self._thermal_saved_params = None
+                logger.warning(
+                    f"[Thermal] NORMAL mode restored: full frame rate, "
+                    f"OCR_STOP={self.OCR_STOP_THRESHOLD} VLM_STOP={self.VLM_STOP_THRESHOLD} "
+                    f"min_block_base={self.MIN_BLOCKING_DURATION_BASE}s "
+                    f"(temp={snapshot.get('temp_c')})")
+            if self.ad_blocker:
+                self.ad_blocker.set_thermal_fps_cap(degraded)
+        except Exception as e:
+            logger.error(f"[Thermal] Failed to apply mode change: {e}")
 
     def _set_led_state(self, state):
         """Forward a state change to the status-LED strip. No-op if disabled
@@ -2018,6 +2086,10 @@ class Minus:
                     {'available': False, 'enabled': False, 'running': False}),
             'hdmi_reconnect_grace': self.is_in_hdmi_reconnect_grace(),
             'hdmi_reconnect_grace_remaining': self.get_hdmi_reconnect_grace_remaining(),
+            'thermal_degraded': self.thermal_degraded,
+            'thermal': (self.thermal_monitor.get_status() if self.thermal_monitor
+                        else {'degraded': False, 'temp_c': None,
+                              'throttled': False, 'forced': None}),
             'static_suppressed': self.static_blocking_suppressed,
 
             # Detection counts
