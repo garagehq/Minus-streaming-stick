@@ -554,6 +554,30 @@ class WebUI:
                 logger.error(f"Error in audio-bars test: {e}")
                 return jsonify({'error': str(e)}), 500
 
+        @self.app.route('/api/test/thermal', methods=['POST'])
+        def api_test_thermal():
+            """Force thermal-degraded mode for testing.
+
+            Body: {"degraded": true|false|null}. true/false pins the mode
+            (the governor is overridden until cleared); null resumes normal
+            thermal governing. Applied synchronously via check_now().
+            """
+            try:
+                monitor = getattr(self.minus, 'thermal_monitor', None)
+                if monitor is None:
+                    return jsonify({'error': 'Thermal monitor not initialized'}), 500
+                data = request.get_json(force=True, silent=True) or {}
+                force = data.get('degraded', None)
+                if force is not None:
+                    force = bool(force)
+                monitor.force = force
+                monitor.check_now()
+                logger.info(f"[WebUI] Thermal test override: force={force}")
+                return jsonify({'success': True, **monitor.get_status()})
+            except Exception as e:
+                logger.error(f"Error forcing thermal mode: {e}")
+                return jsonify({'error': str(e)}), 500
+
         @self.app.route('/api/test/stop-block', methods=['POST'])
         def api_test_stop_block():
             """Stop ad blocking (for testing)."""
@@ -2019,6 +2043,18 @@ class WebUI:
                         video_status = {'status': 'error', 'reason': 'no_pipeline'}
                         issues.append('video_pipeline_down')
                 health['subsystems']['video'] = video_status
+
+                # Thermal subsystem (adaptive degradation under throttle)
+                thermal_monitor = getattr(self.minus, 'thermal_monitor', None)
+                if thermal_monitor is not None:
+                    try:
+                        tstat = dict(thermal_monitor.get_status())
+                        tstat['status'] = 'degraded' if tstat.get('degraded') else 'ok'
+                        health['subsystems']['thermal'] = tstat
+                        if tstat.get('degraded'):
+                            issues.append('thermal_degraded')
+                    except (TypeError, ValueError):
+                        pass  # monitor not real (tests) or malformed status
 
                 # Audio subsystem
                 audio_status = {'status': 'not_initialized'}
