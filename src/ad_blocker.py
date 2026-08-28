@@ -331,8 +331,20 @@ class DRMAdBlocker:
             # neutral and non-neutral at runtime restarts the pipeline
             # (see set_color_settings).
             self._pipeline_has_colorbalance = not self._color_settings_neutral()
+            # Bake the SAVED values into the launch string. _init_pipeline is
+            # the single source of truth: a pipeline rebuilt by the watchdog /
+            # health monitor / a color-settings crossing must come up with the
+            # user's values already applied. (The old code created the element
+            # at identity and relied on start() calling
+            # _apply_saved_color_settings — which _restart_pipeline never did,
+            # so the first neutral->non-neutral change showed no visible
+            # effect and any watchdog restart silently reset the picture.)
+            cs = getattr(self, '_saved_color_settings', None) or {}
             colorbalance_part = (
-                f"videobalance saturation=1.0 brightness=0.0 contrast=1.0 hue=0.0 name=colorbalance ! "
+                f"videobalance saturation={cs.get('saturation', 1.0):.4f} "
+                f"brightness={cs.get('brightness', 0.0):.4f} "
+                f"contrast={cs.get('contrast', 1.0):.4f} "
+                f"hue={cs.get('hue', 0.0):.4f} name=colorbalance ! "
                 if self._pipeline_has_colorbalance else ""
             )
             pipeline_str = (
@@ -425,6 +437,22 @@ class DRMAdBlocker:
             'hue': colorbalance.get_property('hue')
         }
 
+    def _merge_color_settings(self, saturation=None, brightness=None, contrast=None, hue=None):
+        """Merge new (clamped) values into saved settings and persist them."""
+        merged = (getattr(self, '_saved_color_settings', None) or {
+            'saturation': 1.0, 'brightness': 0.0, 'contrast': 1.0, 'hue': 0.0}).copy()
+        if saturation is not None:
+            merged['saturation'] = max(0.0, min(2.0, float(saturation)))
+        if brightness is not None:
+            merged['brightness'] = max(-1.0, min(1.0, float(brightness)))
+        if contrast is not None:
+            merged['contrast'] = max(0.0, min(2.0, float(contrast)))
+        if hue is not None:
+            merged['hue'] = max(-1.0, min(1.0, float(hue)))
+        self._saved_color_settings = merged.copy()
+        self._save_color_settings(merged)
+        return merged
+
     def set_color_settings(self, saturation=None, brightness=None, contrast=None, hue=None):
         """Set color balance settings dynamically.
 
@@ -438,35 +466,41 @@ class DRMAdBlocker:
             dict with success status and current values
         """
         if not self.pipeline:
-            return {'success': False, 'error': 'Pipeline not running'}
+            # No pipeline at all (e.g. mid signal-loss recovery). Persist the
+            # values so _init_pipeline bakes them in at the next start —
+            # returning an error here silently discarded changes made during
+            # a signal-loss window.
+            merged = self._merge_color_settings(saturation, brightness, contrast, hue)
+            logger.info("[DRMAdBlocker] Color settings persisted (no pipeline); "
+                        "will apply at next pipeline start")
+            return {'success': True, **merged}
 
         colorbalance = self.pipeline.get_by_name('colorbalance')
         if not colorbalance:
             # The pipeline was built without videobalance because settings
-            # were neutral (zero-copy fast path). If the new settings are
-            # still neutral there is nothing to do; otherwise persist them
-            # and rebuild the pipeline so the element gets inserted and
-            # _apply_saved_color_settings picks the values up.
-            merged = (getattr(self, '_saved_color_settings', None) or {
-                'saturation': 1.0, 'brightness': 0.0, 'contrast': 1.0, 'hue': 0.0}).copy()
-            if saturation is not None:
-                merged['saturation'] = max(0.0, min(2.0, float(saturation)))
-            if brightness is not None:
-                merged['brightness'] = max(-1.0, min(1.0, float(brightness)))
-            if contrast is not None:
-                merged['contrast'] = max(0.0, min(2.0, float(contrast)))
-            if hue is not None:
-                merged['hue'] = max(-1.0, min(1.0, float(hue)))
-
-            self._saved_color_settings = merged.copy()
-            self._save_color_settings(merged)
+            # were neutral (zero-copy 60fps fast path), or we're in a
+            # standalone mode (no-signal / loading) whose pipeline has no
+            # colorbalance. If the new settings are still neutral there is
+            # nothing to do; otherwise persist them and rebuild so
+            # _init_pipeline inserts the element with these values baked in.
+            merged = self._merge_color_settings(saturation, brightness, contrast, hue)
 
             if self._color_settings_neutral(merged):
                 return {'success': True, **merged}
 
+            if self.current_source in ('loading', 'no_hdmi_device'):
+                # Standalone mode: no video to color-correct. Don't rebuild
+                # the normal pipeline while there's no signal (it would fight
+                # no-signal mode); the values are baked in by _init_pipeline
+                # when the normal pipeline next starts.
+                logger.info("[DRMAdBlocker] Color settings persisted; will apply "
+                            "when the video pipeline next starts "
+                            f"(current mode: {self.current_source})")
+                return {'success': True, **merged}
+
             logger.info("[DRMAdBlocker] Color settings became non-neutral - "
-                        "restarting pipeline to insert videobalance")
-            self.restart()
+                        "rebuilding pipeline to insert videobalance (no backoff)")
+            self.restart(penalize=False)
             return {'success': True, **merged}
 
         try:
@@ -699,7 +733,7 @@ class DRMAdBlocker:
                 except Exception as e:
                     logger.debug(f"[DRMAdBlocker] Error checking pipeline state: {e}")
 
-    def _restart_pipeline(self, hdmi_reconnect=False):
+    def _restart_pipeline(self, hdmi_reconnect=False, penalize=True):
         with self._restart_lock:
             if self._pipeline_restarting:
                 return
@@ -707,11 +741,18 @@ class DRMAdBlocker:
 
         try:
             self._restart_count += 1
-            self._consecutive_failures += 1
-            # Cap exponent at 10 to prevent overflow (2^10 = 1024, way past max_restart_delay anyway)
-            exponent = min(self._consecutive_failures - 1, 10)
-            delay = min(self._base_restart_delay * (2 ** exponent), self._max_restart_delay)
-            logger.warning(f"[DRMAdBlocker] Restarting pipeline (attempt {self._restart_count}, delay {delay:.1f}s, hdmi_reconnect={hdmi_reconnect})")
+            if penalize:
+                self._consecutive_failures += 1
+                # Cap exponent at 10 to prevent overflow (2^10 = 1024, way past max_restart_delay anyway)
+                exponent = min(self._consecutive_failures - 1, 10)
+                delay = min(self._base_restart_delay * (2 ** exponent), self._max_restart_delay)
+            else:
+                # User-requested rebuild (e.g. color settings crossed
+                # neutral<->non-neutral): not a failure. No backoff delay, no
+                # failure-counter increment (3 slider changes must NOT
+                # escalate into the pkill-ustreamer MPP reset below).
+                delay = 0.0
+            logger.warning(f"[DRMAdBlocker] Restarting pipeline (attempt {self._restart_count}, delay {delay:.1f}s, hdmi_reconnect={hdmi_reconnect}, penalize={penalize})")
 
             if self.pipeline:
                 try:
@@ -724,8 +765,9 @@ class DRMAdBlocker:
                 self.pipeline = None
 
             # After 3+ consecutive failures, the MPP decoder may be stuck.
-            # Force-restart ustreamer to reset MPP state.
-            if self._consecutive_failures >= 3:
+            # Force-restart ustreamer to reset MPP state. Never escalate on a
+            # user-requested (non-penalized) rebuild.
+            if penalize and self._consecutive_failures >= 3:
                 logger.warning(f"[DRMAdBlocker] {self._consecutive_failures} consecutive failures - restarting ustreamer to reset MPP")
                 try:
                     import subprocess
@@ -771,9 +813,9 @@ class DRMAdBlocker:
         finally:
             self._pipeline_restarting = False
 
-    def restart(self, hdmi_reconnect=False):
-        logger.info(f"[DRMAdBlocker] External restart requested (hdmi_reconnect={hdmi_reconnect})")
-        threading.Thread(target=self._restart_pipeline, args=(hdmi_reconnect,), daemon=True).start()
+    def restart(self, hdmi_reconnect=False, penalize=True):
+        logger.info(f"[DRMAdBlocker] External restart requested (hdmi_reconnect={hdmi_reconnect}, penalize={penalize})")
+        threading.Thread(target=self._restart_pipeline, args=(hdmi_reconnect, penalize), daemon=True).start()
 
     def _set_led_state(self, state):
         """Push a state to the WS2812B status strip if hooked up. Wrapped

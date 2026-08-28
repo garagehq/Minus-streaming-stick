@@ -1019,14 +1019,19 @@ class TestAdBlocker:
             pass
 
     def test_set_color_settings_without_pipeline(self):
-        """Test set_color_settings handles missing pipeline."""
+        """Without a pipeline, changes are persisted for the next start
+        (Aug 2026 fix: previously returned an error and discarded them)."""
         try:
             from ad_blocker import DRMAdBlocker
             blocker = DRMAdBlocker.__new__(DRMAdBlocker)
             blocker.pipeline = None
+            blocker._saved_color_settings = {
+                'saturation': 1.0, 'brightness': 0.0, 'contrast': 1.0, 'hue': 0.0}
+            blocker._save_color_settings = MagicMock()
             result = blocker.set_color_settings(saturation=1.5)
-            assert result['success'] is False
-            assert 'error' in result
+            assert result['success'] is True
+            assert result['saturation'] == 1.5
+            blocker._save_color_settings.assert_called_once()
         except ImportError:
             pass
 
@@ -1860,6 +1865,86 @@ class TestMemoryLeaks:
 # ============================================================================
 # Extended AdBlocker Tests
 # ============================================================================
+
+class TestColorSettingsRealtime:
+    """Regression tests for the Aug 2026 color-settings fix: crossing
+    neutral->non-neutral must rebuild the pipeline WITHOUT the failure
+    backoff, and must not rebuild at all during no-signal/loading modes."""
+
+    def _make_blocker(self, current_source=None):
+        from ad_blocker import DRMAdBlocker
+        blocker = DRMAdBlocker.__new__(DRMAdBlocker)
+        blocker.pipeline = MagicMock()
+        blocker.pipeline.get_by_name.return_value = None  # no colorbalance
+        blocker._saved_color_settings = {
+            'saturation': 1.0, 'brightness': 0.0, 'contrast': 1.0, 'hue': 0.0}
+        blocker._save_color_settings = MagicMock()
+        blocker.current_source = current_source
+        blocker.restart = MagicMock()
+        return blocker
+
+    def test_non_neutral_rebuild_is_not_penalized(self):
+        """Crossing to non-neutral rebuilds with penalize=False (no backoff,
+        no failure-counter escalation toward the ustreamer pkill)."""
+        try:
+            blocker = self._make_blocker(current_source=None)
+            result = blocker.set_color_settings(saturation=1.3)
+            assert result['success'] is True
+            blocker.restart.assert_called_once_with(penalize=False)
+        except ImportError:
+            pass
+
+    def test_neutral_change_does_not_rebuild(self):
+        """Setting values that stay neutral must not restart anything."""
+        try:
+            blocker = self._make_blocker(current_source=None)
+            result = blocker.set_color_settings(saturation=1.0)
+            assert result['success'] is True
+            blocker.restart.assert_not_called()
+        except ImportError:
+            pass
+
+    def test_no_signal_mode_persists_without_rebuild(self):
+        """During no-signal/loading standalone modes the values are only
+        persisted — rebuilding the normal pipeline would fight no-signal
+        mode. _init_pipeline bakes the values in at the next real start."""
+        try:
+            for mode in ('no_hdmi_device', 'loading'):
+                blocker = self._make_blocker(current_source=mode)
+                result = blocker.set_color_settings(contrast=0.7)
+                assert result['success'] is True
+                assert result['contrast'] == 0.7
+                blocker.restart.assert_not_called()
+                blocker._save_color_settings.assert_called_once()
+        except ImportError:
+            pass
+
+    def test_values_persisted_before_rebuild(self):
+        """The merged values must be saved BEFORE the rebuild so
+        _init_pipeline bakes them into the videobalance launch string."""
+        try:
+            blocker = self._make_blocker(current_source=None)
+            blocker.set_color_settings(saturation=1.3, brightness=0.1)
+            assert blocker._saved_color_settings['saturation'] == 1.3
+            assert blocker._saved_color_settings['brightness'] == 0.1
+            blocker._save_color_settings.assert_called_once()
+        except ImportError:
+            pass
+
+    def test_no_pipeline_persists_instead_of_error(self):
+        """With no pipeline at all (mid signal-loss recovery), changes must
+        be persisted for the next start, not discarded with an error."""
+        try:
+            blocker = self._make_blocker(current_source=None)
+            blocker.pipeline = None
+            result = blocker.set_color_settings(saturation=1.2)
+            assert result['success'] is True
+            assert result['saturation'] == 1.2
+            blocker._save_color_settings.assert_called_once()
+            blocker.restart.assert_not_called()
+        except ImportError:
+            pass
+
 
 class TestAdBlockerExtended:
     """Extended tests for ad_blocker.py covering more functionality."""

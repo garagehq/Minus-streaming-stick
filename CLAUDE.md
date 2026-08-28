@@ -2998,6 +2998,52 @@ Tests: `TestYouTubeTVActivationScreen`, `TestMenuSkipWatchdog`,
 `TestDialogDismissAudioGuard` in `tests/test_autonomous_mode.py`;
 `TestKeypressStatusCodes` in `tests/test_roku_reconnect.py`.
 
+### Color settings (saturation/brightness/contrast/hue) not applying in real time (Fixed - Aug 2026)
+
+**Symptom:** moving the Settings color sliders had no visible effect on the
+TV picture, even though `/api/video/color` returned success and the values
+persisted.
+
+**Root cause (three coupled gaps in the Jul 2026 conditional-videobalance
+optimization):**
+1. `_init_pipeline` built `videobalance` with **hardcoded neutral values**;
+   the saved settings were only applied via `_apply_saved_color_settings()`
+   in `start()` — never in `_restart_pipeline()`. So the neutral→non-neutral
+   crossing in `set_color_settings` (which rebuilds via `restart()`) inserted
+   the element at identity → zero visible change. Every watchdog/health
+   pipeline restart also silently reset the picture to neutral while the API
+   kept reporting the saved values.
+2. The crossing rebuild went through the failure path: `_consecutive_failures`
+   incremented + exponential backoff delay, and 3 slider-driven rebuilds
+   would trip the pkill-ustreamer MPP reset.
+3. With no pipeline at all (signal-loss window), `set_color_settings`
+   returned an error and **discarded** the change.
+
+**Fix (branch `fix/color-settings-realtime`):**
+- `_init_pipeline` bakes the saved values directly into the `videobalance`
+  launch string — pipeline construction is the single source of truth, so
+  any rebuild (watchdog, health, color-crossing) comes up correct.
+- `_restart_pipeline(penalize=False)` / `restart(penalize=False)`: color
+  crossings rebuild immediately with no failure-counter increment, no
+  backoff, no pkill escalation.
+- No-pipeline and no-signal/loading modes persist the values (success) for
+  the next pipeline start instead of erroring or fighting no-signal mode.
+- **60fps zero-copy path preserved:** videobalance is still OMITTED whenever
+  settings are neutral — nothing changed about the Jul 2026 fast path. Note
+  non-neutral settings inherently cap 4K at ~56fps (CPU videobalance);
+  that's the pre-existing trade, not a regression. At 1080p, 60fps holds
+  either way.
+- Live behavior: element present → properties set instantly (true realtime);
+  neutral→non-neutral crossing → ~1-2s rebuild, then instant thereafter.
+- The stale saved values from pre-fix slider experiments (sat 0.8 /
+  contrast 0.5 / bri 0.05 — never visually applied due to bug #1) were reset
+  to neutral so the fix deploy didn't suddenly change the picture or knock
+  the display off the zero-copy path.
+
+**Tests:** `TestColorSettingsRealtime` in `tests/test_modules.py` (5 cases:
+non-penalized rebuild, neutral no-op, no-signal persist-only, persist-before-
+rebuild ordering, no-pipeline persist).
+
 ### AP mode was a terminal state — 30h network stranding (Fixed - Aug 2026)
 
 **Symptom:** box vanished from the LAN and Tailscale for ~30 hours until a
