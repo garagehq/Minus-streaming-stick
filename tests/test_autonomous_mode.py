@@ -1717,6 +1717,202 @@ class TestMenuSkipWatchdog(unittest.TestCase):
             _cleanup_mode(mode)
 
 
+class TestMenuEscapeEscalation(unittest.TestCase):
+    """Regression for the Aug 2026 19.5-hour stall: the MENU skip-loop
+    escape (Back + navigate) can only move WITHIN the current app, so when
+    the device ends up in a different app entirely (observed: Hulu's
+    "Create a New Profile" form) it no-ops forever. The path reset its
+    counter and re-escaped 80 times with zero full resets. It must now
+    escalate to _full_reset_to_youtube() like every other stuck path."""
+
+    def _stalled_mode(self):
+        mode = _make_mode()
+        roku = MagicMock()
+        roku.is_connected.return_value = True
+        roku.send_command.return_value = True
+        mode.set_device_controller(roku, 'roku')
+        _set_ocr_texts(mode, ["CREATEPROFILE", "Create a New Profile", "hulu"])
+        mode._ad_blocker.display_connected = False
+        mode._check_roku_active_app = MagicMock(return_value=True)
+        mode._is_roku_home_screen = MagicMock(return_value=False)
+        mode._is_keyboard_stuck_screen = MagicMock(return_value=False)
+        mode._is_youtube_tv_prompt = MagicMock(return_value=False)
+        mode._is_survey_screen = MagicMock(return_value=False)
+        mode._is_signed_out_screen = MagicMock(return_value=False)
+        mode._is_youtube_login_screen = MagicMock(return_value=False)
+        mode._is_youtube_shorts = MagicMock(return_value=False)
+        mode._is_youtube_home_screen = MagicMock(return_value=False)
+        mode._has_live_content_indicator = MagicMock(return_value=False)
+        mode._query_screen = MagicMock(return_value="MENU")
+        mode._is_audio_flowing = MagicMock(return_value=False)
+        mode._is_video_player_overlay = MagicMock(return_value=False)
+        mode._escape_stuck_state = MagicMock(return_value=True)
+        mode._full_reset_to_youtube = MagicMock(return_value=True)
+        return mode, roku
+
+    def _run_escape_cycle(self, mode):
+        """Drive exactly one skip->escape cycle (_MENU_SKIP_ESCAPE_AT calls)."""
+        for _ in range(mode._MENU_SKIP_ESCAPE_AT):
+            mode._ensure_youtube_playing()
+
+    def test_first_escape_uses_cheap_back_navigation(self):
+        mode, _ = self._stalled_mode()
+        try:
+            self._run_escape_cycle(mode)
+            mode._escape_stuck_state.assert_called_once()
+            mode._full_reset_to_youtube.assert_not_called()
+            self.assertEqual(mode._menu_escape_count, 1)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_second_escape_escalates_to_full_reset(self):
+        mode, _ = self._stalled_mode()
+        try:
+            self._run_escape_cycle(mode)   # escape #1
+            self._run_escape_cycle(mode)   # escape #2 -> full reset
+            self.assertEqual(mode._escape_stuck_state.call_count, 1)
+            mode._full_reset_to_youtube.assert_called_once()
+            self.assertEqual(mode._menu_escape_count, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_regression_does_not_loop_forever(self):
+        """The actual bug: 80 escapes / 0 full resets over 19.5h. Across many
+        stalled cycles the nuclear option must fire repeatedly."""
+        mode, _ = self._stalled_mode()
+        try:
+            for _ in range(6):  # 6 escape cycles
+                self._run_escape_cycle(mode)
+            self.assertGreaterEqual(mode._full_reset_to_youtube.call_count, 3)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_playing_screen_resets_escape_counter(self):
+        """A recovered session must not carry escape credit into a later,
+        unrelated stall (which would skip the cheap escape)."""
+        mode, _ = self._stalled_mode()
+        try:
+            self._run_escape_cycle(mode)
+            self.assertEqual(mode._menu_escape_count, 1)
+
+            mode._query_screen = MagicMock(return_value="PLAYING")
+            mode._is_screen_static = MagicMock(return_value=False)
+            mode._ensure_youtube_playing()
+            self.assertEqual(mode._menu_escape_count, 0)
+
+            # Next stall starts from the cheap escape again
+            mode._query_screen = MagicMock(return_value="MENU")
+            self._run_escape_cycle(mode)
+            self.assertEqual(mode._escape_stuck_state.call_count, 2)
+            mode._full_reset_to_youtube.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
+    def test_full_reset_clears_escape_counter(self):
+        mode, _ = self._stalled_mode()
+        try:
+            mode._menu_escape_count = 1
+            mode._menu_skip_count = 3
+            del mode._full_reset_to_youtube  # exercise the real method
+            mode._launch_youtube = MagicMock(return_value=True)
+            with patch('autonomous_mode.time.sleep'):
+                mode._full_reset_to_youtube()
+            self.assertEqual(mode._menu_escape_count, 0)
+            self.assertEqual(mode._menu_skip_count, 0)
+        finally:
+            _cleanup_mode(mode)
+
+
+class TestAndroidActiveAppCheck(unittest.TestCase):
+    """Fire TV / Android TV foreground-app check — the ADB analogue of the
+    Roku ECP active-app check. Catches "stuck in a different app entirely",
+    which no screen-content heuristic can recover from because the Back-based
+    escape only navigates within the current app."""
+
+    def _mode(self, current_app='com.hulu.plus', device_type='fire_tv'):
+        mode = _make_mode()
+        ctrl = MagicMock()
+        ctrl.is_connected.return_value = True
+        ctrl.send_command.return_value = True
+        ctrl.get_current_app.return_value = current_app
+        mode.set_device_controller(ctrl, device_type)
+        return mode, ctrl
+
+    def test_wrong_app_detected(self):
+        mode, _ = self._mode(current_app='com.hulu.plus')
+        try:
+            self.assertFalse(mode._check_android_active_app())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_youtube_passes(self):
+        for pkg in ('com.amazon.firetv.youtube', 'com.google.android.youtube.tv'):
+            mode, _ = self._mode(current_app=pkg)
+            try:
+                self.assertTrue(mode._check_android_active_app())
+            finally:
+                _cleanup_mode(mode)
+
+    def test_failed_query_does_not_interfere(self):
+        for value in (None, ''):
+            mode, _ = self._mode(current_app=value)
+            try:
+                self.assertTrue(mode._check_android_active_app())
+            finally:
+                _cleanup_mode(mode)
+
+    def test_exception_does_not_interfere(self):
+        mode, ctrl = self._mode()
+        try:
+            ctrl.get_current_app.side_effect = RuntimeError('adb died')
+            self.assertTrue(mode._check_android_active_app())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_roku_skips_this_check(self):
+        mode, _ = self._mode(current_app='com.hulu.plus', device_type='roku')
+        try:
+            self.assertTrue(mode._check_android_active_app())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_controller_without_capability_passes(self):
+        mode = _make_mode()
+        try:
+            ctrl = MagicMock(spec=['is_connected', 'send_command'])
+            ctrl.is_connected.return_value = True
+            mode.set_device_controller(ctrl, 'fire_tv')
+            self.assertTrue(mode._check_android_active_app())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_dispatch_relaunches_youtube_when_wrong_app(self):
+        mode, ctrl = self._mode(current_app='com.hulu.plus')
+        try:
+            mode._launch_youtube = MagicMock(return_value=True)
+            mode._menu_skip_count = 4
+            mode._menu_escape_count = 1
+            self.assertTrue(mode._ensure_youtube_playing())
+            mode._launch_youtube.assert_called_once()
+            self.assertEqual(mode._menu_skip_count, 0)
+            self.assertEqual(mode._menu_escape_count, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_not_vetoed_by_audio(self):
+        """Deliberately unguarded, like the Roku ECP check: if YouTube isn't
+        the foreground app, no YouTube video is playing regardless of what
+        audio another app emits."""
+        mode, _ = self._mode(current_app='com.hulu.plus')
+        try:
+            mode._is_audio_flowing = MagicMock(return_value=True)
+            mode._launch_youtube = MagicMock(return_value=True)
+            self.assertTrue(mode._ensure_youtube_playing())
+            mode._launch_youtube.assert_called_once()
+        finally:
+            _cleanup_mode(mode)
+
+
 class TestKeyboardStuckAudioGuard(unittest.TestCase):
     """The keyboard-stuck escape must not fire while audio is flowing —
     real sign-in/keyboard screens are silent. Observed live 2026-07-02

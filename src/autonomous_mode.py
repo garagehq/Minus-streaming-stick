@@ -233,6 +233,16 @@ class AutonomousMode:
         self._roku_home_veto_streak: int = 0
         self._ROKU_HOME_VETO_ESCAPE_AT = 6  # ~3 min at the ~33s monitor cycle
         self._MENU_SKIP_ESCAPE_AT = 5
+        # Consecutive MENU-skip escapes that did NOT restore playback. The
+        # escape (Back x4 + down/select) only works INSIDE YouTube; it can
+        # never leave a different app. Observed live 2026-08-28: the Fire TV
+        # ended up on Hulu's "Create a New Profile" form and the skip->escape
+        # cycle repeated 80 times over 19.5h with zero full resets, because
+        # this path reset _menu_skip_count and re-escaped forever. Every
+        # OTHER stuck path escalates to _full_reset_to_youtube() after
+        # _STUCK_THRESHOLD; this one now does too.
+        self._menu_escape_count: int = 0
+        self._MENU_ESCAPE_RESET_AT = 2  # ~5.5 min before the nuclear option
 
         # Music mode: steer content toward music videos (higher ad density).
         # When on, every YouTube (re)launch deep-links to a rotating seed
@@ -1723,6 +1733,7 @@ class AutonomousMode:
         self._consecutive_static = 0
         self._persistent_static_count = 0
         self._menu_skip_count = 0
+        self._menu_escape_count = 0
 
         return True
 
@@ -1864,6 +1875,47 @@ class AutonomousMode:
             logger.debug(f"[AutonomousMode] Roku active app check error: {e}")
             return True  # On error, don't interfere
 
+    def _check_android_active_app(self) -> bool:
+        """For Fire TV / Android TV, check YouTube is the foreground app.
+
+        The ADB analogue of _check_roku_active_app: the package name of the
+        foreground activity is DEFINITIVE about which app is running, so it
+        catches the class of stall that no screen-content heuristic can.
+        Observed live 2026-08-28: the Fire TV sat on Hulu's "Create a New
+        Profile" form for 19.5h — VLM said MENU, no detector recognized the
+        screen, and the Back-based escape could never leave the Hulu app.
+        This check identifies that in one cycle (~33s).
+
+        Deliberately UNGUARDED by audio, exactly like the Roku ECP check: if
+        YouTube is not the foreground app then no YouTube video is playing,
+        whatever audio some other app is emitting.
+
+        Returns True if YouTube is running, or if the check is unavailable /
+        errored (never interfere on missing information).
+        """
+        if self._device_type not in (DEVICE_TYPE_FIRE_TV, DEVICE_TYPE_GOOGLE_TV):
+            return True  # Not an ADB device, skip
+        if not hasattr(self._device_controller, 'get_current_app'):
+            return True  # Controller doesn't support the query
+
+        try:
+            current = self._device_controller.get_current_app()
+            if not current or not isinstance(current, str):
+                # Empty/None = query failed. Non-str = a controller that
+                # doesn't really implement this; never relaunch over a
+                # working session on a value we can't interpret.
+                return True
+            if self._is_youtube_app(current):
+                return True
+
+            logger.info(f"[AutonomousMode] {self._device_type} foreground app is "
+                        f"'{current}' (not YouTube) — relaunching")
+            self._log_event(f"Not on YouTube (active: {current}), relaunching")
+            return False
+        except Exception as e:
+            logger.debug(f"[AutonomousMode] Android active app check error: {e}")
+            return True  # On error, don't interfere
+
     def _ensure_youtube_playing(self):
         """Use VLM to understand screen state and take appropriate action.
 
@@ -1887,6 +1939,17 @@ class AutonomousMode:
             if not self._check_roku_active_app():
                 self._launch_youtube()
                 self._consecutive_static = 0
+                return True
+
+            # Same authoritative foreground-app check for Fire TV / Android
+            # TV. Catches "stuck in a completely different app", which no
+            # screen-content heuristic can recover from (the Back-based
+            # escape only navigates WITHIN an app).
+            if not self._check_android_active_app():
+                self._launch_youtube()
+                self._consecutive_static = 0
+                self._menu_skip_count = 0
+                self._menu_escape_count = 0
                 return True
 
             # OCR-based Roku home screen fallback (if ECP missed it).
@@ -2214,6 +2277,7 @@ class AutonomousMode:
                     self._consecutive_static = 0
                     self._stuck_count = 0
                     self._menu_skip_count = 0
+                    self._menu_escape_count = 0
                     self._last_screen_state = 'playing'
                     logger.debug("[AutonomousMode] Screen looks good, video is playing")
                     self._check_music_drift()
@@ -2372,14 +2436,35 @@ class AutonomousMode:
                     # via the paths above.
                     self._menu_skip_count = _prev_menu_skip + 1
                     if self._menu_skip_count >= self._MENU_SKIP_ESCAPE_AT:
-                        logger.warning(
-                            f"[AutonomousMode] MENU skip-loop stuck "
-                            f"({self._menu_skip_count} consecutive skips, "
-                            f"no audio/overlay/home) — escaping")
-                        self._log_event(
-                            "MENU skip-loop stuck — escaping with Back")
                         self._menu_skip_count = 0
                         self._overlay_veto_count = 0
+                        # ESCALATION LADDER (mirrors every other stuck path).
+                        # The Back+navigate escape only works INSIDE YouTube.
+                        # If we're stuck in a DIFFERENT app (observed live:
+                        # Hulu's profile-creation form), Back can never reach
+                        # YouTube and the escape no-ops forever — so after
+                        # _MENU_ESCAPE_RESET_AT failed escapes, go nuclear:
+                        # Home + relaunch YouTube, which is app-agnostic.
+                        self._menu_escape_count += 1
+                        if self._menu_escape_count >= self._MENU_ESCAPE_RESET_AT:
+                            logger.warning(
+                                f"[AutonomousMode] MENU skip-loop survived "
+                                f"{self._menu_escape_count} escapes — likely "
+                                f"stuck outside YouTube; full reset")
+                            self._log_event(
+                                "MENU skip-loop persisted — FULL RESET")
+                            self._menu_escape_count = 0
+                            self._full_reset_to_youtube()
+                            return True
+
+                        logger.warning(
+                            f"[AutonomousMode] MENU skip-loop stuck "
+                            f"({self._MENU_SKIP_ESCAPE_AT} consecutive skips, "
+                            f"no audio/overlay/home) — escaping "
+                            f"(escape {self._menu_escape_count}/"
+                            f"{self._MENU_ESCAPE_RESET_AT})")
+                        self._log_event(
+                            "MENU skip-loop stuck — escaping with Back")
                         self._escape_stuck_state()
                         return True
 
