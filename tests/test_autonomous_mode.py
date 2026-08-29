@@ -2240,6 +2240,8 @@ class TestShortsDetection(unittest.TestCase):
         finally:
             _cleanup_mode(mode)
 
+
+
     def test_ocr_signature_detected(self):
         mode = _make_mode()
         try:
@@ -2299,6 +2301,238 @@ class TestShortsDetection(unittest.TestCase):
             _cleanup_mode(mode)
 
 
+class TestShortsTVLayout(unittest.TestCase):
+    """Regression for the Aug 2026 'stuck watching Shorts in music mode'
+    bug. The YouTube *TV* Shorts player differs from the mobile layout the
+    original detection was written against:
+      - it renders a TINTED/BLURRED backdrop (measured mean ~48, std ~22
+        with a metadata column on the right), not flat black bars, so the
+        `sides_dark(<25) and sides_flat(std<6)` frame test could never fire
+      - it shows NO 'Subscribe' button, so the OCR rule that required the
+        literal word 'subscribe' could never fire either
+    Both signals were dead, so Shorts played indefinitely while every cycle
+    logged 'MENU vetoed: audio flowing'."""
+
+    @staticmethod
+    def _tv_shorts_frame(width=1280, height=720, backdrop=48,
+                         panel_val=120, left=0.305, right=0.628, noisy_right=True):
+        """Frame mimicking the live TV Shorts layout: tinted backdrop, a
+        bright 9:16 panel, and a textured metadata column on the right."""
+        import numpy as np
+        rng = np.random.default_rng(7)
+        frame = np.full((height, width, 3), backdrop, dtype=np.uint8)
+        x0, x1 = int(width * left), int(width * right)
+        # Vary the panel so it isn't a flat block (real video content)
+        panel = rng.integers(panel_val - 30, panel_val + 30,
+                             (height, x1 - x0, 3)).astype(np.uint8)
+        frame[:, x0:x1] = panel
+        if noisy_right:
+            # Metadata column: text/icons over the backdrop
+            mx0 = int(width * 0.68)
+            block = rng.integers(30, 90, (height, width - mx0, 3)).astype(np.uint8)
+            frame[:, mx0:] = block
+        return frame
+
+    def test_tinted_backdrop_panel_detected(self):
+        """The exact case that went undetected: non-black backdrop."""
+        mode = _make_mode()
+        try:
+            frame = self._tv_shorts_frame()
+            self.assertTrue(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_panel_edges_reported_near_truth(self):
+        mode = _make_mode()
+        try:
+            edges = mode._vertical_panel_edges(self._tv_shorts_frame())
+            self.assertIsNotNone(edges)
+            self.assertAlmostEqual(edges[0], 0.305, delta=0.03)
+            self.assertAlmostEqual(edges[1], 0.628, delta=0.03)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_single_edge_rejected(self):
+        """One hard vertical edge is common in real scenes — a matched PAIR
+        at pillarbox spacing is the signal, so a lone edge must not fire."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            frame = np.full((720, 1280, 3), 48, dtype=np.uint8)
+            frame[:, int(1280 * 0.305):] = 130  # bright to the right edge
+            self.assertFalse(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_wrong_panel_width_rejected(self):
+        """Two strong edges but at 16:9-ish spacing (not 9:16) — e.g. a
+        centered graphic — must not be read as a vertical video."""
+        mode = _make_mode()
+        try:
+            wide = self._tv_shorts_frame(left=0.26, right=0.74, noisy_right=False)
+            self.assertFalse(mode._is_vertical_video_frame(wide))
+            narrow = self._tv_shorts_frame(left=0.42, right=0.58, noisy_right=False)
+            self.assertFalse(mode._is_vertical_video_frame(narrow))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_shorts_shelf_row_not_detected(self):
+        """The home-screen Shorts SHELF is a row of 9:16 thumbnail cards, so
+        it matches the edge/width tests — but we're browsing, not watching.
+        Vertical extent separates them: measured span 0.77 (shelf) vs 1.00
+        (player). A Back press here would fight the home-screen navigation."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            rng = np.random.default_rng(11)
+            width, height = 1280, 720
+            frame = np.full((height, width, 3), 30, dtype=np.uint8)
+            # A row of vertical cards occupying only the middle band
+            y0, y1 = int(height * 0.23), int(height * 0.72)
+            for i in range(5):
+                x0 = int(width * (0.05 + i * 0.19))
+                x1 = x0 + int(width * 0.155)
+                frame[y0:y1, x0:x1] = rng.integers(
+                    90, 190, (y1 - y0, x1 - x0, 3)).astype(np.uint8)
+            self.assertFalse(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_full_height_panel_required(self):
+        """Same panel geometry, but only spanning half the height."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            frame = np.full((720, 1280, 3), 48, dtype=np.uint8)
+            rng = np.random.default_rng(3)
+            x0, x1 = int(1280 * 0.305), int(1280 * 0.628)
+            frame[180:540, x0:x1] = rng.integers(
+                100, 160, (360, x1 - x0, 3)).astype(np.uint8)
+            self.assertFalse(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_dark_short_on_light_backdrop_detected(self):
+        """Span uses |deviation| from the backdrop, not 'brighter than', so a
+        dark Short still registers (two live samples were dark)."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            frame = np.full((720, 1280, 3), 140, dtype=np.uint8)
+            rng = np.random.default_rng(5)
+            x0, x1 = int(1280 * 0.305), int(1280 * 0.628)
+            frame[:, x0:x1] = rng.integers(
+                5, 35, (720, x1 - x0, 3)).astype(np.uint8)
+            self.assertTrue(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_black_bar_pillarbox_still_detected(self):
+        """The mobile/black-bar layout must keep working (stronger step)."""
+        mode = _make_mode()
+        try:
+            frame = self._tv_shorts_frame(backdrop=0, noisy_right=False)
+            self.assertTrue(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def _shorts_mode(self, texts):
+        mode = _make_mode()
+        ctrl = MagicMock()
+        ctrl.is_connected.return_value = True
+        mode.set_device_controller(ctrl, 'fire_tv')
+        _set_ocr_texts(mode, texts)
+        mode._ad_blocker.is_visible = False
+        mode._frame_capture = None  # isolate signal 1
+        return mode
+
+    def test_ocr_multiple_handles_no_subscribe_detected(self):
+        """Live OCR from the stuck session: three handles, no 'subscribe',
+        no duration marker."""
+        mode = self._shorts_mode([
+            "@wabie", "WHICH ONE'S THAT ONE?!", "AVeryWabieSummer-Animation",
+            "@sammizrahipowell animation", "@rachelrhodes5046", "TRUTH OR DARE"])
+        try:
+            self.assertTrue(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_ocr_single_handle_not_enough(self):
+        """A normal video's info panel shows ONE channel handle — that must
+        not be read as Shorts."""
+        mode = self._shorts_mode(["@sometechchannel", "How to fix a sink"])
+        try:
+            self.assertFalse(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_ocr_duration_marker_vetoes(self):
+        """A visible progress/duration time means it's a full video."""
+        mode = self._shorts_mode(["@chan1", "@chan2", "subscribe", "10:23"])
+        try:
+            self.assertFalse(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_ocr_legacy_handle_plus_subscribe_still_detected(self):
+        """The original mobile-layout signature must keep working."""
+        mode = self._shorts_mode(["@onlyonehandle", "Subscribe"])
+        try:
+            self.assertTrue(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_no_handles_no_detection(self):
+        mode = self._shorts_mode(["Recommended", "New to you", "Trending"])
+        try:
+            self.assertFalse(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_frame_signal_requires_stable_edges_across_frames(self):
+        """Two frames must agree on the panel boundaries. Incidental scene
+        edges that momentarily land at pillarbox spacing drift; a real
+        pillarbox boundary does not."""
+        mode = _make_mode()
+        try:
+            ctrl = MagicMock()
+            ctrl.is_connected.return_value = True
+            mode.set_device_controller(ctrl, 'fire_tv')
+            _set_ocr_texts(mode, ["nothing", "useful"])
+            mode._ad_blocker.is_visible = False
+            f1 = TestShortsTVLayout._tv_shorts_frame(left=0.305, right=0.628)
+            f2 = TestShortsTVLayout._tv_shorts_frame(left=0.36, right=0.68)  # moved
+            mode._frame_capture = MagicMock()
+            mode._frame_capture.capture.side_effect = [f1, f2]
+            with patch("autonomous_mode.time.sleep"):
+                self.assertFalse(mode._is_youtube_shorts())
+
+            # Same boundaries twice -> detected
+            mode._frame_capture.capture.side_effect = [
+                TestShortsTVLayout._tv_shorts_frame(),
+                TestShortsTVLayout._tv_shorts_frame()]
+            with patch("autonomous_mode.time.sleep"):
+                self.assertTrue(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_frame_signal_skipped_while_blocking(self):
+        """An ad overlay is up — a Back press could exit the video."""
+        mode = _make_mode()
+        try:
+            ctrl = MagicMock()
+            ctrl.is_connected.return_value = True
+            mode.set_device_controller(ctrl, 'fire_tv')
+            _set_ocr_texts(mode, ["nothing", "useful"])
+            mode._ad_blocker.is_visible = True
+            mode._frame_capture = MagicMock()
+            mode._frame_capture.capture.return_value = \
+                TestShortsTVLayout._tv_shorts_frame()
+            self.assertFalse(mode._is_youtube_shorts())
+            mode._frame_capture.capture.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
 class TestMusicMode(unittest.TestCase):
     """Tests for the music-videos toggle: persistence, seed deep-link
     launching, and OCR-evidence drift steering."""
@@ -2342,6 +2576,78 @@ class TestMusicMode(unittest.TestCase):
             # Seeds rotate — consecutive launches use different videos
             self.assertNotEqual(calls[0].args[1], calls[1].args[1])
             self.assertIn(calls[0].args[1], mode.MUSIC_VIDEO_SEEDS)
+        finally:
+            _cleanup_mode(mode)
+
+    def _android_ctrl(self):
+        """Fire TV-style controller: ADB access, no ECP contentId support."""
+        ctrl = MagicMock(spec=['is_connected', 'send_command', 'get_current_app',
+                               '_lock', '_device'])
+        ctrl.is_connected.return_value = True
+        ctrl.get_current_app.return_value = 'com.amazon.firetv.youtube'
+        ctrl._lock = threading.Lock()
+        ctrl._device = MagicMock()
+        return ctrl
+
+    def test_android_music_seed_deep_links_over_adb(self):
+        """Fire TV has no ECP contentId, but YouTube honours a VIEW intent.
+        Without this, music mode was inert on ADB devices — every seed fell
+        through to a plain launch that resumed the recommendation feed
+        (observed Aug 2026: music mode on, device serving Shorts)."""
+        mode = _make_mode()
+        try:
+            ctrl = self._android_ctrl()
+            mode.set_device_controller(ctrl, 'fire_tv')
+            mode._music_mode = True
+            with patch("autonomous_mode.time.sleep"):
+                self.assertTrue(mode._launch_youtube())
+            cmd = ctrl._device.adb_shell.call_args[0][0]
+            self.assertIn('android.intent.action.VIEW', cmd)
+            self.assertIn('youtube.com/watch?v=', cmd)
+            seed = cmd.split('watch?v=')[1].split('"')[0]
+            self.assertIn(seed, mode.MUSIC_VIDEO_SEEDS)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_android_music_seeds_rotate(self):
+        mode = _make_mode()
+        try:
+            ctrl = self._android_ctrl()
+            mode.set_device_controller(ctrl, 'fire_tv')
+            mode._music_mode = True
+            with patch("autonomous_mode.time.sleep"):
+                mode._launch_youtube()
+                mode._launch_youtube()
+            cmds = [c[0][0] for c in ctrl._device.adb_shell.call_args_list]
+            seeds = [c.split('watch?v=')[1].split('"')[0] for c in cmds]
+            self.assertNotEqual(seeds[0], seeds[1])
+        finally:
+            _cleanup_mode(mode)
+
+    def test_android_music_seed_not_used_when_music_mode_off(self):
+        mode = _make_mode()
+        try:
+            ctrl = self._android_ctrl()
+            mode.set_device_controller(ctrl, 'fire_tv')
+            mode._music_mode = False
+            with patch("autonomous_mode.time.sleep"):
+                mode._launch_youtube()
+            for c in ctrl._device.adb_shell.call_args_list:
+                self.assertNotIn('watch?v=', c[0][0])
+        finally:
+            _cleanup_mode(mode)
+
+    def test_android_music_seed_requires_adb_handles(self):
+        """A controller without _lock/_device can't deep-link; must not raise
+        and must fall through to the plain launch."""
+        mode = _make_mode()
+        try:
+            ctrl = MagicMock(spec=['is_connected', 'send_command'])
+            ctrl.is_connected.return_value = True
+            mode.set_device_controller(ctrl, 'fire_tv')
+            mode._music_mode = True
+            with patch("autonomous_mode.time.sleep"):
+                self.assertFalse(mode._launch_music_seed())
         finally:
             _cleanup_mode(mode)
 

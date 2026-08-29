@@ -883,21 +883,67 @@ class AutonomousMode:
         ctrl = self._device_controller
         if not ctrl or not ctrl.is_connected():
             return False
-        if not hasattr(ctrl, 'launch_app_with_content'):
-            return False
 
         seed = self.MUSIC_VIDEO_SEEDS[self._music_seed_index % len(self.MUSIC_VIDEO_SEEDS)]
         self._music_seed_index += 1
         try:
-            if ctrl.launch_app_with_content('youtube', seed):
-                time.sleep(3)
+            if hasattr(ctrl, 'launch_app_with_content'):
+                if ctrl.launch_app_with_content('youtube', seed):
+                    time.sleep(3)
+                    self._music_no_evidence_checks = 0
+                    logger.info(f"[AutonomousMode] Music seed launched: {seed}")
+                    self._log_event(f"Music seed launched ({seed})")
+                    return True
+                return False
+            # Fire TV / Android TV: no ECP contentId, but YouTube honours a
+            # VIEW intent on a watch URL. Without this, music mode was inert
+            # on ADB devices — every "seed" fell through to a plain launch
+            # that just resumed the recommendation feed (observed Aug 2026:
+            # music mode on, device serving Shorts).
+            if self._launch_music_seed_android(seed):
                 self._music_no_evidence_checks = 0
-                logger.info(f"[AutonomousMode] Music seed launched: {seed}")
-                self._log_event(f"Music seed launched ({seed})")
                 return True
         except Exception as e:
             logger.warning(f"[AutonomousMode] Music seed launch failed: {e}")
         return False
+
+    def _launch_music_seed_android(self, seed: str) -> bool:
+        """Deep-link YouTube to a video id on Fire TV / Android TV over ADB.
+
+        Mirrors _launch_youtube_android's controller access pattern.
+        """
+        ctrl = self._device_controller
+        if self._device_type not in (DEVICE_TYPE_FIRE_TV, DEVICE_TYPE_GOOGLE_TV):
+            return False
+        if not (hasattr(ctrl, '_lock') and hasattr(ctrl, '_device')):
+            return False
+
+        url = f"https://www.youtube.com/watch?v={seed}"
+        try:
+            with ctrl._lock:
+                device = ctrl._device
+                if not device:
+                    return False
+                for pkg in YOUTUBE_PACKAGES:
+                    if '.' not in pkg:
+                        continue  # 'youtube' is a match token, not a package
+                    try:
+                        device.adb_shell(
+                            f'am start -a android.intent.action.VIEW '
+                            f'-d "{url}" {pkg}')
+                        break
+                    except Exception:
+                        continue
+                else:
+                    return False
+        except Exception as e:
+            logger.warning(f"[AutonomousMode] Android music seed failed: {e}")
+            return False
+
+        time.sleep(3)
+        logger.info(f"[AutonomousMode] Music seed deep-linked (android): {seed}")
+        self._log_event(f"Music seed launched ({seed})")
+        return True
 
     def _launch_youtube_roku(self) -> bool:
         """Launch YouTube on Roku using ECP launch API."""
@@ -1411,46 +1457,104 @@ class AutonomousMode:
             logger.debug(f"[AutonomousMode] Overlay check failed: {e}")
             return False
 
-    def _is_vertical_video_frame(self, frame) -> bool:
-        """Detect a pillarboxed vertical video (Shorts/Reels format) frame.
+    # Geometry of a 9:16 video pillarboxed on a 16:9 screen: the panel
+    # occupies (9/16)/(16/9) = 0.316 of the width. Measured on the live
+    # YouTube TV Shorts player: 0.314-0.334 (slightly wider than ideal, and
+    # sitting left of center, because the metadata column takes the right).
+    _VPANEL_WIDTH_MIN = 0.29
+    _VPANEL_WIDTH_MAX = 0.36
+    _VPANEL_EDGE_MIN = 3.0     # min column-profile gradient at BOTH edges
+    _VPANEL_EDGE_TOL = 0.02    # cross-frame edge-position agreement
+    _VPANEL_MIN_SPAN = 0.90    # panel must fill ~the whole frame height
 
-        A 9:16 video centered on a 16:9 display fills only ~32% of the
-        width; the black bars are ~34% on each side. We sample the outer
-        22% on each side (safely inside the bars) and the middle 20%
-        (safely inside the video) and require:
-          - both side bands dark AND uniform (low std) — true pillarbox
-            bars are flat black; a dark movie scene has texture
-          - the center clearly brighter than the sides
+    def _vertical_panel_edges(self, frame):
+        """Locate the pillarbox boundaries of a vertical (9:16) video panel.
 
-        Callers double-confirm across two frames a couple of seconds apart
-        so a single unlucky movie shot can't false-trigger a Back press.
+        Returns (left, right) as fractions of width, or None if the frame
+        isn't pillarboxed.
+
+        Why EDGES and not "dark flat bars": the YouTube TV Shorts player
+        does not use flat black bars. It renders a tinted/blurred backdrop
+        with a metadata column (title, @handles, action icons) on the
+        right — measured live at mean ~48 and std ~22, so the previous
+        `sides_dark (<25) and sides_flat (std<6)` test could never fire and
+        Shorts went undetected indefinitely.
+
+        What IS invariant across layouts is the geometry: two strong steps
+        in the column-brightness profile separated by ~0.32 of the width.
+        Requiring BOTH edges to be strong is what rejects ordinary content
+        (a single hard vertical edge is common in real scenes; a matched
+        pair at exactly pillarbox spacing is not).
+
+        Validated on a live corpus captured from this device: 7/8 Shorts
+        frames detected, 0/40 regular-content frames flagged (the 8th
+        Shorts sample was a duplicate of a regular frame, i.e. a correct
+        rejection). Black-bar pillarboxing produces an even stronger step,
+        so the mobile layout still detects.
         """
         try:
             if frame is None:
-                return False
+                return None
             h, w = frame.shape[:2]
             if h == 0 or w <= h:
-                return False
+                return None
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-            side_w = max(1, int(w * 0.22))
-            left = gray[:, :side_w].astype(np.float32)
-            right = gray[:, w - side_w:].astype(np.float32)
-            center = gray[:, int(w * 0.40):int(w * 0.60)].astype(np.float32)
 
-            left_mean, right_mean = float(left.mean()), float(right.mean())
-            sides_dark = left_mean < 25 and right_mean < 25
-            # True pillarbox bars are FLAT (std ~1-3 from JPEG noise on
-            # video-range black). Keep this tight: even dim random noise
-            # grays out to std ~8 after BGR→gray conversion, and a dark
-            # movie scene with a lit center subject must not trigger a
-            # Back press on a playing video.
-            sides_flat = float(left.std()) < 6 and float(right.std()) < 6
-            center_mean = float(center.mean())
-            center_lit = center_mean > 40 and center_mean > 4 * max(left_mean, right_mean, 1.0)
-            return sides_dark and sides_flat and center_lit
+            # Column-brightness profile, lightly smoothed so single-column
+            # JPEG noise can't masquerade as a panel edge.
+            col_means = gray.mean(axis=0).astype(np.float64)
+            k = max(3, int(w * 0.004)) | 1
+            smoothed = np.convolve(col_means, np.ones(k) / k, mode='same')
+            grad = np.abs(np.diff(smoothed))
+
+            def strongest(lo, hi):
+                a, b = int(w * lo), int(w * hi)
+                seg = grad[a:b]
+                if seg.size == 0:
+                    return 0.0, 0.0
+                i = int(np.argmax(seg))
+                return (a + i) / w, float(seg[i])
+
+            # Search windows bracket the expected boundaries with slack.
+            left_pos, left_mag = strongest(0.22, 0.42)
+            right_pos, right_mag = strongest(0.58, 0.78)
+
+            if min(left_mag, right_mag) < self._VPANEL_EDGE_MIN:
+                return None
+            width = right_pos - left_pos
+            if not (self._VPANEL_WIDTH_MIN <= width <= self._VPANEL_WIDTH_MAX):
+                return None
+
+            # The panel must fill essentially the whole frame height. This is
+            # what separates WATCHING a Short (video runs top to bottom) from
+            # the home-screen Shorts SHELF, whose cards are themselves 9:16
+            # and otherwise match every test above — measured span 0.77 for
+            # the shelf vs 1.00 for the player. Deviation (not "brighter
+            # than") so dark Shorts on a light backdrop still register.
+            a, b = int(w * left_pos) + 1, int(w * right_pos)
+            if b <= a:
+                return None
+            row_means = gray[:, a:b].astype(np.float32).mean(axis=1)
+            outside = np.concatenate([
+                gray[:, :int(w * 0.20)].ravel(),
+                gray[:, int(w * 0.80):].ravel()]).astype(np.float32)
+            backdrop = float(np.median(outside))
+            content = np.abs(row_means - backdrop) > 12
+            if not content.any():
+                return None
+            rows_idx = np.where(content)[0]
+            span = (rows_idx[-1] - rows_idx[0] + 1) / float(h)
+            if span < self._VPANEL_MIN_SPAN:
+                return None
+
+            return left_pos, right_pos
         except Exception as e:
             logger.debug(f"[AutonomousMode] Vertical-frame check error: {e}")
-            return False
+            return None
+
+    def _is_vertical_video_frame(self, frame) -> bool:
+        """True if the frame shows a pillarboxed vertical (9:16) video."""
+        return self._vertical_panel_edges(frame) is not None
 
     def _is_youtube_shorts(self) -> bool:
         """Check if we're watching YouTube Shorts (short-form vertical video).
@@ -1458,12 +1562,11 @@ class AutonomousMode:
         We want to exit Shorts and find full-length videos. Two
         complementary signals:
 
-        1. OCR signature — "@handle" + "subscribe" visible with no video
-           duration/progress time marker (Shorts have no progress bar).
-           Catches the moments the Shorts UI overlay is on screen.
-        2. Vertical-format frame — pillarboxed 9:16 video (dark uniform
-           side bars + lit center), confirmed on TWO frames ~2s apart.
-           Catches overlay-less playback where OCR sees nothing.
+        1. OCR signature — Shorts-UI markers with no video duration/progress
+           time marker (Shorts have no progress bar).
+        2. Vertical-format frame — pillarboxed 9:16 video, confirmed on TWO
+           frames ~2s apart AND at the same panel boundaries. Catches
+           overlay-less playback where OCR sees nothing.
         """
         try:
             # Signal 1: OCR signature
@@ -1472,17 +1575,28 @@ class AutonomousMode:
                 if texts:
                     combined = ' '.join(str(t) for t in texts).lower()
 
-                    has_handle = '@' in combined
-                    has_subscribe = 'subscribe' in combined
                     # Full videos show a time marker like "10:23"; Shorts
                     # never do. (The old check here was a tautology — it
                     # matched any digit anywhere + any colon anywhere, so
                     # it almost always suppressed detection.)
                     has_duration = re.search(r'\b\d{1,2}:\d{2}\b', combined) is not None
+                    handles = set(re.findall(r'@[a-z0-9_.]{2,}', combined))
+                    has_subscribe = 'subscribe' in combined
+                    # The TV Shorts layout has NO "Subscribe" button at all —
+                    # requiring that word made this signal dead on this device
+                    # (observed live: three @handles on screen, no 'subscribe',
+                    # so Shorts went undetected). The stable marker there is
+                    # the creator handle plus collaborator/mention handles in
+                    # the metadata column. Two DISTINCT handles keeps this
+                    # specific: a normal video's info panel shows one channel.
+                    shorts_ui = has_subscribe or len(handles) >= 2
 
-                    if has_handle and has_subscribe and not has_duration:
-                        logger.info("[AutonomousMode] Shorts detected via OCR: "
-                                    "@handle + subscribe, no duration")
+                    if handles and shorts_ui and not has_duration:
+                        logger.info(
+                            f"[AutonomousMode] Shorts detected via OCR: "
+                            f"{len(handles)} handle(s)"
+                            f"{' + subscribe' if has_subscribe else ''}, "
+                            f"no duration")
                         return True
 
             # Signal 2: vertical-format (pillarboxed) frames, double-checked.
@@ -1491,13 +1605,21 @@ class AutonomousMode:
             if self._frame_capture and not (
                 self._ad_blocker and getattr(self._ad_blocker, 'is_visible', False)
             ):
-                frame = self._frame_capture.capture()
-                if self._is_vertical_video_frame(frame):
+                edges1 = self._vertical_panel_edges(self._frame_capture.capture())
+                if edges1:
                     time.sleep(2)
-                    frame2 = self._frame_capture.capture()
-                    if self._is_vertical_video_frame(frame2):
-                        logger.info("[AutonomousMode] Shorts detected via "
-                                    "vertical-format (pillarboxed) frames")
+                    edges2 = self._vertical_panel_edges(self._frame_capture.capture())
+                    # Require the SAME boundaries both times. A pillarbox
+                    # edge is static; incidental scene edges that happen to
+                    # land at pillarbox spacing drift between frames.
+                    if edges2 and all(
+                        abs(a - b) <= self._VPANEL_EDGE_TOL
+                        for a, b in zip(edges1, edges2)
+                    ):
+                        logger.info(
+                            f"[AutonomousMode] Shorts detected via "
+                            f"vertical-format frames (panel "
+                            f"{edges1[0]:.2f}-{edges1[1]:.2f})")
                         return True
 
             return False

@@ -2998,6 +2998,59 @@ Tests: `TestYouTubeTVActivationScreen`, `TestMenuSkipWatchdog`,
 `TestDialogDismissAudioGuard` in `tests/test_autonomous_mode.py`;
 `TestKeypressStatusCodes` in `tests/test_roku_reconnect.py`.
 
+### Stuck watching Shorts in music mode — TV-layout Shorts detection + Fire TV music seeds (Fixed - Aug 2026)
+
+**Symptom:** music mode ON, but the Fire TV played YouTube Shorts
+indefinitely. Every cycle logged `MENU vetoed: audio flowing — video is
+playing` (correct: a Short IS playing), and nothing ever exited.
+
+**Three independent bugs, all in the same failure:**
+
+**1. `_is_youtube_shorts` OCR signal required the literal word
+`subscribe`.** The YouTube *TV* Shorts player has **no Subscribe button** —
+its metadata column shows the title, creator handle and mention handles.
+Live OCR during the stall: `@wabie`, `@sammizrahipowell`,
+`@rachelrhodes5046` and no `subscribe`, so the signal could never fire.
+Now: `subscribe` **OR ≥2 distinct `@handles`** (still requiring no
+duration marker). Two DISTINCT handles keeps it specific — a normal
+video's info panel shows one channel.
+
+**2. `_is_vertical_video_frame` assumed flat BLACK pillarbox bars.** The TV
+Shorts player renders a tinted/blurred backdrop with a metadata column —
+measured mean ~48, std ~22 — so `sides_dark(<25) and sides_flat(std<6)`
+could never fire either. Both signals were dead simultaneously.
+Rewritten as `_vertical_panel_edges()`, which keys on the **geometry**
+instead of the color: two strong steps in the column-brightness profile
+separated by ~0.32 of the width (9:16 on 16:9 = 0.316), requiring
+**both** edges (a lone hard vertical edge is common in real scenes; a
+matched pair at pillarbox spacing is not), plus a **vertical-extent**
+test — the panel must fill ≥90% of frame height. That last check is what
+rejects the home-screen **Shorts shelf**, whose cards are themselves 9:16
+and match every other test (measured span 0.77 shelf vs 1.00 player).
+`_is_youtube_shorts` now also requires the two confirmation frames to
+report the **same** boundaries (a pillarbox edge is static; incidental
+scene edges drift).
+
+Validated on a corpus captured from the live device: **7/8 Shorts frames
+detected, 0/40 regular-video frames, 0/20 YouTube-menu frames** (the 8th
+Shorts sample was byte-identical to a regular frame — a correct
+rejection). Black-bar pillarboxing gives an even stronger step, so the
+mobile layout still detects.
+
+**3. Music mode was inert on Fire TV.** `_launch_music_seed` required
+`launch_app_with_content`, which **only the Roku controller has**, so every
+"seed launch" silently fell through to a plain launch that just resumed the
+recommendation feed. Added `_launch_music_seed_android()`: YouTube honours
+an ADB `VIEW` intent on a watch URL, so Fire TV / Google TV now deep-link
+seeds like Roku does. Verified live — first seed ever to fire on this
+device: `Music seed deep-linked (android): kJQP7kiw5Fk`.
+
+**Tests:** `TestShortsTVLayout` (15 cases: tinted backdrop, panel-edge
+accuracy, single-edge rejection, wrong width, black-bar compatibility,
+shelf rejection, full-height requirement, dark-Short-on-light-backdrop,
+OCR handle rules, cross-frame stability, blocking skip) plus 4 Android
+music-seed cases in `TestMusicMode`. Suite 237/237.
+
 ### Thermal-adaptive degradation — stable 30fps + stickier blocking under throttle (Added - Aug 2026)
 
 **Motivation (observed live):** during 4K passthrough the SoC rides its
