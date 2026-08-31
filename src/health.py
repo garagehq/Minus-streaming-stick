@@ -82,6 +82,8 @@ class HealthMonitor:
         # HDMI-TX output tracking (for TV disconnect/reconnect detection)
         self._last_hdmi_output_connected = None  # Track output connector status
         self._hdmi_output_reconnect_time = 0  # When output was last reconnected
+        # Two-strike confirmation for the audio unmute watchdog (see below)
+        self._muted_not_blocking_seen = False
 
         # Format/resolution tracking for adaptive restart
         self._last_hdmi_format = None  # Last detected V4L2 format (NV12, NV24, etc.)
@@ -358,14 +360,30 @@ class HealthMonitor:
                     self._on_video_pipeline_stall()
 
         # Audio unmute watchdog - ensure audio is not muted when not blocking
-        # This prevents audio from getting stuck muted due to race conditions or bugs
+        # This prevents audio from getting stuck muted due to race conditions or bugs.
+        #
+        # ad_blocker.hide() now unmutes synchronously in the same locked
+        # section that clears is_visible, so this should never fire. The two
+        # reads below are still not atomic with respect to each other, so
+        # require the condition to hold across two consecutive checks before
+        # acting — that way a sub-millisecond straddle can't produce a
+        # spurious WARN (13 such warnings in 48h before the hide() fix).
+        # A genuine stuck mute is still recovered, just one cycle later.
         if self.minus.audio and self.minus.ad_blocker:
             is_blocking = self.minus.ad_blocker.is_visible
             is_muted = self.minus.audio.is_muted
 
             if not is_blocking and is_muted:
-                logger.warning("[HealthMonitor] Audio stuck muted while not blocking - forcing unmute")
-                self.minus.audio.unmute()
+                if self._muted_not_blocking_seen:
+                    logger.warning("[HealthMonitor] Audio stuck muted while not blocking - forcing unmute")
+                    self.minus.audio.unmute()
+                    self._muted_not_blocking_seen = False
+                else:
+                    self._muted_not_blocking_seen = True
+                    logger.debug("[HealthMonitor] Muted while not blocking - "
+                                 "confirming on next check")
+            else:
+                self._muted_not_blocking_seen = False
 
         # VLM health
         if status.vlm_consecutive_timeouts >= self.vlm_timeout_threshold:

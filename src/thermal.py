@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 
 ENTER_TEMP_C = float(os.environ.get('MINUS_THERMAL_ENTER_C', '83'))
 EXIT_TEMP_C = float(os.environ.get('MINUS_THERMAL_EXIT_C', '75'))
+# A cpufreq cooling device reporting cur_state > 0 is the kernel's own
+# "I am capping clocks" signal, but on RK3588 it can sit non-zero while the
+# SoC is merely warm — observed live entering DEGRADED at 65.6°C and 67.5°C,
+# which is nowhere near heat-limited and just churned the fps cap and the
+# blocking thresholds. Require the throttle signal to be corroborated by a
+# temperature floor; the standalone ENTER_TEMP_C path still catches a hot SoC
+# whose cooling state we failed to read.
+THROTTLE_MIN_TEMP_C = float(os.environ.get('MINUS_THERMAL_THROTTLE_MIN_C', '78'))
 ENTER_SUSTAIN_S = float(os.environ.get('MINUS_THERMAL_ENTER_SUSTAIN', '15'))
 EXIT_SUSTAIN_S = float(os.environ.get('MINUS_THERMAL_EXIT_SUSTAIN', '60'))
 CHECK_INTERVAL_S = float(os.environ.get('MINUS_THERMAL_CHECK_INTERVAL', '5'))
@@ -86,9 +94,11 @@ class ThermalGovernor:
     """
 
     def __init__(self, enter_temp=None, exit_temp=None,
-                 enter_sustain=None, exit_sustain=None):
+                 enter_sustain=None, exit_sustain=None, throttle_min_temp=None):
         self.enter_temp = ENTER_TEMP_C if enter_temp is None else enter_temp
         self.exit_temp = EXIT_TEMP_C if exit_temp is None else exit_temp
+        self.throttle_min_temp = (THROTTLE_MIN_TEMP_C if throttle_min_temp is None
+                                  else throttle_min_temp)
         self.enter_sustain = ENTER_SUSTAIN_S if enter_sustain is None else enter_sustain
         self.exit_sustain = EXIT_SUSTAIN_S if exit_sustain is None else exit_sustain
         self.degraded = False
@@ -97,7 +107,14 @@ class ThermalGovernor:
 
     def update(self, temp_c, throttled, now):
         """Feed one sample. Returns True if self.degraded changed."""
-        hot = bool(throttled) or (temp_c is not None and temp_c >= self.enter_temp)
+        # Throttling only counts as "hot" when corroborated by temperature.
+        # If temp is unreadable we trust the kernel's throttle signal alone
+        # (better to degrade than to ignore a real thermal cap).
+        throttled_hot = bool(throttled) and (
+            temp_c is None or temp_c >= self.throttle_min_temp)
+        hot = throttled_hot or (temp_c is not None and temp_c >= self.enter_temp)
+        # Exit still requires the throttle signal to be fully clear, so we
+        # never drop the cap while the kernel is actively capping clocks.
         cool = (not throttled) and (temp_c is None or temp_c <= self.exit_temp)
 
         if not self.degraded:
@@ -149,9 +166,10 @@ class ThermalMonitor:
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name='thermal-monitor')
         self._thread.start()
-        logger.info(f"[Thermal] Monitor started (enter: throttled or "
-                    f">={self.governor.enter_temp:.0f}°C for "
-                    f"{self.governor.enter_sustain:.0f}s; exit: cool and "
+        logger.info(f"[Thermal] Monitor started (enter: throttled at "
+                    f">={self.governor.throttle_min_temp:.0f}°C, or "
+                    f">={self.governor.enter_temp:.0f}°C alone, for "
+                    f"{self.governor.enter_sustain:.0f}s; exit: unthrottled and "
                     f"<={self.governor.exit_temp:.0f}°C for "
                     f"{self.governor.exit_sustain:.0f}s)")
 

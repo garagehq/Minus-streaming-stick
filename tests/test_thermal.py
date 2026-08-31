@@ -31,19 +31,48 @@ class TestGovernorEnter(unittest.TestCase):
 
     def _gov(self):
         return ThermalGovernor(enter_temp=83, exit_temp=75,
-                               enter_sustain=15, exit_sustain=60)
+                               enter_sustain=15, exit_sustain=60,
+                               throttle_min_temp=78)
 
     def test_starts_normal(self):
         self.assertFalse(self._gov().degraded)
 
     def test_throttled_must_sustain_before_entering(self):
         g = self._gov()
-        self.assertFalse(g.update(70, True, 0))    # hot sample, timer starts
+        self.assertFalse(g.update(80, True, 0))    # hot sample, timer starts
         self.assertFalse(g.degraded)
-        self.assertFalse(g.update(70, True, 10))   # 10s < 15s sustain
+        self.assertFalse(g.update(80, True, 10))   # 10s < 15s sustain
         self.assertFalse(g.degraded)
-        self.assertTrue(g.update(70, True, 15))    # sustained -> enter
+        self.assertTrue(g.update(80, True, 15))    # sustained -> enter
         self.assertTrue(g.degraded)
+
+    def test_throttled_but_cool_does_not_enter(self):
+        """Regression: RK3588 reports cpufreq cooling state > 0 while merely
+        warm. Live logs showed DEGRADED entered at 65.6°C and 67.5°C, which
+        is nowhere near heat-limited and just churned the fps cap and the
+        blocking thresholds."""
+        g = self._gov()
+        for t in range(0, 200, 5):
+            g.update(66, True, t)
+        self.assertFalse(g.degraded)
+
+    def test_throttled_at_floor_enters(self):
+        g = self._gov()
+        g.update(78, True, 0)
+        self.assertTrue(g.update(78, True, 15))
+
+    def test_hot_without_throttle_still_enters(self):
+        """The standalone temperature path must still catch a hot SoC whose
+        cooling state we failed to read."""
+        g = self._gov()
+        g.update(84, False, 0)
+        self.assertTrue(g.update(84, False, 15))
+
+    def test_throttled_with_unreadable_temp_enters(self):
+        """No temperature reading: trust the kernel's throttle signal."""
+        g = self._gov()
+        g.update(None, True, 0)
+        self.assertTrue(g.update(None, True, 15))
 
     def test_temp_alone_can_enter(self):
         g = self._gov()
