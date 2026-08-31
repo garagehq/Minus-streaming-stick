@@ -2998,6 +2998,134 @@ Tests: `TestYouTubeTVActivationScreen`, `TestMenuSkipWatchdog`,
 `TestDialogDismissAudioGuard` in `tests/test_autonomous_mode.py`;
 `TestKeypressStatusCodes` in `tests/test_roku_reconnect.py`.
 
+### Log-sweep fixes: OCR kill storm, display-loop spam, eager thermal guard, stuck-muted audio (Fixed - Aug 2026)
+
+Four independent issues found by sweeping 4 days of production logs.
+
+**1. OCR worker killed ~440×/day (1933 in 4 days).** Every kill landed at
+exactly 1.0s — `OCRProcess.HARD_TIMEOUT`, which covers only the worker
+round-trip (IPC + PaddleOCR); snapshot capture happens in the caller and is
+NOT included. Measured over 57k successful frames: p50 202ms, p90 336ms,
+p99 845ms, **p99.9 990ms**, max 1093ms — so the limit sat directly on the
+latency tail and the slowest ~0.75% of frames were killed. Each kill costs a
+process kill + ~3s model reload ⇒ **~22 min/day with no OCR**, arriving in
+bursts of up to 100/hour where nearly every cycle died and restarted. The
+slow frames are text-DENSE screens (sports scoreboards, credits, menu
+grids); PaddleOCR recognises per detected box, so latency scales with the
+number of text regions. Compounding it, the documented `--ocr-timeout` flag
+and `MinusConfig.ocr_timeout = 1.5` were parsed, stored, and **never read by
+anything** — the effective timeout was a hardcoded class constant. Fix:
+`OCRProcess(hard_timeout=...)`, default **1.5s** (clears the observed max
+with ~40% headroom), wired from `config.ocr_timeout` so the flag works.
+
+**2. Display retry loop emitted ~12,300 log lines/day.** While HDMI-TX is
+disconnected the loop forked `modetest` (via `probe_drm_output()`) and
+logged two lines every 7s **forever** — 513 lines/hour, the large majority
+of all journal volume, plus a subprocess fork every 7s on a thermally
+constrained SoC. Fix: gate the expensive probe behind
+`Minus._any_hdmi_output_connected()`, a free sysfs read
+(`/sys/class/drm/card*-HDMI-A-*/status`) that reuses
+`HealthMonitor._check_hdmi_output_connected` when available and falls back
+to reading sysfs directly. The 7s cadence is unchanged, so reconnect stays
+exactly as responsive; the "still waiting" line is rate-limited to once per
+5 min (`_DISPLAY_RETRY_NOTICE_INTERVAL`). The helper **fails open** — an
+unreadable/unknown sysfs topology returns True so a probe failure can never
+permanently block display recovery. Measured after: **0 display-loop lines
+in 5 minutes** (was ~42), one notice.
+
+**3. Thermal DEGRADED entered at 65.6°C and 67.5°C.** The rule was
+`hot = throttled OR temp >= 83`, and on RK3588 a `cpufreq` cooling device
+can report `cur_state > 0` while the SoC is merely warm — nowhere near
+heat-limited, but each entry churned the fps cap and the OCR/VLM blocking
+thresholds. Fix: the throttle signal now needs temperature corroboration —
+`THROTTLE_MIN_TEMP_C` (78°C, env `MINUS_THERMAL_THROTTLE_MIN_C`). The
+standalone `temp >= ENTER_TEMP_C` path still catches a hot SoC whose cooling
+state we failed to read, an unreadable temperature still trusts the kernel's
+throttle flag, and **exit still requires the throttle flag fully clear** so
+the cap is never dropped while the kernel is actively capping clocks.
+
+**4. Audio left muted after ~2.4% of blocks (13 in 48h).** `hide()` cleared
+`is_visible` at the top of its locked section but `audio.unmute()` only ran
+in `_on_end_animation_complete()` — up to ~0.25s later on the animation
+thread. Everything in between was a window where the health watchdog
+correctly observed "not blocking but still muted". Worse, **three paths
+skipped the unmute entirely**, leaving audio dead until the watchdog swept
+it up to 5s later: (a) the `if not was_visible and _animation_direction !=
+'start': return` early return, (b) an end animation interrupted by
+`_stop_animation_thread()`, which never runs the completion callback, and
+(c) any exception between there and the animation start. Fix: unmute **once,
+unconditionally, inside the same locked section that clears `is_visible`** —
+covering every path at once. `unmute()` is idempotent (guarded by
+`is_muted`, own lock), so the call in `_on_end_animation_complete()` remains
+a harmless backstop. Audio now returns ~0.25s sooner, which is if anything
+more correct since the ad is already over. The watchdog additionally
+requires the condition on **two consecutive checks** before acting, so the
+non-atomic (is_visible, is_muted) read pair can't produce a spurious WARN.
+
+**Tests:** `tests/test_log_ocr_audio_fixes.py` — 32 cases (timeout
+configurability + clamping + non-mutation of the class default, sysfs gate
+incl. fail-open and probe-ordering, throttle floor incl. exit semantics,
+`hide()` unmuting on every path incl. all three leak paths, watchdog
+two-strike confirmation). Suites: modules 322/322, thermal 33/33,
+autonomous 237/237, color/wifi green.
+
+**Open follow-up (not addressed):** VLM logs every inference **twice** at
+INFO (once in the worker, once in the parent) — after the display-loop fix
+that is ~72% of remaining journal volume (~75 lines/min).
+
+### Stuck watching Shorts in music mode — TV-layout Shorts detection + Fire TV music seeds (Fixed - Aug 2026)
+
+**Symptom:** music mode ON, but the Fire TV played YouTube Shorts
+indefinitely. Every cycle logged `MENU vetoed: audio flowing — video is
+playing` (correct: a Short IS playing), and nothing ever exited.
+
+**Three independent bugs, all in the same failure:**
+
+**1. `_is_youtube_shorts` OCR signal required the literal word
+`subscribe`.** The YouTube *TV* Shorts player has **no Subscribe button** —
+its metadata column shows the title, creator handle and mention handles.
+Live OCR during the stall: `@wabie`, `@sammizrahipowell`,
+`@rachelrhodes5046` and no `subscribe`, so the signal could never fire.
+Now: `subscribe` **OR ≥2 distinct `@handles`** (still requiring no
+duration marker). Two DISTINCT handles keeps it specific — a normal
+video's info panel shows one channel.
+
+**2. `_is_vertical_video_frame` assumed flat BLACK pillarbox bars.** The TV
+Shorts player renders a tinted/blurred backdrop with a metadata column —
+measured mean ~48, std ~22 — so `sides_dark(<25) and sides_flat(std<6)`
+could never fire either. Both signals were dead simultaneously.
+Rewritten as `_vertical_panel_edges()`, which keys on the **geometry**
+instead of the color: two strong steps in the column-brightness profile
+separated by ~0.32 of the width (9:16 on 16:9 = 0.316), requiring
+**both** edges (a lone hard vertical edge is common in real scenes; a
+matched pair at pillarbox spacing is not), plus a **vertical-extent**
+test — the panel must fill ≥90% of frame height. That last check is what
+rejects the home-screen **Shorts shelf**, whose cards are themselves 9:16
+and match every other test (measured span 0.77 shelf vs 1.00 player).
+`_is_youtube_shorts` now also requires the two confirmation frames to
+report the **same** boundaries (a pillarbox edge is static; incidental
+scene edges drift).
+
+Validated on a corpus captured from the live device: **7/8 Shorts frames
+detected, 0/40 regular-video frames, 0/20 YouTube-menu frames** (the 8th
+Shorts sample was byte-identical to a regular frame — a correct
+rejection). Black-bar pillarboxing gives an even stronger step, so the
+mobile layout still detects.
+
+**3. Music mode was inert on Fire TV.** `_launch_music_seed` required
+`launch_app_with_content`, which **only the Roku controller has**, so every
+"seed launch" silently fell through to a plain launch that just resumed the
+recommendation feed. Added `_launch_music_seed_android()`: YouTube honours
+an ADB `VIEW` intent on a watch URL, so Fire TV / Google TV now deep-link
+seeds like Roku does. Verified live — first seed ever to fire on this
+device: `Music seed deep-linked (android): kJQP7kiw5Fk`.
+
+**Tests:** `TestShortsTVLayout` (15 cases: tinted backdrop, panel-edge
+accuracy, single-edge rejection, wrong width, black-bar compatibility,
+shelf rejection, full-height requirement, dark-Short-on-light-backdrop,
+OCR handle rules, cross-frame stability, blocking skip) plus 4 Android
+music-seed cases in `TestMusicMode`. Suite 237/237.
+
 ### Thermal-adaptive degradation — stable 30fps + stickier blocking under throttle (Added - Aug 2026)
 
 **Motivation (observed live):** during 4K passthrough the SoC rides its

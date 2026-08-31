@@ -167,9 +167,37 @@ class OCRProcess:
     If inference takes longer than timeout, the process is KILLED and restarted.
     """
 
-    HARD_TIMEOUT = 1.0  # Kill OCR if it takes longer than this
+    # Kill OCR if a single inference takes longer than this. NOTE this covers
+    # only the worker round-trip (IPC + PaddleOCR); snapshot capture happens
+    # in the caller and is NOT included.
+    #
+    # 1.0s was too tight and sat right on top of the natural latency tail.
+    # Measured over 57k successful frames (Aug 2026): p50 202ms, p90 336ms,
+    # p99 845ms, p99.9 990ms, max 1093ms — so the slowest ~0.75% of frames
+    # crossed the limit and were killed: 1933 kills in 4 days (~440/day),
+    # each costing a worker kill + ~3s model reload = ~22 min/day with no
+    # OCR, arriving in bursts of up to 100/hour where nearly every cycle
+    # died and restarted. The slow frames are text-DENSE screens (sports
+    # scoreboards, credits, menu grids); PaddleOCR recognises per detected
+    # box, so latency scales with the number of text regions.
+    #
+    # 1.5s clears the observed maximum with ~40% headroom while still
+    # catching a genuine hang quickly. Overridable per-instance from
+    # MinusConfig.ocr_timeout (the documented --ocr-timeout flag, which
+    # until now was parsed, stored, and never read by anything).
+    DEFAULT_HARD_TIMEOUT = 1.5
+    HARD_TIMEOUT = DEFAULT_HARD_TIMEOUT  # class-level fallback
 
-    def __init__(self):
+    def __init__(self, hard_timeout: float = None):
+        # Instance attribute shadows the class constant so existing
+        # `self.HARD_TIMEOUT` reads keep working unchanged.
+        if hard_timeout is not None:
+            try:
+                ht = float(hard_timeout)
+                if ht > 0:
+                    self.HARD_TIMEOUT = ht
+            except (TypeError, ValueError):
+                pass
         self.process = None
         self.request_queue = None
         self.response_queue = None

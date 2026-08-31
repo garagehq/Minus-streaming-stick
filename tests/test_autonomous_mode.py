@@ -1717,6 +1717,202 @@ class TestMenuSkipWatchdog(unittest.TestCase):
             _cleanup_mode(mode)
 
 
+class TestMenuEscapeEscalation(unittest.TestCase):
+    """Regression for the Aug 2026 19.5-hour stall: the MENU skip-loop
+    escape (Back + navigate) can only move WITHIN the current app, so when
+    the device ends up in a different app entirely (observed: Hulu's
+    "Create a New Profile" form) it no-ops forever. The path reset its
+    counter and re-escaped 80 times with zero full resets. It must now
+    escalate to _full_reset_to_youtube() like every other stuck path."""
+
+    def _stalled_mode(self):
+        mode = _make_mode()
+        roku = MagicMock()
+        roku.is_connected.return_value = True
+        roku.send_command.return_value = True
+        mode.set_device_controller(roku, 'roku')
+        _set_ocr_texts(mode, ["CREATEPROFILE", "Create a New Profile", "hulu"])
+        mode._ad_blocker.display_connected = False
+        mode._check_roku_active_app = MagicMock(return_value=True)
+        mode._is_roku_home_screen = MagicMock(return_value=False)
+        mode._is_keyboard_stuck_screen = MagicMock(return_value=False)
+        mode._is_youtube_tv_prompt = MagicMock(return_value=False)
+        mode._is_survey_screen = MagicMock(return_value=False)
+        mode._is_signed_out_screen = MagicMock(return_value=False)
+        mode._is_youtube_login_screen = MagicMock(return_value=False)
+        mode._is_youtube_shorts = MagicMock(return_value=False)
+        mode._is_youtube_home_screen = MagicMock(return_value=False)
+        mode._has_live_content_indicator = MagicMock(return_value=False)
+        mode._query_screen = MagicMock(return_value="MENU")
+        mode._is_audio_flowing = MagicMock(return_value=False)
+        mode._is_video_player_overlay = MagicMock(return_value=False)
+        mode._escape_stuck_state = MagicMock(return_value=True)
+        mode._full_reset_to_youtube = MagicMock(return_value=True)
+        return mode, roku
+
+    def _run_escape_cycle(self, mode):
+        """Drive exactly one skip->escape cycle (_MENU_SKIP_ESCAPE_AT calls)."""
+        for _ in range(mode._MENU_SKIP_ESCAPE_AT):
+            mode._ensure_youtube_playing()
+
+    def test_first_escape_uses_cheap_back_navigation(self):
+        mode, _ = self._stalled_mode()
+        try:
+            self._run_escape_cycle(mode)
+            mode._escape_stuck_state.assert_called_once()
+            mode._full_reset_to_youtube.assert_not_called()
+            self.assertEqual(mode._menu_escape_count, 1)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_second_escape_escalates_to_full_reset(self):
+        mode, _ = self._stalled_mode()
+        try:
+            self._run_escape_cycle(mode)   # escape #1
+            self._run_escape_cycle(mode)   # escape #2 -> full reset
+            self.assertEqual(mode._escape_stuck_state.call_count, 1)
+            mode._full_reset_to_youtube.assert_called_once()
+            self.assertEqual(mode._menu_escape_count, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_regression_does_not_loop_forever(self):
+        """The actual bug: 80 escapes / 0 full resets over 19.5h. Across many
+        stalled cycles the nuclear option must fire repeatedly."""
+        mode, _ = self._stalled_mode()
+        try:
+            for _ in range(6):  # 6 escape cycles
+                self._run_escape_cycle(mode)
+            self.assertGreaterEqual(mode._full_reset_to_youtube.call_count, 3)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_playing_screen_resets_escape_counter(self):
+        """A recovered session must not carry escape credit into a later,
+        unrelated stall (which would skip the cheap escape)."""
+        mode, _ = self._stalled_mode()
+        try:
+            self._run_escape_cycle(mode)
+            self.assertEqual(mode._menu_escape_count, 1)
+
+            mode._query_screen = MagicMock(return_value="PLAYING")
+            mode._is_screen_static = MagicMock(return_value=False)
+            mode._ensure_youtube_playing()
+            self.assertEqual(mode._menu_escape_count, 0)
+
+            # Next stall starts from the cheap escape again
+            mode._query_screen = MagicMock(return_value="MENU")
+            self._run_escape_cycle(mode)
+            self.assertEqual(mode._escape_stuck_state.call_count, 2)
+            mode._full_reset_to_youtube.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
+    def test_full_reset_clears_escape_counter(self):
+        mode, _ = self._stalled_mode()
+        try:
+            mode._menu_escape_count = 1
+            mode._menu_skip_count = 3
+            del mode._full_reset_to_youtube  # exercise the real method
+            mode._launch_youtube = MagicMock(return_value=True)
+            with patch('autonomous_mode.time.sleep'):
+                mode._full_reset_to_youtube()
+            self.assertEqual(mode._menu_escape_count, 0)
+            self.assertEqual(mode._menu_skip_count, 0)
+        finally:
+            _cleanup_mode(mode)
+
+
+class TestAndroidActiveAppCheck(unittest.TestCase):
+    """Fire TV / Android TV foreground-app check — the ADB analogue of the
+    Roku ECP active-app check. Catches "stuck in a different app entirely",
+    which no screen-content heuristic can recover from because the Back-based
+    escape only navigates within the current app."""
+
+    def _mode(self, current_app='com.hulu.plus', device_type='fire_tv'):
+        mode = _make_mode()
+        ctrl = MagicMock()
+        ctrl.is_connected.return_value = True
+        ctrl.send_command.return_value = True
+        ctrl.get_current_app.return_value = current_app
+        mode.set_device_controller(ctrl, device_type)
+        return mode, ctrl
+
+    def test_wrong_app_detected(self):
+        mode, _ = self._mode(current_app='com.hulu.plus')
+        try:
+            self.assertFalse(mode._check_android_active_app())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_youtube_passes(self):
+        for pkg in ('com.amazon.firetv.youtube', 'com.google.android.youtube.tv'):
+            mode, _ = self._mode(current_app=pkg)
+            try:
+                self.assertTrue(mode._check_android_active_app())
+            finally:
+                _cleanup_mode(mode)
+
+    def test_failed_query_does_not_interfere(self):
+        for value in (None, ''):
+            mode, _ = self._mode(current_app=value)
+            try:
+                self.assertTrue(mode._check_android_active_app())
+            finally:
+                _cleanup_mode(mode)
+
+    def test_exception_does_not_interfere(self):
+        mode, ctrl = self._mode()
+        try:
+            ctrl.get_current_app.side_effect = RuntimeError('adb died')
+            self.assertTrue(mode._check_android_active_app())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_roku_skips_this_check(self):
+        mode, _ = self._mode(current_app='com.hulu.plus', device_type='roku')
+        try:
+            self.assertTrue(mode._check_android_active_app())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_controller_without_capability_passes(self):
+        mode = _make_mode()
+        try:
+            ctrl = MagicMock(spec=['is_connected', 'send_command'])
+            ctrl.is_connected.return_value = True
+            mode.set_device_controller(ctrl, 'fire_tv')
+            self.assertTrue(mode._check_android_active_app())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_dispatch_relaunches_youtube_when_wrong_app(self):
+        mode, ctrl = self._mode(current_app='com.hulu.plus')
+        try:
+            mode._launch_youtube = MagicMock(return_value=True)
+            mode._menu_skip_count = 4
+            mode._menu_escape_count = 1
+            self.assertTrue(mode._ensure_youtube_playing())
+            mode._launch_youtube.assert_called_once()
+            self.assertEqual(mode._menu_skip_count, 0)
+            self.assertEqual(mode._menu_escape_count, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_not_vetoed_by_audio(self):
+        """Deliberately unguarded, like the Roku ECP check: if YouTube isn't
+        the foreground app, no YouTube video is playing regardless of what
+        audio another app emits."""
+        mode, _ = self._mode(current_app='com.hulu.plus')
+        try:
+            mode._is_audio_flowing = MagicMock(return_value=True)
+            mode._launch_youtube = MagicMock(return_value=True)
+            self.assertTrue(mode._ensure_youtube_playing())
+            mode._launch_youtube.assert_called_once()
+        finally:
+            _cleanup_mode(mode)
+
+
 class TestKeyboardStuckAudioGuard(unittest.TestCase):
     """The keyboard-stuck escape must not fire while audio is flowing —
     real sign-in/keyboard screens are silent. Observed live 2026-07-02
@@ -2044,6 +2240,8 @@ class TestShortsDetection(unittest.TestCase):
         finally:
             _cleanup_mode(mode)
 
+
+
     def test_ocr_signature_detected(self):
         mode = _make_mode()
         try:
@@ -2103,6 +2301,238 @@ class TestShortsDetection(unittest.TestCase):
             _cleanup_mode(mode)
 
 
+class TestShortsTVLayout(unittest.TestCase):
+    """Regression for the Aug 2026 'stuck watching Shorts in music mode'
+    bug. The YouTube *TV* Shorts player differs from the mobile layout the
+    original detection was written against:
+      - it renders a TINTED/BLURRED backdrop (measured mean ~48, std ~22
+        with a metadata column on the right), not flat black bars, so the
+        `sides_dark(<25) and sides_flat(std<6)` frame test could never fire
+      - it shows NO 'Subscribe' button, so the OCR rule that required the
+        literal word 'subscribe' could never fire either
+    Both signals were dead, so Shorts played indefinitely while every cycle
+    logged 'MENU vetoed: audio flowing'."""
+
+    @staticmethod
+    def _tv_shorts_frame(width=1280, height=720, backdrop=48,
+                         panel_val=120, left=0.305, right=0.628, noisy_right=True):
+        """Frame mimicking the live TV Shorts layout: tinted backdrop, a
+        bright 9:16 panel, and a textured metadata column on the right."""
+        import numpy as np
+        rng = np.random.default_rng(7)
+        frame = np.full((height, width, 3), backdrop, dtype=np.uint8)
+        x0, x1 = int(width * left), int(width * right)
+        # Vary the panel so it isn't a flat block (real video content)
+        panel = rng.integers(panel_val - 30, panel_val + 30,
+                             (height, x1 - x0, 3)).astype(np.uint8)
+        frame[:, x0:x1] = panel
+        if noisy_right:
+            # Metadata column: text/icons over the backdrop
+            mx0 = int(width * 0.68)
+            block = rng.integers(30, 90, (height, width - mx0, 3)).astype(np.uint8)
+            frame[:, mx0:] = block
+        return frame
+
+    def test_tinted_backdrop_panel_detected(self):
+        """The exact case that went undetected: non-black backdrop."""
+        mode = _make_mode()
+        try:
+            frame = self._tv_shorts_frame()
+            self.assertTrue(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_panel_edges_reported_near_truth(self):
+        mode = _make_mode()
+        try:
+            edges = mode._vertical_panel_edges(self._tv_shorts_frame())
+            self.assertIsNotNone(edges)
+            self.assertAlmostEqual(edges[0], 0.305, delta=0.03)
+            self.assertAlmostEqual(edges[1], 0.628, delta=0.03)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_single_edge_rejected(self):
+        """One hard vertical edge is common in real scenes — a matched PAIR
+        at pillarbox spacing is the signal, so a lone edge must not fire."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            frame = np.full((720, 1280, 3), 48, dtype=np.uint8)
+            frame[:, int(1280 * 0.305):] = 130  # bright to the right edge
+            self.assertFalse(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_wrong_panel_width_rejected(self):
+        """Two strong edges but at 16:9-ish spacing (not 9:16) — e.g. a
+        centered graphic — must not be read as a vertical video."""
+        mode = _make_mode()
+        try:
+            wide = self._tv_shorts_frame(left=0.26, right=0.74, noisy_right=False)
+            self.assertFalse(mode._is_vertical_video_frame(wide))
+            narrow = self._tv_shorts_frame(left=0.42, right=0.58, noisy_right=False)
+            self.assertFalse(mode._is_vertical_video_frame(narrow))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_shorts_shelf_row_not_detected(self):
+        """The home-screen Shorts SHELF is a row of 9:16 thumbnail cards, so
+        it matches the edge/width tests — but we're browsing, not watching.
+        Vertical extent separates them: measured span 0.77 (shelf) vs 1.00
+        (player). A Back press here would fight the home-screen navigation."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            rng = np.random.default_rng(11)
+            width, height = 1280, 720
+            frame = np.full((height, width, 3), 30, dtype=np.uint8)
+            # A row of vertical cards occupying only the middle band
+            y0, y1 = int(height * 0.23), int(height * 0.72)
+            for i in range(5):
+                x0 = int(width * (0.05 + i * 0.19))
+                x1 = x0 + int(width * 0.155)
+                frame[y0:y1, x0:x1] = rng.integers(
+                    90, 190, (y1 - y0, x1 - x0, 3)).astype(np.uint8)
+            self.assertFalse(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_full_height_panel_required(self):
+        """Same panel geometry, but only spanning half the height."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            frame = np.full((720, 1280, 3), 48, dtype=np.uint8)
+            rng = np.random.default_rng(3)
+            x0, x1 = int(1280 * 0.305), int(1280 * 0.628)
+            frame[180:540, x0:x1] = rng.integers(
+                100, 160, (360, x1 - x0, 3)).astype(np.uint8)
+            self.assertFalse(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_dark_short_on_light_backdrop_detected(self):
+        """Span uses |deviation| from the backdrop, not 'brighter than', so a
+        dark Short still registers (two live samples were dark)."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            frame = np.full((720, 1280, 3), 140, dtype=np.uint8)
+            rng = np.random.default_rng(5)
+            x0, x1 = int(1280 * 0.305), int(1280 * 0.628)
+            frame[:, x0:x1] = rng.integers(
+                5, 35, (720, x1 - x0, 3)).astype(np.uint8)
+            self.assertTrue(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_black_bar_pillarbox_still_detected(self):
+        """The mobile/black-bar layout must keep working (stronger step)."""
+        mode = _make_mode()
+        try:
+            frame = self._tv_shorts_frame(backdrop=0, noisy_right=False)
+            self.assertTrue(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def _shorts_mode(self, texts):
+        mode = _make_mode()
+        ctrl = MagicMock()
+        ctrl.is_connected.return_value = True
+        mode.set_device_controller(ctrl, 'fire_tv')
+        _set_ocr_texts(mode, texts)
+        mode._ad_blocker.is_visible = False
+        mode._frame_capture = None  # isolate signal 1
+        return mode
+
+    def test_ocr_multiple_handles_no_subscribe_detected(self):
+        """Live OCR from the stuck session: three handles, no 'subscribe',
+        no duration marker."""
+        mode = self._shorts_mode([
+            "@wabie", "WHICH ONE'S THAT ONE?!", "AVeryWabieSummer-Animation",
+            "@sammizrahipowell animation", "@rachelrhodes5046", "TRUTH OR DARE"])
+        try:
+            self.assertTrue(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_ocr_single_handle_not_enough(self):
+        """A normal video's info panel shows ONE channel handle — that must
+        not be read as Shorts."""
+        mode = self._shorts_mode(["@sometechchannel", "How to fix a sink"])
+        try:
+            self.assertFalse(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_ocr_duration_marker_vetoes(self):
+        """A visible progress/duration time means it's a full video."""
+        mode = self._shorts_mode(["@chan1", "@chan2", "subscribe", "10:23"])
+        try:
+            self.assertFalse(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_ocr_legacy_handle_plus_subscribe_still_detected(self):
+        """The original mobile-layout signature must keep working."""
+        mode = self._shorts_mode(["@onlyonehandle", "Subscribe"])
+        try:
+            self.assertTrue(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_no_handles_no_detection(self):
+        mode = self._shorts_mode(["Recommended", "New to you", "Trending"])
+        try:
+            self.assertFalse(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_frame_signal_requires_stable_edges_across_frames(self):
+        """Two frames must agree on the panel boundaries. Incidental scene
+        edges that momentarily land at pillarbox spacing drift; a real
+        pillarbox boundary does not."""
+        mode = _make_mode()
+        try:
+            ctrl = MagicMock()
+            ctrl.is_connected.return_value = True
+            mode.set_device_controller(ctrl, 'fire_tv')
+            _set_ocr_texts(mode, ["nothing", "useful"])
+            mode._ad_blocker.is_visible = False
+            f1 = TestShortsTVLayout._tv_shorts_frame(left=0.305, right=0.628)
+            f2 = TestShortsTVLayout._tv_shorts_frame(left=0.36, right=0.68)  # moved
+            mode._frame_capture = MagicMock()
+            mode._frame_capture.capture.side_effect = [f1, f2]
+            with patch("autonomous_mode.time.sleep"):
+                self.assertFalse(mode._is_youtube_shorts())
+
+            # Same boundaries twice -> detected
+            mode._frame_capture.capture.side_effect = [
+                TestShortsTVLayout._tv_shorts_frame(),
+                TestShortsTVLayout._tv_shorts_frame()]
+            with patch("autonomous_mode.time.sleep"):
+                self.assertTrue(mode._is_youtube_shorts())
+        finally:
+            _cleanup_mode(mode)
+
+    def test_frame_signal_skipped_while_blocking(self):
+        """An ad overlay is up — a Back press could exit the video."""
+        mode = _make_mode()
+        try:
+            ctrl = MagicMock()
+            ctrl.is_connected.return_value = True
+            mode.set_device_controller(ctrl, 'fire_tv')
+            _set_ocr_texts(mode, ["nothing", "useful"])
+            mode._ad_blocker.is_visible = True
+            mode._frame_capture = MagicMock()
+            mode._frame_capture.capture.return_value = \
+                TestShortsTVLayout._tv_shorts_frame()
+            self.assertFalse(mode._is_youtube_shorts())
+            mode._frame_capture.capture.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
 class TestMusicMode(unittest.TestCase):
     """Tests for the music-videos toggle: persistence, seed deep-link
     launching, and OCR-evidence drift steering."""
@@ -2146,6 +2576,78 @@ class TestMusicMode(unittest.TestCase):
             # Seeds rotate — consecutive launches use different videos
             self.assertNotEqual(calls[0].args[1], calls[1].args[1])
             self.assertIn(calls[0].args[1], mode.MUSIC_VIDEO_SEEDS)
+        finally:
+            _cleanup_mode(mode)
+
+    def _android_ctrl(self):
+        """Fire TV-style controller: ADB access, no ECP contentId support."""
+        ctrl = MagicMock(spec=['is_connected', 'send_command', 'get_current_app',
+                               '_lock', '_device'])
+        ctrl.is_connected.return_value = True
+        ctrl.get_current_app.return_value = 'com.amazon.firetv.youtube'
+        ctrl._lock = threading.Lock()
+        ctrl._device = MagicMock()
+        return ctrl
+
+    def test_android_music_seed_deep_links_over_adb(self):
+        """Fire TV has no ECP contentId, but YouTube honours a VIEW intent.
+        Without this, music mode was inert on ADB devices — every seed fell
+        through to a plain launch that resumed the recommendation feed
+        (observed Aug 2026: music mode on, device serving Shorts)."""
+        mode = _make_mode()
+        try:
+            ctrl = self._android_ctrl()
+            mode.set_device_controller(ctrl, 'fire_tv')
+            mode._music_mode = True
+            with patch("autonomous_mode.time.sleep"):
+                self.assertTrue(mode._launch_youtube())
+            cmd = ctrl._device.adb_shell.call_args[0][0]
+            self.assertIn('android.intent.action.VIEW', cmd)
+            self.assertIn('youtube.com/watch?v=', cmd)
+            seed = cmd.split('watch?v=')[1].split('"')[0]
+            self.assertIn(seed, mode.MUSIC_VIDEO_SEEDS)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_android_music_seeds_rotate(self):
+        mode = _make_mode()
+        try:
+            ctrl = self._android_ctrl()
+            mode.set_device_controller(ctrl, 'fire_tv')
+            mode._music_mode = True
+            with patch("autonomous_mode.time.sleep"):
+                mode._launch_youtube()
+                mode._launch_youtube()
+            cmds = [c[0][0] for c in ctrl._device.adb_shell.call_args_list]
+            seeds = [c.split('watch?v=')[1].split('"')[0] for c in cmds]
+            self.assertNotEqual(seeds[0], seeds[1])
+        finally:
+            _cleanup_mode(mode)
+
+    def test_android_music_seed_not_used_when_music_mode_off(self):
+        mode = _make_mode()
+        try:
+            ctrl = self._android_ctrl()
+            mode.set_device_controller(ctrl, 'fire_tv')
+            mode._music_mode = False
+            with patch("autonomous_mode.time.sleep"):
+                mode._launch_youtube()
+            for c in ctrl._device.adb_shell.call_args_list:
+                self.assertNotIn('watch?v=', c[0][0])
+        finally:
+            _cleanup_mode(mode)
+
+    def test_android_music_seed_requires_adb_handles(self):
+        """A controller without _lock/_device can't deep-link; must not raise
+        and must fall through to the plain launch."""
+        mode = _make_mode()
+        try:
+            ctrl = MagicMock(spec=['is_connected', 'send_command'])
+            ctrl.is_connected.return_value = True
+            mode.set_device_controller(ctrl, 'fire_tv')
+            mode._music_mode = True
+            with patch("autonomous_mode.time.sleep"):
+                self.assertFalse(mode._launch_music_seed())
         finally:
             _cleanup_mode(mode)
 

@@ -347,6 +347,12 @@ class Minus:
         self.display_error = None
         self._display_retry_thread = None
         self._display_retry_interval = 7  # seconds between retry attempts
+        # While HDMI-TX is absent the retry loop polls cheap sysfs at the
+        # interval above but only emits an INFO line this often, so a TV
+        # left off overnight doesn't bury the journal (was ~12,300 lines/day).
+        self._DISPLAY_RETRY_NOTICE_INTERVAL = 300.0  # 5 min
+        self._display_retry_last_notice = 0.0
+        self._display_retry_started = 0.0
 
         # VLM degradation state
         self.vlm_disabled = False
@@ -838,9 +844,10 @@ class Minus:
             det_model, rec_model, dict_path = self._find_model_paths()
             if det_model:
                 # Use process-based OCR for hard timeout capability
-                self.ocr = OCRProcess()
+                self.ocr = OCRProcess(hard_timeout=self.config.ocr_timeout)
                 if self.ocr.start():
-                    logger.info("OCR process started (hard 1.2s timeout with keepalive)")
+                    logger.info(f"OCR process started (hard {self.ocr.HARD_TIMEOUT:.1f}s "
+                                f"timeout with keepalive)")
                 else:
                     self.ocr = None
                     logger.error("OCR process failed to start - continuing without OCR")
@@ -985,6 +992,33 @@ class Minus:
         return None, None, None
 
     # ===== Health Recovery Methods =====
+
+    def _any_hdmi_output_connected(self) -> bool:
+        """True if any HDMI-TX output reads 'connected' in sysfs.
+
+        Fast (no subprocess) — used to gate the expensive modetest probe in
+        the display retry loop. Prefers the health monitor's implementation
+        so there's one definition; falls back to reading sysfs directly when
+        the health monitor isn't up. Fails OPEN (returns True) if sysfs is
+        unreadable so a probing failure can never permanently block display
+        recovery.
+        """
+        hm = getattr(self, 'health_monitor', None)
+        if hm is not None and hasattr(hm, '_check_hdmi_output_connected'):
+            try:
+                return bool(hm._check_hdmi_output_connected())
+            except Exception:
+                pass
+        try:
+            paths = list(Path('/sys/class/drm').glob('card*-HDMI-A-*/status'))
+            if not paths:
+                return True  # unknown topology — don't block recovery
+            for p in paths:
+                if p.read_text().strip() == 'connected':
+                    return True
+            return False
+        except Exception:
+            return True
 
     def _on_thermal_change(self, degraded, snapshot):
         """Enter/exit thermal-degraded mode (called by ThermalMonitor).
@@ -1691,6 +1725,8 @@ class Minus:
 
         def retry_loop():
             logger.info(f"[Display] Starting retry loop (interval: {self._display_retry_interval}s)")
+            self._display_retry_started = time.time()
+            self._display_retry_last_notice = 0.0
 
             while self.running and not self.display_connected:
                 time.sleep(self._display_retry_interval)
@@ -1701,6 +1737,30 @@ class Minus:
                 if self.display_connected:
                     logger.info("[Display] Display connected by another thread, stopping retry loop")
                     break
+
+                # Cheap sysfs pre-check before the expensive probe. While the
+                # TV is off this loop used to fork `modetest` every 7s
+                # forever and log two INFO/WARN lines per attempt — measured
+                # 513 lines/hour (~12,300/day), the large majority of all
+                # journal volume, plus a subprocess fork every 7s on a
+                # thermally-constrained SoC. Reading
+                # /sys/class/drm/card0-HDMI-A-*/status is free, so we keep
+                # the 7s cadence (reconnect stays as responsive as before)
+                # and only pay for modetest once something is actually
+                # plugged in.
+                if not self._any_hdmi_output_connected():
+                    self.display_error = ("Display output not available. "
+                                          "Check HDMI-TX connection to TV/monitor.")
+                    now = time.time()
+                    if now - self._display_retry_last_notice >= self._DISPLAY_RETRY_NOTICE_INTERVAL:
+                        self._display_retry_last_notice = now
+                        waited = int(now - self._display_retry_started)
+                        logger.info(f"[Display] Still waiting for HDMI-TX "
+                                    f"({waited // 60}m elapsed) — polling every "
+                                    f"{self._display_retry_interval}s")
+                    else:
+                        logger.debug("[Display] HDMI-TX still disconnected (sysfs)")
+                    continue
 
                 logger.info("[Display] Attempting to reconnect display pipeline...")
 

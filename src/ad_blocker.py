@@ -2192,6 +2192,27 @@ class DRMAdBlocker:
             was_visible = self.is_visible
             self.is_visible = False
             self.current_source = None
+
+            # Unmute HERE — the instant blocking is no longer visible — not
+            # at the end of the fade-out animation. `is_visible` is cleared
+            # above, so every moment between this point and the old unmute
+            # site was a window where the health monitor correctly observed
+            # "not blocking but still muted" (13 occurrences / 551 blocks in
+            # 48h). Worse, three paths below could skip the unmute
+            # ENTIRELY, leaving audio dead until the watchdog swept it up to
+            # 5s later:
+            #   1. `if not was_visible and self._animation_direction != 'start': return`
+            #   2. an end-animation interrupted by _stop_animation_thread(),
+            #      which never runs _on_end_animation_complete()
+            #   3. any exception raised between here and the animation start
+            # Doing it once, unconditionally, inside the lock covers all of
+            # them. unmute() is idempotent (guarded by is_muted, own lock),
+            # so the call in _on_end_animation_complete() stays as a
+            # harmless backstop. Cost: audio returns ~0.25s sooner, which is
+            # if anything more correct — the ad is already over.
+            if self.audio:
+                self.audio.unmute()
+
             if was_visible:
                 # Pick the right background state — autonomous mode running,
                 # blocking paused, or just plain idle.
