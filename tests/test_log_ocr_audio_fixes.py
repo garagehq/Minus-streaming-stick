@@ -163,6 +163,61 @@ class TestHDMIOutputGate(unittest.TestCase):
 
 
 # =========================================================================
+# 2b. VLM per-inference double logging
+# =========================================================================
+
+class TestVLMVerboseGate(unittest.TestCase):
+    """detect_ad() logged twice at INFO — once in the worker, once in the
+    parent detection loop — which was 61% of the entire journal (23,579 +
+    23,575 lines over 10.4h). The parent line already carries verdict,
+    latency, confidence and the same p_yes; only the raw logits were
+    unique, so the worker line defaults to DEBUG behind MINUS_VLM_VERBOSE."""
+
+    def _reload(self, verbose):
+        import importlib
+        env = {'MINUS_VLM_VERBOSE': '1'} if verbose else {}
+        with patch.dict('os.environ', env, clear=False):
+            if not verbose:
+                import os as _os
+                _os.environ.pop('MINUS_VLM_VERBOSE', None)
+            import vlm
+            return importlib.reload(vlm)
+
+    def test_default_is_debug(self):
+        mod = self._reload(verbose=False)
+        self.assertFalse(mod.VLM_VERBOSE_LOG)
+
+    def test_env_flag_enables_info(self):
+        mod = self._reload(verbose=True)
+        self.assertTrue(mod.VLM_VERBOSE_LOG)
+
+    def test_detect_line_level_follows_flag(self):
+        """The demoted call must use logger.log(level, ...) so the flag
+        actually controls the emitted level."""
+        source = (ROOT / 'src' / 'vlm.py').read_text()
+        # rindex: skip the module-level explanatory comment, find the call
+        idx = source.rindex('f"VLM(LFM2): ')
+        window = source[max(0, idx - 300):idx]
+        self.assertIn('logging.INFO if VLM_VERBOSE_LOG else logging.DEBUG', window)
+        self.assertNotIn('logger.info(', window.split('logger.log(')[-1])
+
+    def test_screen_query_line_stays_info(self):
+        """query_image runs ~100x/hour (1.4% of volume) and its per-class
+        score margins are the primary diagnostic for the live autonomous-mode
+        misclassification work — deliberately NOT demoted."""
+        source = (ROOT / 'src' / 'vlm.py').read_text()
+        idx = source.index('VLM(LFM2) query:')
+        window = source[max(0, idx - 200):idx]
+        self.assertIn('logger.info(', window)
+
+    def tearDown(self):
+        import importlib, os as _os
+        _os.environ.pop('MINUS_VLM_VERBOSE', None)
+        import vlm
+        importlib.reload(vlm)
+
+
+# =========================================================================
 # 3. Thermal throttle guard needs temperature corroboration
 # =========================================================================
 

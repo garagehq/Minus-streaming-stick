@@ -59,6 +59,18 @@ from config import VLM_MODEL_DIR
 
 logger = logging.getLogger('Minus.VLM')
 
+# Every detect_ad() call was logged TWICE at INFO: once here in the worker
+# process ("VLM(LFM2): NO-AD p_yes=... y_logit=... n_logit=...") and once in
+# the parent detection loop ("VLM #N: 0.4s [NO-AD] conf=92% \"No (p=...)\"").
+# Measured over 10.4h: 23,579 + 23,575 lines = 61% of the entire journal.
+# The parent line already carries the verdict, latency, confidence and the
+# same p_yes, so the only thing unique to this line is the raw pre-softmax
+# logits — genuinely useful when validating the model, useless at 37
+# lines/min in steady state. Default it to DEBUG (the root logger is pinned
+# at INFO, so it costs nothing) and set MINUS_VLM_VERBOSE=1 to bring the
+# full detail back at INFO without touching code.
+VLM_VERBOSE_LOG = os.environ.get('MINUS_VLM_VERBOSE', '0') == '1'
+
 # --- Model file layout ---
 # Default points at the LFM2.5-VL fused-v2 build; override the base
 # dir via MINUS_VLM_MODEL_DIR.
@@ -465,7 +477,8 @@ class VLMManager:
                 response = f"{'Yes' if is_ad else 'No'} (p={p_yes_norm:.4f})"
 
                 elapsed = time.time() - t0
-                logger.info(
+                logger.log(
+                    logging.INFO if VLM_VERBOSE_LOG else logging.DEBUG,
                     f"VLM(LFM2): {'AD' if is_ad else 'NO-AD'} "
                     f"p_yes={p_yes_norm:.4f} "
                     f"y_logit={p_yes_logit:.3f} n_logit={p_no_logit:.3f} "

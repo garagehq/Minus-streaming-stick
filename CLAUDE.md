@@ -3069,9 +3069,24 @@ incl. fail-open and probe-ordering, throttle floor incl. exit semantics,
 two-strike confirmation). Suites: modules 322/322, thermal 33/33,
 autonomous 237/237, color/wifi green.
 
-**Open follow-up (not addressed):** VLM logs every inference **twice** at
-INFO (once in the worker, once in the parent) — after the display-loop fix
-that is ~72% of remaining journal volume (~75 lines/min).
+**5. VLM logged every inference twice (Fixed - Sep 2026).** `detect_ad()`
+emitted one INFO line in the worker process
+(`VLM(LFM2): NO-AD p_yes=… y_logit=… n_logit=… T=… lat=…`) and another in
+the parent detection loop
+(`VLM #N: 0.4s [NO-AD] conf=92% "No (p=…)"`). Measured over 10.4h:
+23,579 + 23,575 = **61% of the entire journal**. The parent line already
+carries the verdict, latency, confidence and the *same* p_yes — the only
+datum unique to the worker line is the raw pre-softmax logits. The worker
+line now logs at DEBUG by default (the root logger is pinned at INFO, so it
+costs nothing) and `MINUS_VLM_VERBOSE=1` restores it at INFO without a code
+change, for model-validation work. Measured after: duplicate gone, ~26% of
+live journal volume removed.
+
+`query_image()`'s worker line is **deliberately left at INFO**: it runs
+~100×/hour (1.4% of volume) and its per-class score margins are the primary
+diagnostic for the ongoing autonomous-mode misclassification work, where the
+failure is rare and not reproducible on demand — hiding it behind a flag
+that requires a restart would mean losing the evidence.
 
 ### Stuck watching Shorts in music mode — TV-layout Shorts detection + Fire TV music seeds (Fixed - Aug 2026)
 
