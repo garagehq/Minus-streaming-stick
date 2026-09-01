@@ -201,14 +201,25 @@ class TestVLMVerboseGate(unittest.TestCase):
         self.assertIn('logging.INFO if VLM_VERBOSE_LOG else logging.DEBUG', window)
         self.assertNotIn('logger.info(', window.split('logger.log(')[-1])
 
-    def test_screen_query_line_stays_info(self):
-        """query_image runs ~100x/hour (1.4% of volume) and its per-class
-        score margins are the primary diagnostic for the live autonomous-mode
-        misclassification work — deliberately NOT demoted."""
+    def test_screen_query_line_also_gated(self):
+        """query_image is duplicated the same way — autonomous_mode logs
+        "[AutonomousMode] VLM screen query (0.3s): MENU" for every call — so
+        it rides the same flag. Its unique content (per-class score margins)
+        comes back with MINUS_VLM_VERBOSE=1."""
         source = (ROOT / 'src' / 'vlm.py').read_text()
-        idx = source.index('VLM(LFM2) query:')
-        window = source[max(0, idx - 200):idx]
-        self.assertIn('logger.info(', window)
+        idx = source.rindex('f"VLM(LFM2) query: ')
+        window = source[max(0, idx - 400):idx]
+        self.assertIn('logging.INFO if VLM_VERBOSE_LOG else logging.DEBUG', window)
+
+    def test_no_unconditional_info_vlm_inference_logs(self):
+        """Neither per-inference worker line may be logger.info() outright."""
+        source = (ROOT / 'src' / 'vlm.py').read_text()
+        for marker in ('f"VLM(LFM2): ', 'f"VLM(LFM2) query: '):
+            idx = source.rindex(marker)
+            window = source[max(0, idx - 400):idx]
+            call = window[window.rindex('logger.'):]
+            self.assertTrue(call.startswith('logger.log('),
+                            f"{marker.strip()} should use gated logger.log()")
 
     def tearDown(self):
         import importlib, os as _os

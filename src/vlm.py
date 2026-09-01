@@ -549,7 +549,13 @@ class VLMManager:
                 # only consumes the leading class name via `startswith`.
                 score_str = " ".join(
                     f"{n}={scores[n]:.2f}" for n, _ in self.SCREEN_CLASS_TOKEN_IDS)
-                logger.info(
+                # Same duplication as detect_ad: autonomous_mode already logs
+                # "[AutonomousMode] VLM screen query (0.3s): MENU" for every
+                # call, so this line's unique content is the per-class score
+                # margins. Gated behind the same MINUS_VLM_VERBOSE flag —
+                # set it when investigating screen-state misclassification.
+                logger.log(
+                    logging.INFO if VLM_VERBOSE_LOG else logging.DEBUG,
                     f"VLM(LFM2) query: {best_class} ({score_str}) "
                     f"lat={elapsed:.3f}s"
                 )

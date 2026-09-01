@@ -3082,11 +3082,11 @@ costs nothing) and `MINUS_VLM_VERBOSE=1` restores it at INFO without a code
 change, for model-validation work. Measured after: duplicate gone, ~26% of
 live journal volume removed.
 
-`query_image()`'s worker line is **deliberately left at INFO**: it runs
-~100×/hour (1.4% of volume) and its per-class score margins are the primary
-diagnostic for the ongoing autonomous-mode misclassification work, where the
-failure is rare and not reproducible on demand — hiding it behind a flag
-that requires a restart would mean losing the evidence.
+`query_image()`'s worker line is duplicated the same way — `autonomous_mode`
+already logs `[AutonomousMode] VLM screen query (0.3s): MENU` for every
+call — so it rides the same flag. Its unique content is the per-class score
+margins; set `MINUS_VLM_VERBOSE=1` and restart when investigating
+screen-state misclassification.
 
 ### Stuck watching Shorts in music mode — TV-layout Shorts detection + Fire TV music seeds (Fixed - Aug 2026)
 
