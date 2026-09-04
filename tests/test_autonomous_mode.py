@@ -2533,6 +2533,131 @@ class TestShortsTVLayout(unittest.TestCase):
         finally:
             _cleanup_mode(mode)
 
+class TestMusicDriftReachability(unittest.TestCase):
+    """Regression: music mode played a podcast for hours without steering.
+
+    _check_music_drift() was only called in the VLM-says-PLAYING branch, but
+    on this Fire TV VLM returned MENU 1668x and DIALOG 814x and PLAYING
+    ZERO times over 24h — every playing cycle exits early at the audio veto.
+    So the drift check ran 0 times against 1602 audio vetoes. It now also
+    runs on the audio-veto paths, which are the authoritative
+    "a video is playing" signal on this device."""
+
+    def _mode(self, texts, screen='MENU'):
+        mode = _make_mode()
+        ctrl = MagicMock()
+        ctrl.is_connected.return_value = True
+        ctrl.send_command.return_value = True
+        mode.set_device_controller(ctrl, 'fire_tv')
+        _set_ocr_texts(mode, texts)
+        mode._ad_blocker.display_connected = False
+        mode._ad_blocker.is_visible = False
+        mode._check_roku_active_app = MagicMock(return_value=True)
+        mode._check_android_active_app = MagicMock(return_value=True)
+        for m in ('_is_roku_home_screen', '_is_keyboard_stuck_screen',
+                  '_is_youtube_tv_prompt', '_is_survey_screen',
+                  '_is_signed_out_screen', '_is_youtube_login_screen',
+                  '_is_youtube_shorts', '_is_youtube_home_screen',
+                  '_has_live_content_indicator', '_is_video_player_overlay'):
+            setattr(mode, m, MagicMock(return_value=False))
+        mode._query_screen = MagicMock(return_value=screen)
+        mode._is_audio_flowing = MagicMock(return_value=True)
+        mode._audio_recently_flowing = MagicMock(return_value=True)
+        mode._launch_music_seed = MagicMock(return_value=True)
+        mode._music_mode = True
+        return mode
+
+    def test_drift_check_runs_on_menu_audio_veto(self):
+        mode = self._mode(["MaximumFun.Org/Join", "1:30:10", "Time"])
+        try:
+            mode._ensure_youtube_playing()
+            self.assertEqual(mode._music_longform_checks, 1,
+                             "drift check must run on the MENU audio-veto path")
+        finally:
+            _cleanup_mode(mode)
+
+    def test_drift_check_runs_on_dialog_audio_veto(self):
+        mode = self._mode(["MaximumFun.Org/Join", "1:30:10"], screen='DIALOG')
+        try:
+            mode._ensure_youtube_playing()
+            self.assertEqual(mode._music_longform_checks, 1,
+                             "drift check must run on the DIALOG audio-veto path")
+        finally:
+            _cleanup_mode(mode)
+
+    def test_longform_steers_after_threshold(self):
+        """Real podcast OCR: an H:MM:SS runtime means hour-plus content."""
+        mode = self._mode(["MaximumFun.Org/Join", "1:30:10", "Time"])
+        try:
+            for _ in range(mode._MUSIC_LONGFORM_STEER_AFTER):
+                mode._check_music_drift()
+            mode._launch_music_seed.assert_called_once()
+            self.assertEqual(mode._music_longform_checks, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_music_evidence_resets_longform_streak(self):
+        mode = self._mode(["x"])
+        try:
+            mode._check_music_drift(force_text="podcast ep 12 | 1:30:10")
+            self.assertEqual(mode._music_longform_checks, 1)
+            mode._check_music_drift(force_text="miley cyrus | vevo | 3:36")
+            self.assertEqual(mode._music_longform_checks, 0)
+            self.assertEqual(mode._music_no_evidence_checks, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_short_duration_is_not_longform(self):
+        """A music video's M:SS runtime must never look like long-form."""
+        mode = self._mode(["x"])
+        try:
+            for _ in range(6):
+                mode._check_music_drift(force_text="some song title | 3:36 | next in 12")
+            mode._launch_music_seed.assert_not_called()
+            self.assertEqual(mode._music_longform_checks, 0)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_non_consecutive_longform_does_not_steer(self):
+        mode = self._mode(["x"])
+        try:
+            for _ in range(5):
+                mode._check_music_drift(force_text="show | 1:30:10")
+                mode._check_music_drift(force_text="untitled clip no duration")
+            mode._launch_music_seed.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
+    def test_blind_backstop_threshold_is_slow(self):
+        """At the old value (5) the now-every-cycle check would re-seed every
+        ~3 min, interrupting genuine music."""
+        mode = self._mode(["x"])
+        try:
+            self.assertGreaterEqual(mode._MUSIC_STEER_AFTER, 30)
+        finally:
+            _cleanup_mode(mode)
+
+    def test_drift_skipped_while_blocking(self):
+        mode = self._mode(["MaximumFun.Org/Join", "1:30:10"])
+        try:
+            mode._ad_blocker.is_visible = True
+            for _ in range(5):
+                mode._check_music_drift()
+            mode._launch_music_seed.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
+    def test_drift_noop_when_music_mode_off(self):
+        mode = self._mode(["MaximumFun.Org/Join", "1:30:10"])
+        try:
+            mode._music_mode = False
+            for _ in range(5):
+                mode._check_music_drift()
+            mode._launch_music_seed.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
+
 class TestMusicMode(unittest.TestCase):
     """Tests for the music-videos toggle: persistence, seed deep-link
     launching, and OCR-evidence drift steering."""

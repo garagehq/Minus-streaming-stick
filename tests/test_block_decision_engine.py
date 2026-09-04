@@ -36,8 +36,13 @@ def _params(**overrides):
 
 
 class TestOCRStopThreshold(unittest.TestCase):
-    """OCR_STOP_THRESHOLD=2 means 2 consecutive no-ad cycles clear blocking
-    (was 4). This is half the recovery latency."""
+    """OCR_STOP_THRESHOLD=3: three consecutive no-ad cycles clear blocking.
+
+    History 4 -> 2 -> 3. The move to 2 halved recovery latency but assumed
+    consecutive OCR misses during a real ad were rare; production logs showed
+    they are the dominant case (runs of exactly 2 occurred 118x in 24h vs 4
+    runs of 3 and zero of 5+), which flapped 58.8% of blocks. 3 clears ~92%
+    of the flapping for ~0.6s of recovery. See minus.py for the full data."""
 
     def test_one_no_ad_does_not_clear(self):
         e = DecisionEngine(_params())
@@ -46,14 +51,35 @@ class TestOCRStopThreshold(unittest.TestCase):
         self.assertTrue(e.ocr_ad_detected)
         # One no-ad — not enough
         e.on_ocr(False)
-        self.assertTrue(e.ocr_ad_detected, "1 no-ad should not clear (threshold=2)")
+        self.assertTrue(e.ocr_ad_detected, "1 no-ad should not clear (threshold=3)")
 
-    def test_two_no_ad_clears(self):
+    def test_two_no_ad_does_not_clear(self):
+        """THE FLAP REGRESSION: a 2-miss run is the single most common OCR
+        dropout during a live ad and must no longer end the block."""
         e = DecisionEngine(_params())
         e.on_ocr(True)
         e.on_ocr(False)
         e.on_ocr(False)
-        self.assertFalse(e.ocr_ad_detected, "2 consecutive no-ads should clear")
+        self.assertTrue(e.ocr_ad_detected, "2 consecutive no-ads must NOT clear")
+
+    def test_three_no_ad_clears(self):
+        e = DecisionEngine(_params())
+        e.on_ocr(True)
+        e.on_ocr(False)
+        e.on_ocr(False)
+        e.on_ocr(False)
+        self.assertFalse(e.ocr_ad_detected, "3 consecutive no-ads should clear")
+
+    def test_ad_frame_between_misses_prevents_clear(self):
+        """A 2-miss / hit / 2-miss pattern (very common) must keep the block
+        up throughout — this is what produced the observed mid-ad flicker."""
+        e = DecisionEngine(_params())
+        e.on_ocr(True)
+        for _ in range(3):
+            e.on_ocr(False)
+            e.on_ocr(False)
+            e.on_ocr(True)
+            self.assertTrue(e.ocr_ad_detected)
 
     def test_no_ad_then_ad_resets_count(self):
         e = DecisionEngine(_params())

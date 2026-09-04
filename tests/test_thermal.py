@@ -201,7 +201,11 @@ class TestMinusThermalSwap(unittest.TestCase):
         m = self._make_minus()
         m._on_thermal_change(True, {'temp_c': 85, 'throttled': True})
         self.assertTrue(m.thermal_degraded)
-        self.assertEqual(m.OCR_STOP_THRESHOLD, 4)
+        # Degraded value tracks the base (base 3 + 2) so the "stickier under
+        # throttle" offset survived the base moving 2 -> 3 for the flap fix.
+        self.assertEqual(m.OCR_STOP_THRESHOLD,
+                         type(m).THERMAL_DEGRADED_PARAMS['OCR_STOP_THRESHOLD'])
+        self.assertGreater(m.OCR_STOP_THRESHOLD, 3)
         self.assertEqual(m.VLM_STOP_THRESHOLD, 3)
         self.assertEqual(m.MIN_BLOCKING_DURATION_BASE, 5.0)
         self.assertEqual(m.MIN_BLOCKING_DURATION_FLOOR_VLM, 1.5)

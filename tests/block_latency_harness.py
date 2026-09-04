@@ -49,7 +49,7 @@ from vlm_worker import VLMProcess  # noqa: E402  - real production VLM
 PARAMS = {
     # OCR
     'OCR_INTERVAL_S': 0.5,         # how often the OCR worker is invoked
-    'OCR_STOP_THRESHOLD': 2,       # tuned: was 4. consecutive no-ad cycles to clear
+    'OCR_STOP_THRESHOLD': 3,       # 4 -> 2 -> 3; see minus.py for the flap data
     # VLM — retuned for FastVLM-0.5B iter4 (validated in
     # tests/harness_iter4_retune_ab.py: VLM-only detect 6.11s->2.11s,
     # 0 false-pos, 0 phantom re-blocks). iter4 inference is ~0.33s vs the

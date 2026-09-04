@@ -348,3 +348,4 @@ Auto-appended one row per check-in by `tools/ad_block_monitor.py`. `OK` = zero f
 | 2026-05-23 01:46:14 | 30m | 10 | 0 | 2 | 38s | 4s | OK | clean |
 | 2026-08-31 06:20:42 | 10m | 0 | 0 | 0 | 0s | 0s | OK | clean |
 | 2026-08-31 06:21:09 | 2880m | 547 | 0 | 22 | 120s | 11s | ATTN | OCR dur=36.1s rec=2s WEAK_FP(sponsored-only); OCR dur=33.9s rec=4s WEAK_FP(sponsored-only),SLOW_RECOVER(4.0s); OCR dur=74.0s rec=8s SLOW_RECOVER(8.0s); OCR dur=68.0s rec=4s SLOW_RECOVER(4.0s) |
+| 2026-09-02 12:08:07 | 1270m | 297 | 0 | 8 | 66s | 12s | ATTN | OCR dur=7.4s rec=7s SLOW_RECOVER(7.0s); OCR dur=66.4s rec=1s WEAK_FP(sponsored-only); OCR dur=30.1s rec=0.0s WEAK_FP(sponsored-only); OCR dur=41.0s rec=12s SLOW_RECOVER(12.0s) |

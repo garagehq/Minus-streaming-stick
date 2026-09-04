@@ -129,6 +129,17 @@ class AutonomousMode:
         'live performance', 'live session', 'acoustic',
     ]
 
+    # POSITIVE drift evidence: an H:MM:SS runtime means an hour-plus video —
+    # a podcast, stream VOD or long mix, never a music video (those are
+    # M:SS). Measured over 24h of real OCR: this fires on 13.3% of
+    # info-bearing frames vs 0.4% for MUSIC_EVIDENCE_KEYWORDS (33x more
+    # signal) with ZERO frames matching both, so the two never disagree.
+    # This is what lets drift detection work at all — absence of music
+    # keywords is nearly useless on its own (99.8% of playing cycles carry
+    # no music evidence, because YouTube only shows title text during
+    # overlays and end cards).
+    LONGFORM_DURATION_RE = re.compile(r'\b\d{1,2}:[0-5]\d:[0-5]\d\b')
+
     # When the audio pipeline is unavailable (display off / alsasink can't
     # open), we normally abstain from pause detection to avoid false positives
     # on music streams with static album art. But a genuinely-frozen video
@@ -252,7 +263,17 @@ class AutonomousMode:
         self._music_mode = False
         self._music_seed_index: int = 0
         self._music_no_evidence_checks: int = 0
-        self._MUSIC_STEER_AFTER = 5  # info-bearing checks w/o music evidence
+        # Slow blind backstop: steer after this many info-bearing cycles with
+        # NO music evidence at all. Raised 5 -> 60 (~33 min at the ~33s cycle)
+        # now that the drift check actually runs every cycle: at 5 it would
+        # have re-seeded every ~3 min, interrupting genuine music videos.
+        self._MUSIC_STEER_AFTER = 60
+        # Fast targeted path: consecutive cycles showing an H:MM:SS runtime.
+        # 3 cycles (~100s) of visible long-form duration is solid evidence we
+        # drifted off music videos; simulated on 24h of real OCR this fires
+        # ~1.8x/hour, vs ~20x/hour for the old blind counter at 5.
+        self._music_longform_checks: int = 0
+        self._MUSIC_LONGFORM_STEER_AFTER = 3
 
         # Timestamp of the last _is_audio_flowing() == True observation.
         # Destructive guards use _audio_recently_flowing() instead of the
@@ -858,14 +879,36 @@ class AutonomousMode:
                 return False  # no information this cycle
             if any(k in combined for k in self.MUSIC_EVIDENCE_KEYWORDS):
                 self._music_no_evidence_checks = 0
+                self._music_longform_checks = 0
                 return False
+
             self._music_no_evidence_checks += 1
-            logger.info(f"[AutonomousMode] Music mode: no music evidence in OCR "
-                        f"({self._music_no_evidence_checks}/{self._MUSIC_STEER_AFTER})")
+
+            # Fast path: positive evidence of long-form content.
+            if self.LONGFORM_DURATION_RE.search(combined):
+                self._music_longform_checks += 1
+                logger.info(f"[AutonomousMode] Music mode: long-form runtime on screen "
+                            f"({self._music_longform_checks}/"
+                            f"{self._MUSIC_LONGFORM_STEER_AFTER})")
+                if self._music_longform_checks >= self._MUSIC_LONGFORM_STEER_AFTER:
+                    logger.info("[AutonomousMode] Music mode: long-form content "
+                                "(podcast/stream/mix) — steering to music seed")
+                    self._log_event("Music mode: long-form detected - steering to seed")
+                    self._music_longform_checks = 0
+                    self._music_no_evidence_checks = 0
+                    self._launch_music_seed()
+                    return True
+            else:
+                # A cycle without a long-form marker breaks the streak; only
+                # sustained long-form evidence should steer.
+                self._music_longform_checks = 0
+
+            # Slow blind backstop for content that shows no duration at all.
             if self._music_no_evidence_checks >= self._MUSIC_STEER_AFTER:
                 logger.info("[AutonomousMode] Music mode: drifted off music - steering to seed")
                 self._log_event("Music mode: drifted off music - steering to seed")
                 self._music_no_evidence_checks = 0
+                self._music_longform_checks = 0
                 self._launch_music_seed()
                 return True
         except Exception as e:
@@ -2486,6 +2529,10 @@ class AutonomousMode:
                                 "audio flowing — video is playing")
                     self._log_event("DIALOG vetoed: audio flowing")
                     self._last_screen_state = 'playing'
+                    # Same reasoning as the MENU veto: audio flowing is a
+                    # confirmed-playing path, so music-mode drift is checked
+                    # here too (VLM said DIALOG 814x in 24h).
+                    self._check_music_drift()
                     return False
                 self._device_controller.send_command("back")
                 logger.info("[AutonomousMode] Dismissed dialog with back")
@@ -2504,6 +2551,17 @@ class AutonomousMode:
                     self._log_event("MENU vetoed: audio flowing")
                     self._overlay_veto_count = 0
                     self._last_screen_state = 'playing'
+                    # Music-mode drift check belongs on EVERY confirmed-playing
+                    # path, not just the VLM-says-PLAYING one. Measured over
+                    # 24h on this Fire TV: VLM returned MENU 1668x and DIALOG
+                    # 814x and PLAYING *zero* times, so the check at the
+                    # verified-PLAYING branch ran 0 times while 1602 audio
+                    # vetoes sailed past it — music mode drifted into a
+                    # podcast and never steered back. Audio flowing IS the
+                    # authoritative "a video is playing" signal here (see the
+                    # architectural invariant above), so it is exactly where
+                    # the drift check belongs.
+                    self._check_music_drift()
                     return False
 
                 # No audio + VLM says MENU. Per the user's diagnostic
