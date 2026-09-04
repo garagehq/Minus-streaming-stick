@@ -313,7 +313,9 @@ class Minus:
     # are restored on recovery. Rationale: throttled cores slow OCR/VLM
     # cadence, so the normal fast-stop tuning flip-flops the overlay.
     THERMAL_DEGRADED_PARAMS = {
-        'OCR_STOP_THRESHOLD': 4,            # ~2x no-ad frames to unblock
+        'OCR_STOP_THRESHOLD': 5,            # base 3 + 2; keeps the same
+                                            # "stickier under throttle" offset
+                                            # after the base moved 2 -> 3
         'VLM_STOP_THRESHOLD': 3,
         'MIN_BLOCKING_DURATION_BASE': 5.0,  # longer default block hold
         'MIN_BLOCKING_DURATION_FLOOR_OCR': 2.5,
@@ -525,12 +527,31 @@ class Minus:
         self.MIN_BLOCKING_DURATION_FLOOR_VLM = 0.5
         self.MIN_DURATION_RESET_GAP = 30.0  # seconds
         self.consecutive_ad_count = 0  # 0 = first ad, 1 = second, ...
-        # 2 cycles ≈ 1.0s recovery (down from 4 = 2.0s). Tuned via the
-        # tests/block_latency_harness.py rig to hit a sub-1.5s recover-to-
-        # blocking-off latency. Risk: a single brief OCR miss during a real
-        # ad ends blocking; in practice OCR's ~0.5s cycle on stable ad
-        # overlays makes consecutive misses extremely rare.
-        self.OCR_STOP_THRESHOLD = 2
+        # Consecutive no-ad OCR cycles before an OCR-triggered block clears.
+        #
+        # Was 2, which assumed "consecutive misses during a real ad are
+        # extremely rare". Production logs disproved that: measured over 24h
+        # (101 ad breaks, 2309 OCR frames inside them, sampled from the RAW
+        # keyword stream so block boundaries don't censor long runs), OCR
+        # misses the ad keyword on 12.4% of frames while the ad is still on
+        # screen, and the run-length distribution is
+        #     1 miss: 15   2 misses: 118   3: 4   4: 6   5+: 0
+        # Runs of exactly 2 dominate — exactly what threshold=2 trips on.
+        # Result: 58.8% of blocks re-blocked within 5s, median block duration
+        # 4.5s, and 300 mute/unmute cycles overnight (audio blipping through
+        # the gaps, overlay flickering mid-ad-break).
+        #
+        # 3 is the knee of the curve. Driving the real DecisionEngine with
+        # that measured distribution (tests/harness_ocr_stop_ab.py):
+        #     threshold=2 -> 5.26 flaps/break, 100% of breaks flap
+        #     threshold=3 -> 0.44 flaps/break  (-91.6%)
+        #     threshold=4 -> 0.24              (-95.5%)
+        #     threshold=5 -> 0                 (-100%)
+        # and on the real video rig (block_latency_harness round1, 9/9 clean
+        # both ways) recovery goes 1.06s -> 1.62s mean (max 1.86s), detect
+        # unchanged at ~0.55s. 4 and 5 push recovery to 2.9s/3.8s, past the
+        # documented 1.5-2.0s ceiling, so 3 buys ~92% of the fix for ~0.6s.
+        self.OCR_STOP_THRESHOLD = 3
         self.VLM_STOP_THRESHOLD = 2
 
         # ── Thermal-degraded mode (src/thermal.py) ────────────────────────

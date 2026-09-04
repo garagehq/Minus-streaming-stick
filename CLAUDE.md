@@ -2998,6 +2998,91 @@ Tests: `TestYouTubeTVActivationScreen`, `TestMenuSkipWatchdog`,
 `TestDialogDismissAudioGuard` in `tests/test_autonomous_mode.py`;
 `TestKeypressStatusCodes` in `tests/test_roku_reconnect.py`.
 
+### Mid-ad block flapping — OCR_STOP_THRESHOLD 2 → 3 (Fixed - Sep 2026)
+
+**Symptom:** during a single ad break the overlay flickered on/off and audio
+blipped through the gaps. Measured over 21h: **58.8% of blocks re-blocked
+within 5s** (105 within 2s), median block duration 4.5s, median gap 3.0s,
+**300 mute/unmute cycles overnight**. Pre-existing, not a regression — the
+same window before these changes measured 60.2%.
+
+**Root cause:** `OCR_STOP_THRESHOLD = 2` was set on the assumption
+(documented in the old comment) that "consecutive OCR misses during a real
+ad are extremely rare". Production logs disproved it. Measured over 24h —
+101 ad breaks, 2309 OCR frames inside them, sampled from the **raw keyword
+stream** rather than inside blocks, because a run of N misses ends the block
+at threshold N and censors every longer run:
+
+| consecutive misses | 1 | 2 | 3 | 4 | 5+ |
+|---|---|---|---|---|---|
+| occurrences | 15 | **118** | 4 | 6 | **0** |
+
+OCR misses the keyword on **12.4%** of frames while the ad is still on
+screen, and runs of *exactly 2* dominate — precisely what threshold=2 trips
+on. (The naive "inside a block" measurement shows only 1.9% miss and zero
+runs ≥3; that is the censoring artifact, not the truth.)
+
+**Fix: threshold 2 → 3.** Driving the harness's real `DecisionEngine` with
+the measured distribution (`tests/harness_ocr_stop_ab.py`):
+
+| threshold | flaps/break | breaks flapping | recovery |
+|---|---|---|---|
+| 2 | 5.26 | 100% | 1.39s |
+| **3** | **0.44 (-91.6%)** | **37.8%** | **2.07s** |
+| 4 | 0.24 (-95.5%) | 21.2% | 2.91s |
+| 5 | 0 (-100%) | 0% | 3.75s |
+
+3 is the knee: ~92% of the fix for ~0.6s. 4 and 5 push recovery past the
+documented 1.5-2.0s ceiling. Confirmed on the real video rig
+(`block_latency_harness round1`, 9/9 clean at both settings): recovery
+1.06s → 1.62s mean (max 1.86s), detect unchanged at ~0.55s.
+`THERMAL_DEGRADED_PARAMS` moved 4 → 5 to preserve its base+2 offset.
+
+**Note on the rig:** `block_latency_harness` injects *clean* overlay text
+that OCR reads on nearly every frame, so it cannot reproduce this failure —
+the failure IS the intermittency. `harness_ocr_stop_ab.py` therefore drives
+the same `DecisionEngine` with the empirical miss distribution, the approach
+`test_vlm_decision_sim.py` uses for VLM. The video rig is still used to
+confirm the clean-case detect/recover path does not regress.
+
+### Music mode drifted into podcasts — drift check was unreachable (Fixed - Sep 2026)
+
+**Symptom:** music mode ON, but the Fire TV played a 1.5-hour podcast
+(`MaximumFun.Org/Join`) for hours and never steered back.
+
+**Root cause:** `_check_music_drift()` was called from exactly one place —
+the *verified-PLAYING* branch of `_ensure_youtube_playing`. But on this
+device VLM's screen classifier never returns PLAYING: measured over 24h it
+returned **MENU 1668×, DIALOG 814×, PLAYING 0×**. Every playing cycle exits
+earlier at the audio veto ("MENU vetoed: audio flowing"), which fired 1602
+times. So the drift check ran **0 times in 24 hours** and music mode was
+effectively inert once autoplay chained away from the seed.
+
+**Fix, two parts:**
+1. **Reachability** — `_check_music_drift()` is now also called on the MENU
+   and DIALOG audio-veto paths. Audio flowing is the authoritative
+   "a video is playing" signal on this device (per the architectural
+   invariant), so it is exactly where the drift check belongs.
+2. **A signal that actually works** — the old rule (steer after 5
+   info-bearing cycles with no `MUSIC_EVIDENCE_KEYWORDS`) is nearly useless:
+   only **0.4%** of info-bearing frames carry a music keyword, because
+   YouTube shows title text only during overlays/end cards. With the check
+   now running every cycle, threshold 5 would have re-seeded every ~3 min,
+   interrupting genuine music. Added `LONGFORM_DURATION_RE` (`H:MM:SS`) as
+   **positive** drift evidence: an hour-plus runtime is a podcast/stream/mix,
+   never a music video (those are `M:SS`). It fires on **13.3%** of frames —
+   33× the signal — with **zero** frames matching both patterns. Steers after
+   3 consecutive long-form cycles (~1.8/hour simulated on real logs); the
+   blind absence counter is kept only as a slow backstop at 60 (~33 min).
+
+Note a 90-minute DJ mix is technically music but yields one pre-roll per 90
+min, so steering off it also serves the mode's purpose (ad-density).
+
+**Tests:** `TestMusicDriftReachability` (9 cases: drift runs on both veto
+paths, long-form steering, music evidence resets the streak, `M:SS` is not
+long-form, non-consecutive long-form does not steer, backstop is slow,
+skipped while blocking / when music mode is off).
+
 ### Log-sweep fixes: OCR kill storm, display-loop spam, eager thermal guard, stuck-muted audio (Fixed - Aug 2026)
 
 Four independent issues found by sweeping 4 days of production logs.
