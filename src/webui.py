@@ -2008,6 +2008,103 @@ class WebUI:
         # Health Check
         # =========================================================================
 
+        @self.app.route('/api/debug/memory')
+        def api_debug_memory():
+            """Heap attribution for chasing memory growth.
+
+            GIL HAZARD — read before adding anything here: the audio pipeline
+            runs a Python buffer probe ~100x/s on GStreamer's streaming thread.
+            Anything that holds the GIL for more than a few ms starves it and
+            the TV audio garbles (observed live Sep 2026: a tracemalloc snapshot
+            request garbled audio for ~30s; steady-state tracing garbled it
+            continuously). So: no work happens unless explicitly opted into,
+            and MINUS_TRACEMALLOC must never be set on a box someone is
+            listening to — use the external per-minute /proc sampler for trends.
+
+            Query params:
+              objects=1   include a gc.get_objects() type census (walks the
+                          whole heap under the GIL — a second or two)
+              top=N       rows per table (default 30)
+              snapshot=1  take a tracemalloc snapshot (EXPENSIVE: copies every
+                          live trace under the GIL; can take a minute+ on a
+                          big heap — never call it in a tight loop)
+              key=lineno|traceback   tracemalloc grouping
+              diff=1      also diff against the stored baseline (slower still)
+              baseline=1  store this tracemalloc snapshot as the diff base
+            tracemalloc sections appear only when the service was started
+            with MINUS_TRACEMALLOC=1 (see minus.py).
+            """
+            import gc
+            import tracemalloc
+            from collections import Counter
+            try:
+                top = max(1, min(200, int(request.args.get('top', '30'))))
+                out = {'ts': time.time()}
+                hm = getattr(self.minus, 'health_monitor', None)
+                if hm is not None and hasattr(hm, 'get_process_memory'):
+                    try:
+                        out['process'] = dict(hm.get_process_memory())
+                    except Exception:
+                        pass
+                out['threads'] = {'count': threading.active_count(),
+                                  'names': sorted(t.name for t in threading.enumerate())}
+                try:
+                    out['fds'] = len(os.listdir('/proc/self/fd'))
+                except Exception:
+                    out['fds'] = None
+                out['gc'] = {'counts': gc.get_count(), 'garbage': len(gc.garbage),
+                             'thresholds': gc.get_threshold()}
+                # Opt-in: gc.get_objects() walks the whole heap under the GIL
+                # (same hazard as snapshots — see docstring).
+                if request.args.get('objects') == '1':
+                    census = Counter(type(o).__name__ for o in gc.get_objects())
+                    out['object_total'] = sum(census.values())
+                    out['top_types'] = census.most_common(top)
+                tm = {'enabled': tracemalloc.is_tracing()}
+                if tracemalloc.is_tracing():
+                    cur, peak = tracemalloc.get_traced_memory()
+                    tm['current_mb'] = round(cur / 1048576, 1)
+                    tm['peak_mb'] = round(peak / 1048576, 1)
+                    tm['traced_frames'] = tracemalloc.get_traceback_limit()
+                # take_snapshot() copies EVERY live trace under the GIL — on a
+                # process with ~1M allocations it ran >120s and stalled the
+                # service. Opt-in only; the cheap totals above are the
+                # steady-state signal, snapshots are for attribution.
+                if tracemalloc.is_tracing() and request.args.get('snapshot') == '1':
+                    key = 'traceback' if request.args.get('key') == 'traceback' else 'lineno'
+                    t0 = time.time()
+                    snap = tracemalloc.take_snapshot()
+                    tm['snapshot_s'] = round(time.time() - t0, 1)
+                    rows = []
+                    for st in snap.statistics(key)[:top]:
+                        where = ('\n'.join(st.traceback.format()) if key == 'traceback'
+                                 else str(st.traceback[0]))
+                        rows.append({'size_mb': round(st.size / 1048576, 2),
+                                     'count': st.count, 'where': where})
+                    tm['top'] = rows
+                    prev = getattr(self, '_tm_prev_snapshot', None)
+                    # compare_to() is slower still (it groups both snapshots
+                    # under the GIL — observed >2 min stalling /api/status);
+                    # only diff when explicitly asked.
+                    if prev is not None and request.args.get('diff') == '1':
+                        diff = []
+                        for d in snap.compare_to(prev, 'lineno')[:top]:
+                            diff.append({'size_diff_mb': round(d.size_diff / 1048576, 2),
+                                         'count_diff': d.count_diff,
+                                         'size_mb': round(d.size / 1048576, 2),
+                                         'where': str(d.traceback[0])})
+                        tm['diff_since_baseline'] = diff
+                        tm['baseline_age_s'] = round(time.time() - self._tm_prev_time)
+                    if prev is None or request.args.get('baseline') == '1':
+                        self._tm_prev_snapshot = snap
+                        self._tm_prev_time = time.time()
+                        tm['baseline_stored'] = True
+                out['tracemalloc'] = tm
+                return jsonify(out)
+            except Exception as e:
+                logger.error(f"debug/memory error: {e}")
+                return jsonify({'error': str(e)}), 500
+
         @self.app.route('/api/health')
         def api_health():
             """Detailed health check endpoint for monitoring.
@@ -2043,6 +2140,21 @@ class WebUI:
                         video_status = {'status': 'error', 'reason': 'no_pipeline'}
                         issues.append('video_pipeline_down')
                 health['subsystems']['video'] = video_status
+
+                # Memory subsystem — per-process, not just system-wide, so a
+                # slow climb in Minus itself is visible without reading /proc.
+                hm = getattr(self.minus, 'health_monitor', None)
+                if hm is not None and hasattr(hm, 'get_process_memory'):
+                    try:
+                        mem = dict(hm.get_process_memory())
+                        pct = mem.get('system_percent')
+                        mem['status'] = ('critical' if (pct or 0) >= 90 else
+                                         'warning' if (pct or 0) >= 80 else 'ok')
+                        health['subsystems']['memory'] = mem
+                        if mem['status'] != 'ok':
+                            issues.append(f"memory_{mem['status']}")
+                    except (TypeError, ValueError):
+                        pass
 
                 # Thermal subsystem (adaptive degradation under throttle)
                 thermal_monitor = getattr(self.minus, 'thermal_monitor', None)
@@ -2753,6 +2865,29 @@ class WebUI:
                 return Response(data, mimetype='image/jpeg')
             except Exception as e:
                 logger.error(f"Error in photo detail {photo_id}: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/settings/unattended-upgrades', methods=['GET', 'POST'])
+        def api_unattended_upgrades():
+            """Unattended Debian security upgrades on/off + status.
+
+            GET  -> {setting, installed, enabled, policy_present, last_run_time,
+                     last_run_result, next_run, reboot_required, is_root,
+                     install_command, blacklist}
+            POST {"enabled": bool} -> persists the setting and rewrites
+                     /etc/apt/apt.conf.d/20auto-upgrades (root only).
+            """
+            try:
+                if request.method == 'GET':
+                    return jsonify(self.minus.get_unattended_upgrades_status())
+                data = request.get_json() or {}
+                if 'enabled' not in data:
+                    return jsonify({'success': False, 'error': 'enabled required'}), 400
+                result = self.minus.set_unattended_upgrades(bool(data['enabled']))
+                code = 200 if result.get('success') else 400
+                return jsonify(result), code
+            except Exception as e:
+                logger.error(f"Error with unattended-upgrades setting: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
         @self.app.route('/api/settings/optimization', methods=['GET', 'POST'])
