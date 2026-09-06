@@ -654,6 +654,27 @@ class Minus:
         self.scene_change_threshold = self.config.scene_change_threshold
         self.max_scene_skip = 30  # Force OCR after this many consecutive skips
 
+        # ── Idle capture backoff (frozen/paused screen) ───────────────────
+        # The scene-change skip avoids OCR/VLM *inference* but NOT the
+        # capture that precedes it: both loops call frame_capture.capture()
+        # (4K JPEG over HTTP + cv2.imdecode + resize) every iteration and,
+        # on a skip, slept only 0.1s (OCR) / 0.5s (VLM) before capturing
+        # again. On a genuinely paused screen that is a ~10Hz loop of 4K
+        # JPEG decodes doing no useful work — measured as the dominant idle
+        # cost while a user had the video paused for 15 min and the SoC sat
+        # at 85C throttling.
+        #
+        # Once the screen has been unchanged for IDLE_BACKOFF_AFTER
+        # consecutive cycles, grow the inter-capture sleep geometrically up
+        # to IDLE_BACKOFF_MAX_S. ANY scene change resets it instantly, so
+        # this only ever costs latency on the transition *out* of a freeze:
+        # worst case an ad appearing on a frozen screen is noticed
+        # IDLE_BACKOFF_MAX_S later than before. The existing force-run caps
+        # (max_scene_skip / vlm_max_scene_skip) are unchanged and still
+        # catch an ad that appears without a scene change.
+        self.IDLE_BACKOFF_AFTER = int(os.environ.get('MINUS_IDLE_BACKOFF_AFTER', '8'))
+        self.IDLE_BACKOFF_MAX_S = float(os.environ.get('MINUS_IDLE_BACKOFF_MAX', '1.5'))
+
         # Static screen suppression - disable blocking for still ads
         # (e.g., paused video with ad, YouTube landing page with sponsored content)
         self.STATIC_TIME_THRESHOLD = 2.5  # Seconds of static screen to trigger suppression
@@ -2300,6 +2321,23 @@ class Minus:
         except Exception:
             return 1.0
 
+    def _idle_backoff_sleep(self, skip_count: int, base_sleep: float) -> float:
+        """Inter-capture sleep while the screen is frozen.
+
+        Returns base_sleep for the first IDLE_BACKOFF_AFTER consecutive
+        skips (so brief static stretches behave exactly as before), then
+        doubles per skip up to IDLE_BACKOFF_MAX_S. The caller resets
+        skip_count to 0 on any scene change, so backoff collapses the
+        instant anything moves.
+        """
+        if skip_count <= self.IDLE_BACKOFF_AFTER:
+            return base_sleep
+        # Clamp the exponent: skip counters are reset by the caller but a
+        # long-lived freeze can push them arbitrarily high, and 2**N
+        # overflows float conversion well before that matters.
+        over = min(skip_count - self.IDLE_BACKOFF_AFTER, 20)
+        return min(base_sleep * (2 ** over), self.IDLE_BACKOFF_MAX_S)
+
     def is_scene_changed(self, frame):
         """Check if scene changed (should run OCR)."""
         if self.prev_frame is None:
@@ -3738,7 +3776,7 @@ class Minus:
                     if self.scene_skip_count < self.max_scene_skip:
                         if self.scene_skip_count % 10 == 1:
                             logger.info(f"OCR #{self.frame_count}: SKIPPED - scene unchanged (skipped {self.scene_skip_count} total)")
-                        time.sleep(0.1)
+                        time.sleep(self._idle_backoff_sleep(self.scene_skip_count, 0.1))
                         continue
                     else:
                         logger.debug(f"OCR #{self.frame_count}: Force run after {self.scene_skip_count} skips")
@@ -4191,7 +4229,7 @@ class Minus:
                     if self.vlm_scene_skip_count < self.vlm_max_scene_skip:
                         if self.vlm_scene_skip_count % 10 == 1:
                             logger.info(f"VLM #{self.vlm_frame_count}: SKIPPED - scene unchanged (skipped {self.vlm_scene_skip_count} total)")
-                        time.sleep(0.5)
+                        time.sleep(self._idle_backoff_sleep(self.vlm_scene_skip_count, 0.5))
                         continue
                     else:
                         logger.debug(f"VLM #{self.vlm_frame_count}: Force run after {self.vlm_scene_skip_count} skips")

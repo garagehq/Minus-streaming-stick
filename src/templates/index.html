@@ -699,6 +699,15 @@
                     </label>
                 </div>
                 <p class="help-text">Desaturates the corner preview of the blocked ad so the Spanish overlay (bright, colorful) is more appealing than the ad.</p>
+
+                <div class="setting-item" style="margin-top: 1rem;">
+                    <span class="setting-label">Low-bandwidth Preview</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="low-bw-preview-toggle" onchange="setLowBandwidthPreview(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p class="help-text">The Home live feed pulls a full-rate 4K MJPEG stream — about 175&nbsp;Mbit/s per viewer, sent at the capture frame rate even when the picture is paused. This replaces it with a few-frames-per-second snapshot poll (~12-20x less WiFi traffic), which matters because the radio shares the SoC's thermal budget. Choppier, but far cooler. Stored per browser.</p>
             </section>
 
             <!-- Autonomous Mode Settings -->
@@ -1023,6 +1032,10 @@
             // Browsers disconnect the stream when the img is hidden (display:none)
             if (tabName === 'home') {
                 reconnectStream();
+            } else {
+                // Leaving Home: close the preview connection explicitly.
+                // display:none is not a reliable disconnect signal.
+                detachStream();
             }
 
             // Load data for specific tabs
@@ -1040,14 +1053,72 @@
         }
 
         let streamReconnectTimer = null;
+        // Low-bandwidth preview: poll /snapshot instead of pulling the full
+        // MJPEG stream. The 4K stream is ~21 MB/s (~175 Mbit/s) PER client
+        // and is served at the capture frame rate regardless of whether the
+        // content is moving — a paused video costs exactly as much as
+        // action. Polling snapshots at a few fps is 12-20x cheaper on the
+        // WiFi radio, which shares the SoC's thermal budget.
+        let lowBandwidthPreview = localStorage.getItem('minus_low_bw_preview') === '1';
+        let snapshotPollTimer = null;
+        const SNAPSHOT_POLL_MS = 400;   // ~2.5 fps
+
+        function stopSnapshotPoll() {
+            if (snapshotPollTimer) { clearInterval(snapshotPollTimer); snapshotPollTimer = null; }
+        }
+
+        function startSnapshotPoll() {
+            stopSnapshotPoll();
+            const feed = document.getElementById('video-feed');
+            if (!feed) return;
+            const tick = () => {
+                if (document.hidden || currentTab !== 'home') return;
+                feed.src = '/snapshot?t=' + Date.now();
+            };
+            tick();
+            snapshotPollTimer = setInterval(tick, SNAPSHOT_POLL_MS);
+        }
+
+        function detachStream() {
+            // Drop the MJPEG connection entirely. Clearing src is what
+            // actually closes the socket; leaving the element hidden is NOT
+            // reliable across browsers for a backgrounded window.
+            stopSnapshotPoll();
+            const feed = document.getElementById('video-feed');
+            if (feed) feed.removeAttribute('src');
+        }
 
         function reconnectStream() {
             const feed = document.getElementById('video-feed');
-            if (feed) {
+            if (!feed) return;
+            if (document.hidden || currentTab !== 'home') { detachStream(); return; }
+            if (lowBandwidthPreview) {
+                startSnapshotPoll();
+            } else {
+                stopSnapshotPoll();
                 // Force reconnect by resetting src with cache buster
                 feed.src = '/stream?t=' + Date.now();
             }
         }
+
+        function setLowBandwidthPreview(enabled) {
+            lowBandwidthPreview = !!enabled;
+            localStorage.setItem('minus_low_bw_preview', lowBandwidthPreview ? '1' : '0');
+            reconnectStream();
+        }
+
+        // A backgrounded tab keeps an MJPEG stream open in most browsers, so
+        // an idle tab left open all day is a continuous ~175 Mbit/s WiFi
+        // load for a picture nobody is looking at. Drop it while hidden and
+        // restore it on return.
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                detachStream();
+            } else {
+                reconnectStream();
+            }
+        });
+        window.addEventListener('pagehide', detachStream);
 
         function scheduleStreamReconnect() {
             // Avoid stacking multiple reconnect timers
@@ -3523,6 +3594,14 @@
         fetch('/api/network').then(r => r.json()).then(data => {
             document.getElementById('footer-host').textContent = data.hostname || 'unknown';
         }).catch(() => {});
+
+        // Reflect the stored low-bandwidth preference and apply it to the
+        // feed on load (the <img> starts on /stream in markup).
+        (function initLowBwPreview() {
+            const t = document.getElementById('low-bw-preview-toggle');
+            if (t) t.checked = lowBandwidthPreview;
+            if (lowBandwidthPreview) reconnectStream();
+        })();
 
         updateStatus();
         updateStats();

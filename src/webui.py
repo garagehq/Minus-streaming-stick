@@ -2044,6 +2044,21 @@ class WebUI:
                         issues.append('video_pipeline_down')
                 health['subsystems']['video'] = video_status
 
+                # Memory subsystem — per-process, not just system-wide, so a
+                # slow climb in Minus itself is visible without reading /proc.
+                hm = getattr(self.minus, 'health_monitor', None)
+                if hm is not None and hasattr(hm, 'get_process_memory'):
+                    try:
+                        mem = dict(hm.get_process_memory())
+                        pct = mem.get('system_percent')
+                        mem['status'] = ('critical' if (pct or 0) >= 90 else
+                                         'warning' if (pct or 0) >= 80 else 'ok')
+                        health['subsystems']['memory'] = mem
+                        if mem['status'] != 'ok':
+                            issues.append(f"memory_{mem['status']}")
+                    except (TypeError, ValueError):
+                        pass
+
                 # Thermal subsystem (adaptive degradation under throttle)
                 thermal_monitor = getattr(self.minus, 'thermal_monitor', None)
                 if thermal_monitor is not None:
