@@ -105,6 +105,17 @@ import re
 import json
 import difflib
 from pathlib import Path
+
+# Memory diagnosis: MINUS_TRACEMALLOC=1 starts Python allocation tracing at
+# import time so /api/debug/memory can attribute heap growth to call sites.
+# ~1.5-2x allocation overhead — diagnosis only, not for steady-state use.
+# Guard on __main__: multiprocessing's spawn start method re-imports this
+# module as __mp_main__ inside every OCR/VLM/ASR worker, and the env var is
+# inherited — without the guard the workers would trace too (observed: VLM
+# model load blew past its 60s preload budget).
+if os.environ.get('MINUS_TRACEMALLOC', '0') == '1' and __name__ == '__main__':
+    import tracemalloc
+    tracemalloc.start(int(os.environ.get('MINUS_TRACEMALLOC_FRAMES', '5')))
 from datetime import datetime
 # Process-based OCR/VLM workers handle timeouts internally (no ThreadPoolExecutor needed)
 
@@ -787,6 +798,12 @@ class Minus:
 
         # System settings (loaded from ~/.minus_system_settings.json)
         self._system_settings = self._load_system_settings()
+        # Reconcile apt's unattended-upgrades config with the persisted
+        # setting (idempotent; root-only, no-op when not root or not installed).
+        try:
+            self._apply_unattended_upgrades_setting()
+        except Exception as e:
+            logger.warning(f"[Upgrades] startup reconcile failed: {e}")
 
         # Remote control state
         self.fire_tv_setup = None
@@ -2575,6 +2592,8 @@ class Minus:
             'ir_enabled': False,          # Show REI HDMI-switch IR remote in autonomous mode
             'leds_require_display': True, # Only drive the WS2812B strip when HDMI-TX is connected
                                           # (so a powered-off TV in a dark room stays dark)
+            'unattended_upgrades': True,  # Debian security updates apply themselves (no auto-reboot,
+                                          # video-stack packages blacklisted) — src/unattended_upgrades.py
             # Which replacement-mode kinds are allowed during ad blocks. A
             # list rather than a dict so the web UI can just toggle checkboxes.
             # Valid kinds: 'vocab', 'fact', 'photos'.
@@ -2628,6 +2647,43 @@ class Minus:
     def vlm_preload(self) -> bool:
         """Whether to preload VLM at startup."""
         return self._system_settings.get('vlm_preload', True)
+
+    # ── Unattended security upgrades ─────────────────────────────────────
+    @property
+    def unattended_upgrades_enabled(self) -> bool:
+        return bool(self._system_settings.get('unattended_upgrades', True))
+
+    def _apply_unattended_upgrades_setting(self) -> dict:
+        """Make apt's periodic config match the persisted setting.
+
+        Runs at startup and on every toggle. Only acts as root with the
+        package installed; otherwise reports why (the UI shows the manual
+        command) without failing startup.
+        """
+        from unattended_upgrades import is_root, is_installed, is_enabled, set_enabled, status
+        want = self.unattended_upgrades_enabled
+        if not is_root():
+            return {'success': False, 'error': 'not root', **status()}
+        if not is_installed():
+            if want:
+                logger.warning("[Upgrades] setting is ON but unattended-upgrades is not "
+                               "installed — run: sudo apt-get install unattended-upgrades")
+            return {'success': False, 'error': 'not installed', **status()}
+        if is_enabled() != want or (want and not __import__('unattended_upgrades').policy_present()):
+            res = set_enabled(want)
+            if not res.get('success'):
+                logger.warning(f"[Upgrades] could not apply setting: {res.get('error')}")
+            return {**res, **status()}
+        return {'success': True, **status()}
+
+    def set_unattended_upgrades(self, enabled: bool) -> dict:
+        self._system_settings['unattended_upgrades'] = bool(enabled)
+        self._save_system_settings()
+        return self._apply_unattended_upgrades_setting()
+
+    def get_unattended_upgrades_status(self) -> dict:
+        from unattended_upgrades import status
+        return {'setting': self.unattended_upgrades_enabled, **status()}
 
     @property
     def asr_enabled(self) -> bool:

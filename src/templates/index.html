@@ -637,6 +637,21 @@
 
             <!-- Detection Settings -->
             <section class="settings-section">
+                <h2>System Updates</h2>
+                <div class="setting-item">
+                    <span class="setting-label">Unattended Security Upgrades</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="unattended-upgrades-toggle" onchange="toggleUnattendedUpgrades(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="vlm-status" id="unattended-status-info">
+                    <span class="status-text">Status: <span id="unattended-status-text">Loading...</span></span>
+                </div>
+                <p class="help-text">Applies Debian <em>security</em> updates automatically once a day via <code>unattended-upgrades</code>. It never reboots on its own, and never touches the kernel, u-boot, Rockchip MPP/RGA, GStreamer, Mesa, RKNN or Tailscale packages the video path was validated against &mdash; those are updated deliberately. If the status says the package is missing, install it with <code>sudo apt-get install unattended-upgrades</code> (or re-run <code>sudo ./install.sh</code>) and this toggle will activate.</p>
+            </section>
+
+            <section class="settings-section">
                 <h2>Detection Settings</h2>
                 <div class="setting-item">
                     <span class="setting-label">VLM (minus-v0.1)</span>
@@ -1925,6 +1940,48 @@
             }
         }
 
+        async function loadUnattendedUpgrades() {
+            try {
+                const r = await fetch('/api/settings/unattended-upgrades');
+                const d = await r.json();
+                const t = document.getElementById('unattended-upgrades-toggle');
+                const s = document.getElementById('unattended-status-text');
+                if (t) { t.checked = !!d.setting; t.disabled = !d.installed; }
+                if (!s) return;
+                if (!d.installed) {
+                    s.textContent = 'package not installed - run: ' + (d.install_command || 'sudo apt-get install unattended-upgrades');
+                    return;
+                }
+                const parts = [d.enabled ? 'enabled' : 'disabled'];
+                if (d.setting && !d.enabled && !d.is_root) parts.push('(service not root - apply manually)');
+                if (d.last_run_time) parts.push('last run ' + d.last_run_time + (d.last_run_result ? ' - ' + d.last_run_result : ''));
+                if (d.next_run) parts.push('next ' + d.next_run);
+                if (d.reboot_required) parts.push('REBOOT REQUIRED');
+                s.textContent = parts.join(' | ');
+            } catch (e) {
+                console.error('unattended-upgrades status failed:', e);
+            }
+        }
+        async function toggleUnattendedUpgrades(enabled) {
+            const t = document.getElementById('unattended-upgrades-toggle');
+            try {
+                const r = await fetch('/api/settings/unattended-upgrades', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: enabled })
+                });
+                const d = await r.json();
+                if (!d.success) {
+                    if (t) t.checked = !enabled;
+                    alert('Could not change unattended upgrades: ' + (d.error || 'unknown') +
+                          (d.manual_command ? '\n\nRun manually:\n' + d.manual_command : ''));
+                }
+            } catch (e) {
+                console.error('unattended-upgrades toggle error:', e);
+                if (t) t.checked = !enabled;
+            }
+            loadUnattendedUpgrades();
+        }
         async function loadVLMPreloadSetting() {
             try {
                 const response = await fetch('/api/settings/vlm-preload');
@@ -3613,6 +3670,7 @@
         updateFireTVStatus();
         updateVLMStatus();
         loadVLMPreloadSetting();
+        loadUnattendedUpgrades();
         loadASRSetting();
         loadOptimizationSettings();
         loadIRStatus();

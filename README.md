@@ -114,6 +114,20 @@ cd /home/radxa/Minus && sudo python3 minus.py
 sudo ./install.sh
 ```
 
+### Automatic security updates
+
+`install.sh` installs Debian's `unattended-upgrades`, and Minus turns it on by
+default (Settings → **System Updates** in the web UI toggles it, or set
+`"unattended_upgrades": false` in `~/.minus_system_settings.json`). Only
+`bookworm-security` fixes are applied, it never reboots by itself, and the
+packages the video path depends on (kernel, u-boot, Rockchip MPP/RGA,
+GStreamer, Mesa, RKNN, Tailscale) are blacklisted so a routine run can't swap
+a driver the pipeline was validated against — update those deliberately with
+`apt` when you choose to. Policy lives in
+`/etc/apt/apt.conf.d/52minus-unattended-upgrades` (written by the service);
+history is in `/var/log/unattended-upgrades/`. If the web UI says the
+package is missing: `sudo apt-get install unattended-upgrades`.
+
 The full dependency list and deployment walkthrough are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Model paths and detection thresholds are set with environment variables (`MINUS_VLM_MODEL_DIR`, `MINUS_OCR_MODEL_DIR`, etc.); [CLAUDE.md](CLAUDE.md) documents all of them.
 
 Minus auto-detects the connected HDMI output, resolution, DRM plane, and audio device at startup, and works with both 4K and 1080p displays.
