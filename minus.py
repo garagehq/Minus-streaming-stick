@@ -105,6 +105,17 @@ import re
 import json
 import difflib
 from pathlib import Path
+
+# Memory diagnosis: MINUS_TRACEMALLOC=1 starts Python allocation tracing at
+# import time so /api/debug/memory can attribute heap growth to call sites.
+# ~1.5-2x allocation overhead — diagnosis only, not for steady-state use.
+# Guard on __main__: multiprocessing's spawn start method re-imports this
+# module as __mp_main__ inside every OCR/VLM/ASR worker, and the env var is
+# inherited — without the guard the workers would trace too (observed: VLM
+# model load blew past its 60s preload budget).
+if os.environ.get('MINUS_TRACEMALLOC', '0') == '1' and __name__ == '__main__':
+    import tracemalloc
+    tracemalloc.start(int(os.environ.get('MINUS_TRACEMALLOC_FRAMES', '5')))
 from datetime import datetime
 # Process-based OCR/VLM workers handle timeouts internally (no ThreadPoolExecutor needed)
 
@@ -654,6 +665,27 @@ class Minus:
         self.scene_change_threshold = self.config.scene_change_threshold
         self.max_scene_skip = 30  # Force OCR after this many consecutive skips
 
+        # ── Idle capture backoff (frozen/paused screen) ───────────────────
+        # The scene-change skip avoids OCR/VLM *inference* but NOT the
+        # capture that precedes it: both loops call frame_capture.capture()
+        # (4K JPEG over HTTP + cv2.imdecode + resize) every iteration and,
+        # on a skip, slept only 0.1s (OCR) / 0.5s (VLM) before capturing
+        # again. On a genuinely paused screen that is a ~10Hz loop of 4K
+        # JPEG decodes doing no useful work — measured as the dominant idle
+        # cost while a user had the video paused for 15 min and the SoC sat
+        # at 85C throttling.
+        #
+        # Once the screen has been unchanged for IDLE_BACKOFF_AFTER
+        # consecutive cycles, grow the inter-capture sleep geometrically up
+        # to IDLE_BACKOFF_MAX_S. ANY scene change resets it instantly, so
+        # this only ever costs latency on the transition *out* of a freeze:
+        # worst case an ad appearing on a frozen screen is noticed
+        # IDLE_BACKOFF_MAX_S later than before. The existing force-run caps
+        # (max_scene_skip / vlm_max_scene_skip) are unchanged and still
+        # catch an ad that appears without a scene change.
+        self.IDLE_BACKOFF_AFTER = int(os.environ.get('MINUS_IDLE_BACKOFF_AFTER', '8'))
+        self.IDLE_BACKOFF_MAX_S = float(os.environ.get('MINUS_IDLE_BACKOFF_MAX', '1.5'))
+
         # Static screen suppression - disable blocking for still ads
         # (e.g., paused video with ad, YouTube landing page with sponsored content)
         self.STATIC_TIME_THRESHOLD = 2.5  # Seconds of static screen to trigger suppression
@@ -766,6 +798,12 @@ class Minus:
 
         # System settings (loaded from ~/.minus_system_settings.json)
         self._system_settings = self._load_system_settings()
+        # Reconcile apt's unattended-upgrades config with the persisted
+        # setting (idempotent; root-only, no-op when not root or not installed).
+        try:
+            self._apply_unattended_upgrades_setting()
+        except Exception as e:
+            logger.warning(f"[Upgrades] startup reconcile failed: {e}")
 
         # Remote control state
         self.fire_tv_setup = None
@@ -2300,6 +2338,23 @@ class Minus:
         except Exception:
             return 1.0
 
+    def _idle_backoff_sleep(self, skip_count: int, base_sleep: float) -> float:
+        """Inter-capture sleep while the screen is frozen.
+
+        Returns base_sleep for the first IDLE_BACKOFF_AFTER consecutive
+        skips (so brief static stretches behave exactly as before), then
+        doubles per skip up to IDLE_BACKOFF_MAX_S. The caller resets
+        skip_count to 0 on any scene change, so backoff collapses the
+        instant anything moves.
+        """
+        if skip_count <= self.IDLE_BACKOFF_AFTER:
+            return base_sleep
+        # Clamp the exponent: skip counters are reset by the caller but a
+        # long-lived freeze can push them arbitrarily high, and 2**N
+        # overflows float conversion well before that matters.
+        over = min(skip_count - self.IDLE_BACKOFF_AFTER, 20)
+        return min(base_sleep * (2 ** over), self.IDLE_BACKOFF_MAX_S)
+
     def is_scene_changed(self, frame):
         """Check if scene changed (should run OCR)."""
         if self.prev_frame is None:
@@ -2537,6 +2592,8 @@ class Minus:
             'ir_enabled': False,          # Show REI HDMI-switch IR remote in autonomous mode
             'leds_require_display': True, # Only drive the WS2812B strip when HDMI-TX is connected
                                           # (so a powered-off TV in a dark room stays dark)
+            'unattended_upgrades': True,  # Debian security updates apply themselves (no auto-reboot,
+                                          # video-stack packages blacklisted) — src/unattended_upgrades.py
             # Which replacement-mode kinds are allowed during ad blocks. A
             # list rather than a dict so the web UI can just toggle checkboxes.
             # Valid kinds: 'vocab', 'fact', 'photos'.
@@ -2590,6 +2647,43 @@ class Minus:
     def vlm_preload(self) -> bool:
         """Whether to preload VLM at startup."""
         return self._system_settings.get('vlm_preload', True)
+
+    # ── Unattended security upgrades ─────────────────────────────────────
+    @property
+    def unattended_upgrades_enabled(self) -> bool:
+        return bool(self._system_settings.get('unattended_upgrades', True))
+
+    def _apply_unattended_upgrades_setting(self) -> dict:
+        """Make apt's periodic config match the persisted setting.
+
+        Runs at startup and on every toggle. Only acts as root with the
+        package installed; otherwise reports why (the UI shows the manual
+        command) without failing startup.
+        """
+        from unattended_upgrades import is_root, is_installed, is_enabled, set_enabled, status
+        want = self.unattended_upgrades_enabled
+        if not is_root():
+            return {'success': False, 'error': 'not root', **status()}
+        if not is_installed():
+            if want:
+                logger.warning("[Upgrades] setting is ON but unattended-upgrades is not "
+                               "installed — run: sudo apt-get install unattended-upgrades")
+            return {'success': False, 'error': 'not installed', **status()}
+        if is_enabled() != want or (want and not __import__('unattended_upgrades').policy_present()):
+            res = set_enabled(want)
+            if not res.get('success'):
+                logger.warning(f"[Upgrades] could not apply setting: {res.get('error')}")
+            return {**res, **status()}
+        return {'success': True, **status()}
+
+    def set_unattended_upgrades(self, enabled: bool) -> dict:
+        self._system_settings['unattended_upgrades'] = bool(enabled)
+        self._save_system_settings()
+        return self._apply_unattended_upgrades_setting()
+
+    def get_unattended_upgrades_status(self) -> dict:
+        from unattended_upgrades import status
+        return {'setting': self.unattended_upgrades_enabled, **status()}
 
     @property
     def asr_enabled(self) -> bool:
@@ -3738,7 +3832,7 @@ class Minus:
                     if self.scene_skip_count < self.max_scene_skip:
                         if self.scene_skip_count % 10 == 1:
                             logger.info(f"OCR #{self.frame_count}: SKIPPED - scene unchanged (skipped {self.scene_skip_count} total)")
-                        time.sleep(0.1)
+                        time.sleep(self._idle_backoff_sleep(self.scene_skip_count, 0.1))
                         continue
                     else:
                         logger.debug(f"OCR #{self.frame_count}: Force run after {self.scene_skip_count} skips")
@@ -4191,7 +4285,7 @@ class Minus:
                     if self.vlm_scene_skip_count < self.vlm_max_scene_skip:
                         if self.vlm_scene_skip_count % 10 == 1:
                             logger.info(f"VLM #{self.vlm_frame_count}: SKIPPED - scene unchanged (skipped {self.vlm_scene_skip_count} total)")
-                        time.sleep(0.5)
+                        time.sleep(self._idle_backoff_sleep(self.vlm_scene_skip_count, 0.5))
                         continue
                     else:
                         logger.debug(f"VLM #{self.vlm_frame_count}: Force run after {self.vlm_scene_skip_count} skips")

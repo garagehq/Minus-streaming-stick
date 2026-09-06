@@ -919,6 +919,40 @@ class HealthMonitor:
         except Exception:
             return 0
 
+    def get_process_memory(self) -> dict:
+        """Per-process memory for this Minus instance.
+
+        Added Sep 2026: /api/health reported system memory only, so a
+        process-level climb (observed 530 MB -> 3.2 GB over ~50h, then
+        plateauing) was invisible until someone read /proc by hand. RSS
+        counts shared pages in full; PSS-anon is the honest "heap this
+        process is actually responsible for" number and is what to trend.
+        """
+        out = {'rss_mb': None, 'pss_anon_mb': None, 'system_percent': None}
+        try:
+            out['system_percent'] = round(self._get_memory_percent(), 1)
+        except Exception:
+            pass
+        try:
+            with open('/proc/self/status') as f:
+                for line in f:
+                    if line.startswith('VmRSS:'):
+                        out['rss_mb'] = round(int(line.split()[1]) / 1024, 1)
+                        break
+        except Exception:
+            pass
+        try:
+            # smaps_rollup is cheap (kernel-summarised); guard anyway since
+            # it is not present on every kernel.
+            with open('/proc/self/smaps_rollup') as f:
+                for line in f:
+                    if line.startswith('Pss_Anon:'):
+                        out['pss_anon_mb'] = round(int(line.split()[1]) / 1024, 1)
+                        break
+        except Exception:
+            pass
+        return out
+
     def _get_disk_free_mb(self) -> float:
         """Get free disk space in MB for current directory."""
         try:

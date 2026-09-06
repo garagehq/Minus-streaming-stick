@@ -32,7 +32,7 @@ fi
 # the next boot.
 REBOOT_NEEDED=0
 
-echo "[1/11] Enabling hardware device-tree overlays..."
+echo "[1/12] Enabling hardware device-tree overlays..."
 NEED_UBOOT_UPDATE=0
 
 SPI_OVERLAY="/boot/dtbo/rk3588-spi0-m2-cs0-spidev.dtbo"
@@ -65,7 +65,7 @@ fi
 
 # Python bindings for SPI (status LEDs). The status_leds module imports
 # `spidev` at runtime; without this the LED toggle in the web UI 503s.
-echo "[2/11] Installing python3-spidev..."
+echo "[2/12] Installing python3-spidev..."
 if ! dpkg -l 2>/dev/null | grep -q "^ii\s\+python3-spidev"; then
     apt-get install -y -qq python3-spidev || \
         echo "    WARNING: python3-spidev install failed; status LEDs will be unavailable"
@@ -77,7 +77,7 @@ fi
 # can open /dev/spidev0.0 without sudo. Service-mode runs as root anyway.
 # The group is created by udev on overlay probe, so on a fresh install
 # this can fail silently the first time — it'll be a no-op next run.
-echo "[3/11] Adding radxa to spi group..."
+echo "[3/12] Adding radxa to spi group..."
 if getent group spi >/dev/null; then
     if id -nG radxa 2>/dev/null | tr ' ' '\n' | grep -q '^spi$'; then
         echo "    radxa already in spi group"
@@ -89,7 +89,7 @@ else
 fi
 
 # Setup hostname and mDNS
-echo "[4/11] Setting up hostname and mDNS..."
+echo "[4/12] Setting up hostname and mDNS..."
 hostnamectl set-hostname ${HOSTNAME}
 sed -i "s/127.0.1.1.*/127.0.1.1\t${HOSTNAME}/" /etc/hosts 2>/dev/null || echo "127.0.1.1	${HOSTNAME}" >> /etc/hosts
 
@@ -104,30 +104,30 @@ echo "    Hostname set to: ${HOSTNAME}"
 echo "    Access via: http://${HOSTNAME}.local:80"
 
 # Stop existing service if running
-echo "[5/11] Stopping existing service..."
+echo "[5/12] Stopping existing service..."
 systemctl stop ${SERVICE_NAME} 2>/dev/null || true
 systemctl disable ${SERVICE_NAME} 2>/dev/null || true
 
 # Stop X11 to free up display
-echo "[6/11] Stopping X11 (gdm3)..."
+echo "[6/12] Stopping X11 (gdm3)..."
 systemctl stop gdm3 2>/dev/null || true
 systemctl disable gdm3 2>/dev/null || true
 
 # Copy service file
-echo "[7/11] Installing systemd service..."
+echo "[7/12] Installing systemd service..."
 cp "$SERVICE_FILE" /etc/systemd/system/${SERVICE_NAME}.service
 chmod 644 /etc/systemd/system/${SERVICE_NAME}.service
 
 # Reload systemd
-echo "[8/11] Reloading systemd..."
+echo "[8/12] Reloading systemd..."
 systemctl daemon-reload
 
 # Enable and start service
-echo "[9/11] Enabling service..."
+echo "[9/12] Enabling service..."
 systemctl enable ${SERVICE_NAME}
 
 # Create screenshot directories
-echo "[10/11] Creating screenshot directories..."
+echo "[10/12] Creating screenshot directories..."
 mkdir -p "${SCRIPT_DIR}/screenshots/ads"
 mkdir -p "${SCRIPT_DIR}/screenshots/non_ads"
 mkdir -p "${SCRIPT_DIR}/screenshots/vlm_spastic"
@@ -137,7 +137,7 @@ chown -R radxa:radxa "${SCRIPT_DIR}/screenshots" 2>/dev/null || true
 # Ensure login shells (tmux, ssh) source ~/.bashrc so $HOME/.local/bin is on PATH.
 # Without this, a fresh tmux window picks up /usr/local/bin/claude (older) instead
 # of ~/.local/bin/claude (newer), forcing a manual `source ~/.bashrc` each time.
-echo "[11/11] Ensuring login shells source ~/.bashrc for radxa..."
+echo "[11/12] Ensuring login shells source ~/.bashrc for radxa..."
 RADXA_HOME="$(getent passwd radxa | cut -d: -f6)"
 if [ -n "$RADXA_HOME" ] && [ -d "$RADXA_HOME" ]; then
     BASH_PROFILE="${RADXA_HOME}/.bash_profile"
@@ -152,6 +152,19 @@ EOF
     else
         echo "    ${BASH_PROFILE} already sources .bashrc, skipping"
     fi
+fi
+
+# Unattended security upgrades. Minus boxes run headless for weeks; Debian
+# security patches should apply themselves. The policy (never auto-reboot,
+# kernel/u-boot/Rockchip/GStreamer/Mesa/RKNN/Tailscale blacklisted) is
+# written by the service at startup from src/unattended_upgrades.py and can
+# be toggled from the web UI: Settings -> System Updates.
+echo "[12/12] Installing unattended-upgrades..."
+if ! dpkg -l 2>/dev/null | grep -q "^ii\s\+unattended-upgrades"; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades || \
+        echo "    WARNING: unattended-upgrades install failed; later: sudo apt-get install unattended-upgrades"
+else
+    echo "    unattended-upgrades already installed"
 fi
 
 echo ""
