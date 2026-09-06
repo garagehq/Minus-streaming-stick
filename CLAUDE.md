@@ -2998,6 +2998,69 @@ Tests: `TestYouTubeTVActivationScreen`, `TestMenuSkipWatchdog`,
 `TestDialogDismissAudioGuard` in `tests/test_autonomous_mode.py`;
 `TestKeypressStatusCodes` in `tests/test_roku_reconnect.py`.
 
+### Unattended security upgrades, A/V drift resync, memory diagnostics (Added - Sep 2026)
+
+**1. Unattended security upgrades (`src/unattended_upgrades.py`).**
+`install.sh` step 12 installs Debian's `unattended-upgrades`; the persisted
+setting `unattended_upgrades` (default **True**) is reconciled with apt at
+every startup and on every toggle (Settings → *System Updates*, API
+`GET/POST /api/settings/unattended-upgrades`). Two files are owned by Minus:
+`/etc/apt/apt.conf.d/20auto-upgrades` (the periodic on/off switch) and
+`/etc/apt/apt.conf.d/52minus-unattended-upgrades` (policy: **never
+auto-reboot**, minimal steps, and a **Package-Blacklist** of everything the
+video path was validated against — `linux-image/headers`, `u-boot`,
+`librockchip-*`, `librga*`, `gstreamer1.0-*`/`libgstreamer*`, `mesa-*`,
+`libegl/libgl1/libgbm`, `rknpu*`, `python3-gi`, `tailscale`). Debian's stock
+`50unattended-upgrades` already limits origins to `bookworm-security`, so
+nothing from the Radxa/backports/vendor repos is ever auto-applied. Writes
+need root (the service is root); outside the service the API returns the
+manual `sed` command instead. Status surfaces last run / next timer fire
+(`apt-daily-upgrade.timer`, ~06:54 UTC daily) / `reboot-required`.
+
+**2. A/V drift resync (`src/audio.py`).** The source's audio clock and the
+RK3588 HDMI-TX audio clock are independent crystals; with `alsasink
+sync=false` a source that is even a few ppm faster piles samples into
+`syncqueue`, which creeps from its 300 ms `min-threshold-time` floor toward
+its 500 ms `max-size-time` cap — audio lags video by up to ~200 ms extra and
+then the queue saturates (overruns → glitches). 50 ppm ≈ 180 ms/hour. The
+old fix (periodic flush) is still disabled because a flush drops the pipeline
+out of PLAYING and needs a full restart. The watchdog now reads
+`syncqueue.current-level-time` every 3 s (`sync_level_ms` / `sync_drift_ms`
+in `/api/audio/status` and `/api/audio/check`) and, when drift ≥
+`MINUS_AUDIO_DRIFT_RESYNC_MS` (100) persists for
+`MINUS_AUDIO_DRIFT_SUSTAIN` (3) ticks, **drains the queue in place**:
+temporarily set `max-size-time` to the baseline with `leaky=downstream` so
+GstQueue discards the *oldest* (late) buffers on the next push, then restore.
+No PCM close, no restart, no dropout — a 150–350 ms skip forward. It prefers
+a quiet moment (ad-mute or silent source) but goes anyway after 4× the sustain
+window; ≥ `MINUS_AUDIO_DRIFT_HARD_MS` (170) fires immediately (drift is bounded at ~200 ms by the queue cap, so thresholds must sit inside that range). Rate-limited
+(`MINUS_AUDIO_RESYNC_MIN_INTERVAL`, 120 s; 30 s for hard); disable with
+`MINUS_AUDIO_DRIFT_DISABLE=1`. The web-UI *Reset A/V sync* button now uses
+the same drain (`reset_av_sync` → `resync_av`), falling back to a restart
+only if the queue can't be found. Slower-source drift (queue dipping below
+the floor) self-corrects via `min-threshold-time` and needs nothing.
+
+**3. Memory diagnostics.** `/api/health` gained a per-process `memory`
+subsystem earlier; `/api/debug/memory` adds a `gc` type census
+(`?objects=0` to skip), thread names, FD count and — when the service is
+started with `MINUS_TRACEMALLOC=1` — tracemalloc top allocation sites with
+a diff against a stored baseline (`?baseline=1` to reset, `?key=traceback`
+for full stacks). **tracemalloc cannot be used on a live box:** the audio
+pipeline's Python buffer probe needs the GIL ~100×/s, and tracing (and above
+all `take_snapshot`/`compare_to`, which grouped ~1M traces under the GIL for
+30 s+) starves it — observed live Sep 2026 as garbled TV audio for the whole
+tracing window; `/api/status` latency went 0.3 s → 3 s. The drop-in was
+removed within minutes. The same hazard applies to `gc.get_objects()` (now
+`?objects=1` opt-in) and to any future long GIL hold on this process. Use
+the zero-overhead external sampler instead (`/usr/local/sbin/minus-memtrend.sh`
+run as a transient `minus-memtrend` unit → `/var/tmp/minus-memtrend.csv`:
+per-minute RSS/PSS-anon/threads/FDs from `/proc` plus display/degraded
+state) and only run a census at a quiet moment (source silent or ad-muted). Context: RSS climbed
+530 MB → 3.2 GB over ~50 h (PSS-anon 1.64 GB) then plateaued; nothing in the
+Python code accumulates unbounded (audited), so native (GStreamer/cv2/numpy)
+retention or allocator fragmentation are the leading hypotheses — a flat
+tracemalloc total against a rising PSS-anon would confirm native.
+
 ### Mid-ad block flapping — OCR_STOP_THRESHOLD 2 → 3 (Fixed - Sep 2026)
 
 **Symptom:** during a single ad break the overlay flickered on/off and audio

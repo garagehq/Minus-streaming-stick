@@ -184,6 +184,48 @@ class AudioPassthrough:
         # is added.
         self._sync_reset_enabled = False
 
+        # ── A/V drift resync (Sep 2026) ───────────────────────────────────
+        # The old approach (above) flushed the queue; that closes the ALSA
+        # PCM and needs a full pipeline rebuild, which is why it's disabled.
+        # This replaces it with something that never leaves PLAYING:
+        #
+        # Why drift exists at all: the HDMI source's audio clock and the
+        # RK3588's HDMI-TX audio clock are independent crystals. alsasink
+        # runs sync=false, so when the source is even a few ppm FASTER than
+        # the sink the extra samples pile up in `syncqueue` — it sits at its
+        # 300ms min-threshold floor after (re)start and creeps toward its
+        # 500ms max-size-time, i.e. audio lags video by up to ~200ms extra
+        # and then the queue saturates (overruns → glitches). 50ppm ≈ 180ms
+        # per hour, so a long movie can drift audibly. (The other direction
+        # self-corrects: a slower source just makes the queue dip and pause
+        # briefly at the floor.)
+        #
+        # Detection: read syncqueue's current-level-time each watchdog tick;
+        # drift = level - 300ms baseline. Correction: temporarily shrink the
+        # queue to its baseline with leaky=downstream so it discards the
+        # OLDEST backlog (the stale audio that is late), then restore. That
+        # is a ~150-350ms skip forward with no PCM close, no restart, no
+        # dropout — and we prefer to do it while muted (ad block) or while
+        # the source is silent, so it's inaudible. A hard cap forces it
+        # regardless once lag is clearly perceptible.
+        self.SYNC_BASELINE_MS = 300.0   # == syncqueue min-threshold-time
+        self.SYNC_MAX_MS = 500.0        # == syncqueue max-size-time
+        # NOTE the reachable drift range is 0..(SYNC_MAX - baseline) = 0..200ms:
+        # the queue cannot hold more than max-size-time, so at drift ~200ms it
+        # saturates and alsasrc starts overrunning. Thresholds must sit inside
+        # that range (a unit test caught an unreachable 350 here).
+        self.DRIFT_RESYNC_MS = float(os.environ.get('MINUS_AUDIO_DRIFT_RESYNC_MS', '100'))
+        self.DRIFT_HARD_MS = float(os.environ.get('MINUS_AUDIO_DRIFT_HARD_MS', '170'))
+        self.DRIFT_SUSTAIN_CHECKS = int(os.environ.get('MINUS_AUDIO_DRIFT_SUSTAIN', '3'))
+        self.RESYNC_MIN_INTERVAL_S = float(os.environ.get('MINUS_AUDIO_RESYNC_MIN_INTERVAL', '120'))
+        self._drift_enabled = os.environ.get('MINUS_AUDIO_DRIFT_DISABLE', '0') != '1'
+        self._drift_over_checks = 0
+        self._resync_count = 0
+        self._last_resync_time = 0.0
+        self._last_resync_reason = ''
+        self._last_sync_level_ms = None
+        self._max_sync_level_ms = 0.0
+
         # Initialize GStreamer (may already be initialized by video pipeline)
         Gst.init(None)
 
@@ -747,6 +789,13 @@ class AudioPassthrough:
             needs_restart = False
             restart_reason = ""
 
+            # A/V drift check: two cheap property reads; resyncs in-place
+            # (no restart) when the sync queue has crept off its baseline.
+            try:
+                self._check_av_drift()
+            except Exception as e:
+                logger.debug(f"[AudioPassthrough] drift check error: {e}")
+
             # A/V Sync reset - periodically flush sync queue to prevent clock drift
             # Uses queue flush instead of full restart for minimal dropout (~300ms vs ~1s)
             if self._sync_reset_enabled and self._last_sync_reset > 0:
@@ -967,14 +1016,22 @@ class AudioPassthrough:
                 recent_level = max(self._level_history) if self._level_history else 0.0
             except Exception:
                 recent_level = 0.0
-            return {
+            st = {
                 "state": state_name,
                 "muted": self.is_muted,
                 "restart_count": self._restart_count,
                 "restart_in_progress": self._restart_in_progress,
                 "last_buffer_age": time.time() - self._last_buffer_time if self._last_buffer_time > 0 else -1,
-                "recent_level": recent_level
+                "recent_level": recent_level,
+                "resync_count": self._resync_count,
+                "last_resync_reason": self._last_resync_reason,
+                "max_sync_level_ms": round(self._max_sync_level_ms, 1),
             }
+            try:
+                st.update(self.get_sync_levels())
+            except Exception:
+                pass
+            return st
         finally:
             self._lock.release()
 
@@ -1214,6 +1271,9 @@ class AudioPassthrough:
             problems.append('audio is muted (ad block active or stuck mute)')
         if alsa_state != 'RUNNING' and not diag['playback_fakesink'] and self.is_running:
             problems.append(f'ALSA playback device not running (state: {alsa_state})')
+        drift = status.get('sync_drift_ms')
+        if drift is not None and drift >= self.DRIFT_HARD_MS:
+            problems.append(f'audio lagging video by ~{drift:.0f}ms beyond baseline (resync pending)')
 
         # Everything green but the source itself is quiet — not a fault,
         # but worth surfacing (paused video, menu without autoplay, etc.).
@@ -1231,6 +1291,125 @@ class AudioPassthrough:
             diag['verdict'] = 'audio path healthy — sound is flowing to the TV'
         return diag
 
+    # ------------------------------------------------------------------
+    # A/V drift: measurement + resync (see the block comment in __init__)
+    # ------------------------------------------------------------------
+    def _queue_level_ms(self, name):
+        """current-level-time of a named queue in ms, or None."""
+        try:
+            if not self.pipeline:
+                return None
+            q = self.pipeline.get_by_name(name)
+            if q is None:
+                return None
+            return float(q.get_property('current-level-time')) / 1e6
+        except Exception:
+            return None
+
+    def get_sync_levels(self) -> dict:
+        sync = self._queue_level_ms('syncqueue')
+        aq = self._queue_level_ms('audioqueue')
+        drift = None if sync is None else round(sync - self.SYNC_BASELINE_MS, 1)
+        return {
+            'sync_level_ms': None if sync is None else round(sync, 1),
+            'audioqueue_level_ms': None if aq is None else round(aq, 1),
+            'sync_drift_ms': drift,
+            'sync_baseline_ms': self.SYNC_BASELINE_MS,
+        }
+
+    def _source_silent(self) -> bool:
+        try:
+            return (max(self._level_history) if self._level_history else 0.0) < 0.01
+        except Exception:
+            return False
+
+    def _should_resync(self, drift_ms, muted: bool, source_silent: bool, now: float):
+        """Pure decision logic (unit-tested). Returns a reason string or None.
+
+        - below DRIFT_RESYNC_MS: nothing, counter resets
+        - >= DRIFT_HARD_MS: resync now (lag is clearly perceptible)
+        - between: must persist DRIFT_SUSTAIN_CHECKS ticks, then wait for a
+          quiet moment (muted or silent source) — but not forever: after
+          4x the sustain window, go anyway.
+        - all paths rate-limited by RESYNC_MIN_INTERVAL_S (hard: 30s).
+        """
+        if not self._drift_enabled or drift_ms is None:
+            self._drift_over_checks = 0
+            return None
+        if drift_ms >= self.DRIFT_HARD_MS:
+            reason = 'hard'
+        elif drift_ms >= self.DRIFT_RESYNC_MS:
+            self._drift_over_checks += 1
+            if self._drift_over_checks < self.DRIFT_SUSTAIN_CHECKS:
+                return None
+            quiet = muted or source_silent
+            if not quiet and self._drift_over_checks < self.DRIFT_SUSTAIN_CHECKS * 4:
+                return None
+            reason = 'quiet' if quiet else 'sustained'
+        else:
+            self._drift_over_checks = 0
+            return None
+        min_gap = 30.0 if reason == 'hard' else self.RESYNC_MIN_INTERVAL_S
+        # _last_resync_time == 0 means "never" — no rate limit applies yet.
+        if self._last_resync_time > 0 and now - self._last_resync_time < min_gap:
+            return None
+        return reason
+
+    def resync_av(self, reason: str = 'manual') -> dict:
+        """Drain syncqueue back to its baseline WITHOUT a pipeline restart.
+
+        Shrinks max-size-time to the baseline and sets leaky=downstream so
+        the queue discards its OLDEST buffers (the late backlog) on the next
+        incoming buffer, then restores the original size/leaky. ~150ms.
+        """
+        if not self.pipeline or not self.is_running:
+            return {'success': False, 'error': 'audio pipeline not running'}
+        if self._restart_in_progress:
+            return {'success': False, 'error': 'restart in progress'}
+        q = self.pipeline.get_by_name('syncqueue')
+        if q is None:
+            return {'success': False, 'error': 'syncqueue not found'}
+        before = self._queue_level_ms('syncqueue')
+        try:
+            q.set_property('max-size-time', int(self.SYNC_BASELINE_MS * 1e6))
+            q.set_property('leaky', 2)  # GST_QUEUE_LEAK_DOWNSTREAM: drop oldest
+            time.sleep(0.15)
+        finally:
+            try:
+                q.set_property('leaky', 0)
+                q.set_property('max-size-time', int(self.SYNC_MAX_MS * 1e6))
+            except Exception as e:
+                logger.warning(f"[AudioPassthrough] resync restore failed: {e}")
+        after = self._queue_level_ms('syncqueue')
+        self._resync_count += 1
+        self._last_resync_time = time.time()
+        self._last_resync_reason = reason
+        self._drift_over_checks = 0
+        logger.info(f"[AudioPassthrough] A/V resync ({reason}): syncqueue "
+                    f"{before if before is None else round(before)}ms -> "
+                    f"{after if after is None else round(after)}ms "
+                    f"(baseline {self.SYNC_BASELINE_MS:.0f}ms, total resyncs {self._resync_count})")
+        return {'success': True, 'reason': reason, 'before_ms': before, 'after_ms': after}
+
+    def _check_av_drift(self):
+        """Watchdog hook: measure, decide, and resync if warranted."""
+        if not self._drift_enabled or not self.pipeline or not self.is_running:
+            return
+        if getattr(self, '_playback_fakesink', False):
+            return  # no TV audio path; nothing to keep in sync
+        level = self._queue_level_ms('syncqueue')
+        if level is None:
+            return
+        self._last_sync_level_ms = level
+        if level > self._max_sync_level_ms:
+            self._max_sync_level_ms = level
+        drift = level - self.SYNC_BASELINE_MS
+        reason = self._should_resync(drift, self.is_muted, self._source_silent(), time.time())
+        logger.debug(f"[AudioPassthrough] syncqueue={level:.0f}ms drift={drift:+.0f}ms "
+                     f"over={self._drift_over_checks} -> {reason}")
+        if reason:
+            self.resync_av(reason)
+
     def reset_av_sync(self):
         """Manually reset A/V sync by flushing the sync queue.
 
@@ -1246,19 +1425,21 @@ class AudioPassthrough:
         if not self.pipeline:
             return {'success': False, 'error': 'No audio pipeline'}
 
-        if self._flush_sync_queue():
-            return {
-                'success': True,
-                'message': 'A/V sync reset - audio will resume in ~300ms'
-            }
-        else:
-            # Fall back to full pipeline restart
-            logger.info("[AudioPassthrough] Flush failed, doing full restart for A/V sync")
-            threading.Thread(target=self._restart_pipeline, daemon=True).start()
-            return {
-                'success': True,
-                'message': 'A/V sync reset via pipeline restart - audio will resume in ~1s'
-            }
+        # Drain-to-baseline (no PCM close, no dropout). The old flush path
+        # (_flush_sync_queue) is kept for reference but not used: it drops the
+        # pipeline out of PLAYING and needs a full restart to recover.
+        result = self.resync_av('manual')
+        if result.get('success'):
+            b, a = result.get('before_ms'), result.get('after_ms')
+            return {'success': True,
+                    'message': f"A/V resynced (syncqueue {b and round(b)}ms -> {a and round(a)}ms), no dropout"}
+        # Fall back to full pipeline restart
+        logger.info(f"[AudioPassthrough] Resync unavailable ({result.get('error')}), doing full restart for A/V sync")
+        threading.Thread(target=self._restart_pipeline, daemon=True).start()
+        return {
+            'success': True,
+            'message': 'A/V sync reset via pipeline restart - audio will resume in ~1s'
+        }
 
     def destroy(self):
         """Clean up resources."""
