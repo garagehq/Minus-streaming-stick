@@ -37,11 +37,11 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
     logger = logging.getLogger('OCRWorker')
 
     try:
-        # Import OCR
-        sys.path.insert(0, '/home/radxa/Minus/src')
+        # Import OCR (relative to this file, so the checkout location doesn't matter)
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
         from ocr import PaddleOCR
         from config import OCR_MODEL_DIR
-        from pathlib import Path
 
         # Find model paths dynamically
         base_path = Path(OCR_MODEL_DIR)

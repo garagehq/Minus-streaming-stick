@@ -6,8 +6,8 @@ Build with:
     pyinstaller minus.spec
 
 Note: Models are external and must be present at runtime:
-    - PaddleOCR models: /home/radxa/rknn-llm/.../paddleocr/
-    - VLM models: /home/radxa/axera_models/LFM2/LFM2-450M-ft-v2-fused-v2/
+    - PaddleOCR models: models/paddleocr/ in this repository (or MINUS_OCR_MODEL_DIR)
+    - VLM model: /home/radxa/axera_models/minus-v0.1/ (https://huggingface.co/TheGarageDev/Minus-v0.1)
 
 The executable expects these to be in their standard locations.
 """
