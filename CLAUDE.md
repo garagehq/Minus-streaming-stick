@@ -120,6 +120,8 @@ See **[docs/AESTHETICS.md](docs/AESTHETICS.md)** for the complete visual design 
 | `tests/test_ocr_ad_detection.py` | OCR ad pattern detection tests (143+ cases) |
 | `src/templates/index.html` | Web UI single-page app |
 | `src/static/style.css` | Web UI dark theme styles |
+| `models/paddleocr/` | PaddleOCR PP-OCRv3 det/rec RKNN models + character dict, shipped in-repo (see its README) |
+| `docs/HARDWARE.md` | Bill of materials, OS/kernel requirements |
 | `install.sh` | Install as systemd service |
 | `uninstall.sh` | Remove systemd service |
 | `stop.sh` | Graceful shutdown script |
@@ -191,7 +193,8 @@ sudo systemctl start minus
 # Paths (override defaults for different installations)
 MINUS_USTREAMER_PATH=/path/to/ustreamer     # Default: /home/radxa/ustreamer-patched
 MINUS_VLM_MODEL_DIR=/path/to/vlm/models     # Default: /home/radxa/axera_models/minus-v0.1
-MINUS_OCR_MODEL_DIR=/path/to/ocr/models     # Default: /home/radxa/rknn-llm/.../paddleocr
+MINUS_OCR_MODEL_DIR=/path/to/ocr/models     # Default: models/paddleocr/ in the repo
+                                            # (falls back to /home/radxa/rknn-llm/.../paddleocr)
 
 # Timing thresholds
 MINUS_ANIMATION_START=0.3        # Blocking animation duration (seconds)

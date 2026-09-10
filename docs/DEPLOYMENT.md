@@ -7,16 +7,19 @@ This guide covers deploying Minus as a systemd service on Radxa/RK3588 hardware.
 ## Prerequisites
 
 ### Hardware
-- Radxa board with RK3588 SoC (e.g., Radxa Rock 5B)
-- Axera LLM 8850 NPU card (for VLM)
-- HDMI capture card connected to `/dev/video0`
-- HDMI output connected to display
+- Radxa ROCK 5B+ or ROCK 5B (RK3588 SoC with the 4K@60 HDMI receiver), 8 GB RAM recommended, 4 GB minimum
+- Radxa AICore AX-M1 (Axera AX8850) in an M.2 M-key slot, for the VLM
+- Heatsink and fan, plus a 30 W USB-C PD supply
+- Source device on the HDMI **input** (appears as `/dev/video0`), TV on the HDMI **output**
+
+Full bill of materials with part links and sizing notes: [HARDWARE.md](HARDWARE.md).
 
 ### Software
-- Ubuntu 22.04 or similar Linux distribution
+- **Debian 12 (bookworm) arm64 from a Radxa official image**, running the **Radxa BSP 6.1 kernel** (`uname -r` should end in `-rk<NNNN>`, e.g. `6.1.84-8-rk2410`). A mainline kernel will not work: `rk_hdmirx`, Rockchip MPP, RGA and the RKNN NPU runtime are all BSP-only, and without them `/dev/video0` never appears. Verify with `v4l2-ctl -d /dev/video0 --info` (expect driver `rk_hdmirx`).
 - Python 3.11+
-- GStreamer 1.0 with Rockchip plugins
+- GStreamer 1.0 with Rockchip plugins (`gstreamer1.0-rockchip1`)
 - ustreamer with MPP support (garagehq fork)
+- `rknpu2-rk3588` + `rknnlite` for OCR, `axclhost` + `axengine` for the VLM (see steps 5 and 6)
 
 ---
 
@@ -77,17 +80,53 @@ make WITH_MPP=1
 cp ustreamer /home/radxa/ustreamer-patched
 ```
 
-### 5. Install VLM Models (Optional)
+### 5. OCR Models (nothing to do)
 
-For ad detection using minus-v0.1 (a fine-tuned LFM2.5-VL-450M) on the Axera NPU:
+The PaddleOCR PP-OCRv3 models that read on-screen ad text run on the RK3588's
+own NPU and **ship inside this repository** at `models/paddleocr/`, so a fresh
+clone already has them. `src/config.py` points `OCR_MODEL_DIR` there
+automatically, falling back to the legacy `rknn-llm/.../paddleocr` path only if
+the repo copy is missing. Override with `MINUS_OCR_MODEL_DIR` if you keep them
+elsewhere.
+
+The NPU runtime itself comes from Radxa's `rk3588-bookworm` repository and is
+present on a current Radxa image:
 
 ```bash
-# Install Axera runtime
+dpkg -l | grep rknpu2-rk3588      # expect 2.3.0 or newer
+pip3 show rknnlite                # expect 2.3.0 or newer
+```
+
+Confirm OCR works once the service is up:
+
+```bash
+curl -s -X POST http://localhost/api/ocr/test | python3 -m json.tool
+```
+
+See `models/paddleocr/README.md` for what each file does, checksums, and how to
+re-convert them.
+
+### 6. Install the VLM (Optional)
+
+For ad detection using minus-v0.1 (a fine-tuned LFM2.5-VL-450M) on the Axera
+AX-M1. Minus runs without it, in OCR-only mode, but detection quality drops
+substantially.
+
+```bash
+# Install the AXCL host driver (M5Stack APT repository), then the Python binding
+dpkg -l | grep axclhost                     # expect 3.6.6 or newer
 pip3 install --break-system-packages axengine
+
+# Confirm the card is present and healthy
+lspci | grep -i axera                       # expect 1f4b:0650
+axcl-smi info
 
 # Download the model from https://huggingface.co/TheGarageDev/Minus-v0.1
 # Models should be at: /home/radxa/axera_models/minus-v0.1/
 ```
+
+If the VLM fails to load with an error about `libaxcl_*.so`, see the broken
+symlink entry in [CLAUDE.md](../CLAUDE.md) for the one-line fix.
 
 ---
 
@@ -101,7 +140,7 @@ All configuration can be done via environment variables:
 |----------|---------|-------------|
 | `MINUS_USTREAMER_PATH` | `/home/radxa/ustreamer-patched` | Path to ustreamer binary |
 | `MINUS_VLM_MODEL_DIR` | `/home/radxa/axera_models/minus-v0.1` | VLM model directory |
-| `MINUS_OCR_MODEL_DIR` | `/home/radxa/rknn-llm/.../paddleocr` | OCR model directory |
+| `MINUS_OCR_MODEL_DIR` | `models/paddleocr` in the repo | OCR model directory |
 | `MINUS_ANIMATION_START` | `0.3` | Blocking animation duration (seconds) |
 | `MINUS_ANIMATION_END` | `0.25` | Unblocking animation duration (seconds) |
 | `MINUS_FRAME_STALE_THRESHOLD` | `5.0` | Frame freshness threshold for health checks |
