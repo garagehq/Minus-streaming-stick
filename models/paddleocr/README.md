@@ -48,3 +48,73 @@ Verify a new build with:
 ```bash
 curl -s -X POST http://localhost/api/ocr/test | python3 -m json.tool
 ```
+
+## Input normalization audit (Sep 2026)
+
+PaddleOCR uses **different** input normalization for detection and recognition,
+and RKNN freezes that choice into the model at conversion time (`rknn.config`
+mean/std). Reference:
+
+| stage | source | mean | std |
+|---|---|---|---|
+| detection | `NormalizeImage`, ImageNet stats | 123.675, 116.28, 103.53 | 58.395, 57.12, 57.375 |
+| recognition | `RecResizeImg`: `img/255; -=0.5; /=0.5` | 127.5, 127.5, 127.5 | 127.5, 127.5, 127.5 |
+
+What the shipped models actually contain (read from model metadata; the audit
+runs as `tests/test_ocr_model_normalization.py`):
+
+| model | baked mean/std | correct |
+|---|---|---|
+| `ppocrv3_det` | ImageNet | yes |
+| `ppocrv6_det` | ImageNet | yes |
+| `ppocrv6_rec` | 127.5 | yes |
+| `ppocrv3_rec` | **ImageNet** | **no — detection stats on a recognition model** |
+
+### Why it is not hot-patched
+
+There is no lossless runtime correction. `inputs_pass_through=1` **segfaults**
+the RK3588 runtime (it wants NPU-native layout, not float32 NHWC), and
+pre-compensating the uint8 input so the model's own normalization lands on the
+right values spans only ~117 of 256 levels, trading correct scaling for a 2.2x
+precision loss.
+
+Measured on 40 real ad frames from `screenshots/ads/`, scored with the
+production keyword matcher (frames flagged as an ad):
+
+| variant | frames detected | mean conf |
+|---|---|---|
+| v3 as shipped | **39/40** | 0.630 |
+| v3 grey-padded | 37/40 | 0.609 |
+| v3 pre-compensated to 127.5 | 38/40 | 0.606 |
+| v6 as shipped (correct) | 38/40 | 0.604 |
+
+Correcting it measured no better. **Caveat that keeps this open rather than
+closed:** `screenshots/ads/` only contains frames the *current* pipeline already
+detected, so the corpus is biased toward the shipped settings. Read this as "no
+evidence of harm", not "the deviation is fine".
+
+### Fixing it properly
+
+Re-convert the v3 rec ONNX with `mean_values=[[127.5]*3]`,
+`std_values=[[127.5]*3]`, then A/B at full precision on a corpus that was not
+collected with the current settings. The converter does not install on the
+device: `rknn-toolkit2` 2.3.2 pins `torch<=2.2.0`, `onnx==1.16.1`,
+`protobuf==3.20.3` and needs `onnxoptimizer`, which has no aarch64 wheel and
+fails to build. Do it on the machine that built the v6 models. Source ONNX:
+`PaddlePaddle/PP-OCRv3_mobile_rec` (Paddle inference format, needs paddle2onnx)
+or the community `cycloneboy/ch_PP-OCRv3_rec_infer` (`model.onnx`, 6625-wide
+output matching `ppocr_keys_v1.txt`). Verify provenance first by converting the
+same ONNX with the ImageNet stats and checking it reproduces the current
+`ppocrv3_rec` outputs; only then is the comparison a clean normalization A/B.
+
+### Second deviation: recognition padding
+
+PaddleOCR pads **after** normalizing, with 0.0 in normalized space, i.e. pixel
+127.5 (mid grey). `src/ocr.py` pads **before** normalizing with pixel 0 (black),
+which normalizes to -1.0. This affects **both** generations. It matters most for
+exactly the text Minus cares about: a 60x22 "Skip" crop resized to 48x320 is
+**59% padding**.
+
+Measured neutral on the product metric (v6: 38/40 ad frames either way), so it
+is documented rather than changed mid-flight. Same corpus-bias caveat. Worth
+re-testing alongside a re-converted v3 rec.
