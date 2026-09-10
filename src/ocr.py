@@ -255,11 +255,19 @@ class PaddleOCR:
     SKIP_INTRO_FUZZY_RE = re.compile(r's[kK][i1lI]p\s*[i1lI]ntro', re.IGNORECASE)
 
     def __init__(self, det_model_path, rec_model_path, dict_path,
-                 cls_model_path=None):
+                 cls_model_path=None, db_params=None):
+        """
+        db_params: optional dict of DB post-process overrides
+                   (thresh / box_thresh / unclip_ratio). PP-OCRv3 and v6 were
+                   trained with different values and ship them in their
+                   inference.yml; passing the wrong ones costs text regions.
+                   None keeps the DBPostProcessor defaults (the v3 values).
+        """
         self.det_model_path = det_model_path
         self.rec_model_path = rec_model_path
         self.cls_model_path = cls_model_path
         self.dict_path = dict_path
+        self.db_params = dict(db_params) if db_params else {}
 
         self.det_rknn = None
         self.rec_rknn = None
@@ -270,7 +278,7 @@ class PaddleOCR:
         self.rec_input_h = 48
         self.rec_input_w = 320
 
-        self.db_postprocess = DBPostProcessor() if HAS_POSTPROCESS else None
+        self.db_postprocess = DBPostProcessor(**self.db_params) if HAS_POSTPROCESS else None
         self.ctc_decode = None
         self.initialized = False
 
