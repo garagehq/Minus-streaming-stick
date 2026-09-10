@@ -115,4 +115,13 @@ USTREAMER_PATH = _get_env_path('MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-pa
 # query_image both share this single model — there is no FastVLM dependency
 # anymore. Override with MINUS_VLM_MODEL_DIR.
 VLM_MODEL_DIR = _get_env_path('MINUS_VLM_MODEL_DIR', '/home/radxa/axera_models/minus-v0.1')
-OCR_MODEL_DIR = _get_env_path('MINUS_OCR_MODEL_DIR', '/home/radxa/rknn-llm/examples/multimodal_model_demo/deploy/install/demo_Linux_aarch64/models/paddleocr')
+# PaddleOCR PP-OCRv3 det/rec RKNN models. They ship in the repository
+# (models/paddleocr/, see its README) so a fresh clone needs no download;
+# the legacy rknn-llm demo path is only used when the repo copy is absent.
+# Override with MINUS_OCR_MODEL_DIR.
+_REPO_OCR_MODEL_DIR = Path(__file__).resolve().parent.parent / 'models' / 'paddleocr'
+_LEGACY_OCR_MODEL_DIR = '/home/radxa/rknn-llm/examples/multimodal_model_demo/deploy/install/demo_Linux_aarch64/models/paddleocr'
+OCR_MODEL_DIR = _get_env_path(
+    'MINUS_OCR_MODEL_DIR',
+    str(_REPO_OCR_MODEL_DIR) if any(_REPO_OCR_MODEL_DIR.glob('ppocrv3_det_*.rknn')) else _LEGACY_OCR_MODEL_DIR,
+)

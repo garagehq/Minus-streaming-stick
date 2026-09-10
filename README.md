@@ -59,6 +59,17 @@ It's a fine-tune of [LiquidAI's LFM2.5-VL-450M](https://huggingface.co/LiquidAI)
 
 The same model also classifies screen state (playing / paused / menu / dialog / screensaver) for autonomous mode.
 
+### What ships where
+
+The two models are distributed differently, which trips people up when setting up a new board:
+
+| Model | Runs on | Where it comes from |
+|---|---|---|
+| PaddleOCR PP-OCRv3 detection + recognition | RK3588 NPU | **In this repository**, [`models/paddleocr/`](models/paddleocr/). ~11 MB, nothing to download. |
+| minus-v0.1 (450M VLM) | Axera AX-M1 | [Hugging Face](https://huggingface.co/TheGarageDev/Minus-v0.1), ~300 MB, into `/home/radxa/axera_models/minus-v0.1/` |
+
+OCR needs three files, all present in the repo: a detection model that finds text regions, a recognition model that reads each region, and the character dictionary the output is decoded through. A fourth model, the rotated-text classifier, is included for completeness but Minus doesn't load it, since TV overlay text is never upside down. [`models/paddleocr/README.md`](models/paddleocr/README.md) has the details and checksums.
+
 ## Features
 
 - Real-time ad blocking via OCR + VLM + ASR triangulation. The decision engine handles the ugly cases: flicker between ads, paused screens that look like ads, black transition frames, frozen streams.
@@ -80,16 +91,19 @@ The web UI is served by the device itself (Flask). Live feed, block/pause contro
 
 ## Hardware
 
+Roughly **$350-$450** in parts. Full bill of materials, part links, and sizing notes: **[docs/HARDWARE.md](docs/HARDWARE.md)**.
+
 | Component | Notes |
 |---|---|
-| [Radxa Rock 5B+](https://radxa.com/products/rock5/5bp/) | RK3588 SoC with an HDMI input port, NPU for OCR, VPU for 4K60 JPEG encoding |
-| Axera AX8850 accelerator (M.2) | Runs minus-v0.1 at ~370ms per inference |
-| HDMI cables | Source → Minus → TV |
+| [Radxa ROCK 5B+](https://radxa.com/products/rock5/5bp/) or [ROCK 5B](https://radxa.com/products/rock5/5b/), 8 GB RAM recommended (4 GB minimum) | RK3588 SoC. The 4K@60 HDMI **input** is the part that matters: boards without one can't do passthrough. Also provides the NPU for OCR and the VPU for 4K60 JPEG encoding. |
+| [Radxa AICore AX-M1](https://radxa.com/products/aicore/ax-m1/) (Axera AX8850, M.2 2280 M-key, 24 TOPS, 8 GB) | Runs minus-v0.1 at ~370ms per inference |
+| Heatsink + fan, and a 30 W USB-C PD supply | Both required. 4K60 passthrough sits at 80-85 °C with the fan running, and an underpowered supply causes random pipeline restarts. |
+| 64 GB+ eMMC or microSD, 2x High Speed HDMI cables | Source → Minus → TV |
 | *Optional:* IR LED on GPIO | Controls an HDMI switch for multi-device setups |
 | *Optional:* WS2812B 8-LED strip | Status indicator (idle / blocking / error / ...) |
 | *Optional:* HDCP 1.4 sink key | For capturing HDCP-protected sources, see [hdcp/](hdcp/README.md) |
 
-There is no display server or desktop environment involved. Minus talks straight to DRM/KMS and the hardware encoders.
+**Operating system: Debian 12 (bookworm) on Radxa's BSP 6.1 kernel**, which is what their official ROCK 5B/5B+ images ship. This is not interchangeable with a mainline kernel: the HDMI receiver (`rk_hdmirx`), the Rockchip MPP encoder, RGA, and the RKNN NPU runtime all live in Rockchip's 6.1 tree. On a mainline kernel the board boots fine and `/dev/video0` simply never appears. Either the KDE or the CLI image works; there is no display server or desktop environment involved at runtime, since Minus talks straight to DRM/KMS and the hardware encoders.
 
 ## Getting started
 
@@ -103,7 +117,7 @@ git clone https://github.com/garagehq/ustreamer.git /home/radxa/ustreamer-garage
 cd /home/radxa/ustreamer-garagehq && make WITH_MPP=1
 cp ustreamer /home/radxa/ustreamer-patched
 
-# Download the model
+# Download the vision model (the OCR models already ship in this repo)
 # → https://huggingface.co/TheGarageDev/Minus-v0.1
 #   into /home/radxa/axera_models/minus-v0.1/
 
@@ -136,6 +150,7 @@ Minus auto-detects the connected HDMI output, resolution, DRM plane, and audio d
 
 | Document | Description |
 |---|---|
+| [docs/HARDWARE.md](docs/HARDWARE.md) | Bill of materials, OS and kernel requirements |
 | [docs/FEATURES.md](docs/FEATURES.md) | Complete feature list |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and data flow |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Setting up a new device from scratch |
