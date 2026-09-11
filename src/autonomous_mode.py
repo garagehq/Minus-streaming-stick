@@ -268,7 +268,20 @@ class AutonomousMode:
         # NO music evidence at all. Raised 5 -> 60 (~33 min at the ~33s cycle)
         # now that the drift check actually runs every cycle: at 5 it would
         # have re-seeded every ~3 min, interrupting genuine music videos.
-        self._MUSIC_STEER_AFTER = 60
+        # Lowered 60 -> 24 (~13 min at the ~33s cycle) on 2026-09-11.
+        # This backstop is the ONLY recovery for content carrying no duration
+        # marker at all: a Pioneer DJ stream played for 18 minutes showing
+        # zero H:MM:SS, zero M:SS and zero music keywords, so the long-form
+        # detector and the music-evidence signal were both blind to it and
+        # ad yield sat at 6/h against 118-177/h on good content. 34 minutes
+        # is far too long to be the sole safety net.
+        # Lowering it cannot meaningfully hurt: music evidence appears on only
+        # 0.4% of info-bearing frames, so this counter cannot distinguish a
+        # music video with no overlay from a DJ stream with no overlay either
+        # way -- and re-seeding is the mode's documented policy AND the
+        # action that generates a fresh pre-roll, which is the point.
+        self._MUSIC_STEER_AFTER = int(
+            os.environ.get('MINUS_MUSIC_STEER_AFTER', '24'))
         # Fast targeted path: consecutive cycles showing an H:MM:SS runtime.
         # 3 cycles (~100s) of visible long-form duration is solid evidence we
         # drifted off music videos; simulated on 24h of real OCR this fires
@@ -298,6 +311,14 @@ class AutonomousMode:
         self._LONGFORM_STEER_COOLDOWN_S = float(
             os.environ.get('MINUS_LONGFORM_STEER_COOLDOWN', '120'))
         self._last_longform_steer: float = 0.0
+        # Music mode: consecutive seed re-launches attempted from the home
+        # screen. Cold-launching YouTube lands on the account picker, which
+        # SWALLOWS the deep-link VIEW intent -- see the home-screen branch of
+        # _ensure_youtube_playing. Bounded so a seed that genuinely will not
+        # load can't loop us on the home screen forever.
+        self._home_seed_attempts: int = 0
+        self._HOME_SEED_MAX_ATTEMPTS = int(
+            os.environ.get('MINUS_HOME_SEED_MAX_ATTEMPTS', '2'))
 
         # Timestamp of the last _is_audio_flowing() == True observation.
         # Destructive guards use _audio_recently_flowing() instead of the
@@ -2370,6 +2391,37 @@ class AutonomousMode:
                 self._stuck_count = 0
                 self._last_screen_state = 'home'
 
+                # Music mode: re-issue the seed instead of picking a tile.
+                #
+                # Observed 2026-09-11: the session's opening deep-link logged
+                # "Music seed deep-linked (android): JGwWNGJdvx8" (Shape of
+                # You) and reported success, but the seeded video NEVER
+                # played -- "shape of you" appears in zero OCR frames.
+                # Cold-launching YouTube lands on the account picker, which
+                # swallows the VIEW intent. 35s later the guest-account
+                # handler cleared it, we arrived here, and this branch's
+                # randomised down+select picked whatever tile happened to be
+                # focused: a Pioneer DJ stream with no duration marker at
+                # all. That content shows neither an H:MM:SS runtime nor any
+                # music keyword, so BOTH drift detectors are blind to it and
+                # only the ~34-minute blind backstop could ever recover. Ad
+                # yield over the next 18 minutes was 6/h against 118-177/h on
+                # good content.
+                #
+                # The home screen is exactly the right retry point: we are in
+                # the app, past the picker, so the intent lands this time.
+                if (self._music_mode
+                        and self._home_seed_attempts < self._HOME_SEED_MAX_ATTEMPTS):
+                    self._home_seed_attempts += 1
+                    if self._launch_music_seed():
+                        logger.info(
+                            f"[AutonomousMode] Home screen in music mode — "
+                            f"re-issuing music seed instead of picking a tile "
+                            f"(attempt {self._home_seed_attempts}/"
+                            f"{self._HOME_SEED_MAX_ATTEMPTS})")
+                        self._log_event("Home screen - re-issued music seed")
+                        return True
+
                 logger.info("[AutonomousMode] YouTube home screen detected via OCR - selecting a video")
                 self._log_event("YouTube home screen detected - selecting a video")
 
@@ -2515,6 +2567,7 @@ class AutonomousMode:
                     self._menu_skip_count = 0
                     self._menu_escape_count = 0
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     logger.debug("[AutonomousMode] Screen looks good, video is playing")
                     self._check_music_drift()
                     return False
@@ -2565,6 +2618,7 @@ class AutonomousMode:
                                 "audio flowing — video is actually playing")
                     self._log_event("PAUSED vetoed: audio flowing")
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     return False
                 self._device_controller.send_command("play_pause")
                 logger.info("[AutonomousMode] Sent play_pause command (video was paused)")
@@ -2600,6 +2654,7 @@ class AutonomousMode:
                                 "audio flowing — video is playing")
                     self._log_event("DIALOG vetoed: audio flowing")
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     # Same reasoning as the MENU veto: audio flowing is a
                     # confirmed-playing path, so music-mode drift is checked
                     # here too (VLM said DIALOG 814x in 24h).
@@ -2622,6 +2677,7 @@ class AutonomousMode:
                     self._log_event("MENU vetoed: audio flowing")
                     self._overlay_veto_count = 0
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     # Music-mode drift check belongs on EVERY confirmed-playing
                     # path, not just the VLM-says-PLAYING one. Measured over
                     # 24h on this Fire TV: VLM returned MENU 1668x and DIALOG
@@ -2764,6 +2820,7 @@ class AutonomousMode:
                                 "audio flowing — video is playing")
                     self._log_event("SCREENSAVER vetoed: audio flowing")
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     return False
 
                 # ROKU ECP GUARD: ECP is authoritative for screensaver
