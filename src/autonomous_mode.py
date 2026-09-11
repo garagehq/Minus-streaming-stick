@@ -12,6 +12,7 @@ import collections
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 import threading
@@ -111,6 +112,19 @@ class AutonomousMode:
     # load than general content (the point of the mode: more ad training
     # data per hour). Rotated round-robin per launch so one dead/aged seed
     # can't wedge the mode.
+    # Seeds for music mode. Every id below was verified live against YouTube's
+    # oEmbed endpoint; a dead seed is not a harmless no-op, it silently lands
+    # on the home screen (see the home-screen re-issue path), so re-verify
+    # before adding: youtube.com/oembed?url=...&format=json returns 404/400
+    # for an id that no longer resolves.
+    #
+    # Widened from 6 on 2026-09-11. The original six were all Western pop from
+    # roughly the same decade, and an overnight run surfaced exactly ONE
+    # recognisable advertiser (Audible) across the whole window: YouTube
+    # targets ad inventory by content category and audience, so a narrow seed
+    # list yields a narrow slice of ads and therefore narrow training data.
+    # These span 1985-2019, several regions (US, UK, Korea, Colombia/PR,
+    # Norway, Australia) and genres (pop, rap, EDM, rock, R&B, K-pop).
     MUSIC_VIDEO_SEEDS = [
         'kJQP7kiw5Fk',  # Luis Fonsi - Despacito ft. Daddy Yankee
         'JGwWNGJdvx8',  # Ed Sheeran - Shape of You
@@ -118,6 +132,33 @@ class AutonomousMode:
         'OPf0YbXqDm0',  # Mark Ronson - Uptown Funk ft. Bruno Mars
         'CevxZvSJLk8',  # Katy Perry - Roar
         '9bZkp7q19f0',  # PSY - Gangnam Style
+        'fRh_vgS2dFE',  # Justin Bieber - Sorry
+        'YqeW9_5kURI',  # Major Lazer & DJ Snake - Lean On
+        'hT_nvWreIhg',  # OneRepublic - Counting Stars
+        '09R8_2nJtjg',  # Maroon 5 - Sugar
+        'lp-EO5I60KA',  # Ed Sheeran - Thinking Out Loud
+        'pRpeEdMmmQ0',  # Shakira - Waka Waka
+        'uelHwf8o7_U',  # Eminem - Love The Way You Lie ft. Rihanna
+        '60ItHLz5WEA',  # Alan Walker - Faded
+        '2Vv-BfVoq4g',  # Ed Sheeran - Perfect
+        'ktvTqknDobU',  # Imagine Dragons - Radioactive
+        'SlPhMPnQ58k',  # Maroon 5 - Memories
+        'djV11Xbc914',  # a-ha - Take On Me
+        'e-ORhEE9VVg',  # Taylor Swift - Blank Space
+        '0KSOMA3QBU0',  # Katy Perry - Dark Horse ft. Juicy J
+        'papuvlVeZg8',  # Clean Bandit - Rockabye
+        'tt2k8PGm-TI',  # ZAYN - Dusk Till Dawn ft. Sia
+        'nfWlot6h_JM',  # Taylor Swift - Shake It Off
+        'ASO_zypdnsQ',  # PSY - Gentleman
+        '450p7goxZqg',  # John Legend - All of Me
+        'QcIy9NiNbmo',  # Taylor Swift - Bad Blood ft. Kendrick Lamar
+        '1w7OgIMMRc4',  # Guns N' Roses - Sweet Child O' Mine
+        'fLexgOxsZu0',  # Bruno Mars - The Lazy Song
+        'RBumgq5yVrA',  # Passenger - Let Her Go
+        'y6120QOlsfU',  # Darude - Sandstorm
+        'kffacxfA7G4',  # Justin Bieber - Baby ft. Ludacris
+        'iS1g8G_njx8',  # Ariana Grande - Problem ft. Iggy Azalea
+        'dQw4w9WgXcQ',  # Rick Astley - Never Gonna Give You Up
     ]
 
     # OCR text markers that indicate the current video is music. These only
@@ -277,6 +318,11 @@ class AutonomousMode:
         # for music evidence, re-steering when the autoplay chain drifts to
         # non-music content. Persisted with the other autonomous settings.
         self._music_mode = False
+        # Randomised rotation. A fixed order from index 0 meant every session
+        # opened on the same video and walked the same sequence, which narrows
+        # ad inventory further still and makes runs hard to compare.
+        self._music_seed_order = list(range(len(self.MUSIC_VIDEO_SEEDS)))
+        random.shuffle(self._music_seed_order)
         self._music_seed_index: int = 0
         self._music_no_evidence_checks: int = 0
         # Slow blind backstop: steer after this many info-bearing cycles with
@@ -1048,7 +1094,8 @@ class AutonomousMode:
         if not ctrl or not ctrl.is_connected():
             return False
 
-        seed = self.MUSIC_VIDEO_SEEDS[self._music_seed_index % len(self.MUSIC_VIDEO_SEEDS)]
+        order = getattr(self, '_music_seed_order', None) or list(range(len(self.MUSIC_VIDEO_SEEDS)))
+        seed = self.MUSIC_VIDEO_SEEDS[order[self._music_seed_index % len(order)]]
         self._music_seed_index += 1
         try:
             if hasattr(ctrl, 'launch_app_with_content'):

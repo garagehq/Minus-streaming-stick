@@ -571,6 +571,42 @@ class Minus:
         # unchanged at ~0.55s. 4 and 5 push recovery to 2.9s/3.8s, past the
         # documented 1.5-2.0s ceiling, so 3 buys ~92% of the fix for ~0.6s.
         self.OCR_STOP_THRESHOLD = 3
+        # Adaptive anti-flap escalation.
+        #
+        # OCR_STOP_THRESHOLD counts FRAMES, but the thing it is resisting -- the
+        # ad's keyword dropping out of the OCR text -- happens in SECONDS. When
+        # the capture fix doubled detection cadence (2.0s -> 1.0s per frame) it
+        # therefore halved this threshold's real tolerance, from 3x2.0=6s of
+        # dropout down to 3x1.0=3s, without anyone changing the number. Measured
+        # consequence: flap rate went 4.2% -> 66% between two nights on the same
+        # threshold.
+        #
+        # Measured dropout runs inside 27 real ad episodes: lengths 1,2,3,4,5
+        # occurred 7, 9, 23, 14, 2 times. Runs of exactly 3 are the MODE, so a
+        # threshold of 3 sits precisely on the peak of the distribution. Raising
+        # it outright to 6 (where exposure is 0) would hand back the whole
+        # recovery win -- p50 3.0s becomes 6.0s -- on every ad, including the
+        # well-behaved majority.
+        #
+        # So escalate only where flapping is actually observed: a re-block
+        # within FLAP_REBLOCK_WINDOW_S of a stop is proof the stop was
+        # premature, so each one raises the bar for the next stop in the same
+        # episode. A clean ad keeps the fast 3-frame stop; a flappy one
+        # ratchets to 6, where the measured exposure is zero.
+        # The real fix for the frames-vs-seconds mismatch: a wall-clock floor
+        # on how long the keyword must have been gone. 5.0s is the measured
+        # knee -- dropout runs of 5+ frames occurred twice in 27 episodes and
+        # 6+ never. Being in SECONDS, it keeps its meaning when cadence moves
+        # (thermal throttling, load, a future capture change), which the frame
+        # counter did not: that is exactly how a 2x cadence change silently
+        # halved flap resistance and took the flap rate from 4.2% to 66%.
+        self.OCR_STOP_MIN_SECONDS = float(
+            os.environ.get('MINUS_OCR_STOP_MIN_SECONDS', '5.0'))
+        self.FLAP_REBLOCK_WINDOW_S = float(
+            os.environ.get('MINUS_FLAP_REBLOCK_WINDOW', '5.0'))
+        self.OCR_STOP_THRESHOLD_MAX = int(
+            os.environ.get('MINUS_OCR_STOP_THRESHOLD_MAX', '6'))
+        self.flap_escalation = 0
         self.VLM_STOP_THRESHOLD = 2
 
         # ── Thermal-degraded mode (src/thermal.py) ────────────────────────
@@ -3264,6 +3300,34 @@ class Minus:
         # Then start display pipeline (may fail if HDMI-TX disconnected)
         return self.start_display_pipeline()
 
+    def _effective_ocr_stop_threshold(self) -> int:
+        """OCR no-ad frames required to stop, after anti-flap escalation.
+
+        Base while nothing is flapping, rising by one per observed flap up to
+        OCR_STOP_THRESHOLD_MAX. Never below the base, never above the cap.
+        """
+        return min(self.OCR_STOP_THRESHOLD + self.flap_escalation,
+                   max(self.OCR_STOP_THRESHOLD, self.OCR_STOP_THRESHOLD_MAX))
+
+    def _ocr_says_stop(self) -> bool:
+        """Whether OCR has seen enough no-ad evidence to end a block.
+
+        Two conditions, deliberately in different units:
+          * enough consecutive no-ad FRAMES (flap resistance, escalating)
+          * enough WALL-CLOCK time since the keyword was last seen
+
+        The time floor is the one that matters. An ad's keyword drops out of
+        the OCR text for a couple of seconds at a time -- a countdown digit
+        redrawing, a frame the recogniser misses -- and that gap is measured
+        in seconds, not frames. Counting only frames meant the threshold's
+        real tolerance moved whenever cadence moved.
+        """
+        if self.ocr_no_ad_count < self._effective_ocr_stop_threshold():
+            return False
+        if self.last_ocr_ad_time <= 0:
+            return True
+        return (time.time() - self.last_ocr_ad_time) >= self.OCR_STOP_MIN_SECONDS
+
     def _update_blocking_state(self):
         """Update combined blocking state using weighted OCR/VLM model."""
         with self._state_lock:
@@ -3384,6 +3448,19 @@ class Minus:
                         self.consecutive_ad_count += 1
                     else:
                         self.consecutive_ad_count = 0
+                    # Anti-flap: re-blocking within a few seconds of a stop means
+                    # the ad never actually ended and the stop was premature.
+                    # Demand more evidence before the next stop in this episode.
+                    if (self.blocking_end_time > 0
+                            and (now - self.blocking_end_time) <= self.FLAP_REBLOCK_WINDOW_S):
+                        if self._effective_ocr_stop_threshold() < self.OCR_STOP_THRESHOLD_MAX:
+                            self.flap_escalation += 1
+                            logger.info(
+                                f"Flap detected (re-block {now - self.blocking_end_time:.1f}s "
+                                f"after stop) — OCR stop threshold now "
+                                f"{self._effective_ocr_stop_threshold()}")
+                    else:
+                        self.flap_escalation = 0
                     # Reset skip and pause detection for new ad
                     self.accidental_pause_detected = False
                     self.skip_attempted_this_ad = False
@@ -3410,7 +3487,7 @@ class Minus:
 
                 min_duration = self._current_min_blocking_duration()
                 if blocking_elapsed >= min_duration:
-                    ocr_says_stop = (self.ocr_no_ad_count >= self.OCR_STOP_THRESHOLD)
+                    ocr_says_stop = self._ocr_says_stop()
                     # For VLM stopping, use consecutive no-ad count (not sliding window)
                     # This ensures responsive stopping after ad ends
                     vlm_says_stop = (self.vlm_no_ad_count >= self.VLM_STOP_THRESHOLD)
@@ -3908,9 +3985,9 @@ class Minus:
                 if not ocr_results:
                     self.ocr_no_ad_count += 1
                     self.ocr_ad_detection_count = 0
-                    if self.ocr_ad_detected and self.ocr_no_ad_count >= self.OCR_STOP_THRESHOLD:
+                    if self.ocr_ad_detected and self._ocr_says_stop():
                         self.ocr_ad_detected = False
-                        logger.info(f"OCR: ad no longer detected (after {self.OCR_STOP_THRESHOLD} no-results)")
+                        logger.info(f"OCR: ad no longer detected (after {self._effective_ocr_stop_threshold()} no-results)")
                         self._update_blocking_state()
                     continue
 
@@ -4104,7 +4181,7 @@ class Minus:
                                 logger.info("[SKIP] Forcing unblock after skip")
                                 self.ocr_ad_detected = False
                                 self.vlm_ad_detected = False
-                                self.ocr_no_ad_count = self.OCR_STOP_THRESHOLD
+                                self.ocr_no_ad_count = self._effective_ocr_stop_threshold()
                                 self.blocking_source = None
                                 self.blocking_asr_confirmed = False
                                 if self.ad_blocker:
@@ -4255,9 +4332,9 @@ class Minus:
                         self.ocr_no_ad_count += 1
                         self.ocr_ad_detection_count = 0
 
-                        if self.ocr_ad_detected and self.ocr_no_ad_count >= self.OCR_STOP_THRESHOLD:
+                        if self.ocr_ad_detected and self._ocr_says_stop():
                             self.ocr_ad_detected = False
-                            logger.info(f"OCR: ad no longer detected (after {self.OCR_STOP_THRESHOLD} no-ads)")
+                            logger.info(f"OCR: ad no longer detected (after {self._effective_ocr_stop_threshold()} no-ads)")
 
                 self._update_blocking_state()
 
