@@ -115,7 +115,7 @@ USTREAMER_PATH = _get_env_path('MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-pa
 # query_image both share this single model — there is no FastVLM dependency
 # anymore. Override with MINUS_VLM_MODEL_DIR.
 VLM_MODEL_DIR = _get_env_path('MINUS_VLM_MODEL_DIR', '/home/radxa/axera_models/minus-v0.1')
-# PaddleOCR PP-OCRv3 det/rec RKNN models. They ship in the repository
+# PaddleOCR det/rec RKNN models. They ship in the repository
 # (models/paddleocr/, see its README) so a fresh clone needs no download;
 # the legacy rknn-llm demo path is only used when the repo copy is absent.
 # Override with MINUS_OCR_MODEL_DIR.
@@ -125,3 +125,62 @@ OCR_MODEL_DIR = _get_env_path(
     'MINUS_OCR_MODEL_DIR',
     str(_REPO_OCR_MODEL_DIR) if any(_REPO_OCR_MODEL_DIR.glob('ppocrv3_det_*.rknn')) else _LEGACY_OCR_MODEL_DIR,
 )
+
+# Which PP-OCR generation to load. Both sets of weights ship side by side in
+# models/paddleocr/ and are selected here rather than by renaming files.
+#   'v3'   — PP-OCRv3 (default; years of production tuning behind it)
+#   'v6'   — PP-OCRv6 tiny (staged for A/B; smaller rec model, finds more
+#            text regions, not yet proven against the keyword matcher)
+#   'auto' — v3 when present, else v6
+# Each generation needs its OWN dictionary and its OWN DB post-process
+# thresholds; mixing them silently degrades OCR (a v3 dict against v6 weights
+# decodes to wrong characters entirely), so they are bound together below.
+OCR_MODEL_VERSION = os.environ.get('MINUS_OCR_MODEL_VERSION', 'v3').strip().lower()
+
+OCR_MODEL_GENERATIONS = {
+    # DB thresholds come from each release's inference.yml.
+    'v3': {
+        'det_glob': 'ppocrv3_det_*.rknn',
+        'rec_glob': 'ppocrv3_rec_*.rknn',
+        'dict_name': 'ppocr_keys_v1.txt',
+        'db_params': {'thresh': 0.3, 'box_thresh': 0.5, 'unclip_ratio': 1.5},
+    },
+    'v6': {
+        'det_glob': 'ppocrv6_det_*.rknn',
+        'rec_glob': 'ppocrv6_rec_*.rknn',
+        'dict_name': 'ppocrv6_keys.txt',
+        'db_params': {'thresh': 0.2, 'box_thresh': 0.4, 'unclip_ratio': 1.4},
+    },
+}
+
+
+def resolve_ocr_models(base_dir=None, version=None):
+    """Resolve the OCR model set to load.
+
+    Returns a dict with det/rec/dict paths, db_params and the resolved
+    version, or None when no complete set is present. Never raises.
+    """
+    base = Path(base_dir or OCR_MODEL_DIR)
+    requested = (version or OCR_MODEL_VERSION or 'v3').strip().lower()
+    order = (['v3', 'v6'] if requested == 'auto'
+             else [requested] if requested in OCR_MODEL_GENERATIONS
+             else ['v3', 'v6'])
+
+    for name in order:
+        gen = OCR_MODEL_GENERATIONS[name]
+        try:
+            det = sorted(base.glob(gen['det_glob']))
+            rec = sorted(base.glob(gen['rec_glob']))
+            dictionary = base / gen['dict_name']
+            if det and rec and dictionary.exists():
+                return {
+                    'version': name,
+                    'det': str(det[0]),
+                    'rec': str(rec[0]),
+                    'dict': str(dictionary),
+                    'db_params': dict(gen['db_params']),
+                    'base_dir': str(base),
+                }
+        except OSError:
+            continue
+    return None

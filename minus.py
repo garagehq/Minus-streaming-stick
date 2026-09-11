@@ -376,6 +376,14 @@ class Minus:
         self.ocr_ad_detected = False
         self.ocr_ad_detection_count = 0
         self.ocr_no_ad_count = 0
+        # Consecutive OCR cycles that produced no result at all (hard timeout
+        # + worker kill, or worker error). Distinct from ocr_no_ad_count,
+        # which counts frames OCR actually READ and found no ad in. See the
+        # anti-waffle block in the OCR loop.
+        self.ocr_failure_streak = 0
+        # Consecutive OCR no-result cycles after which OCR is treated as having
+        # no opinion, letting VLM end an OCR-source block. Env-tunable.
+        self.OCR_DEGRADED_STREAK = int(os.environ.get('MINUS_OCR_DEGRADED_STREAK', '3'))
         self.last_ocr_ad_time = 0
 
         # VLM detection state (SECONDARY - contextual trust)
@@ -3464,6 +3472,25 @@ class Minus:
                         # here so it must NOT be allowed to stop early.
                         should_stop = ocr_says_stop
 
+                        # ...unless OCR has stopped reporting altogether.
+                        # Timeouts no longer count as no-ad votes (see the OCR
+                        # loop), which is what keeps a block alive through a
+                        # text-dense ad frame. The flip side is that a worker
+                        # wedged for good would leave an OCR-source block with
+                        # no way to end short of MAX_BLOCKING_DURATION. When
+                        # OCR has produced nothing for OCR_DEGRADED_STREAK
+                        # cycles in a row, it has no opinion to be
+                        # authoritative with, so VLM's consecutive no-ad count
+                        # is allowed to end the block instead.
+                        if (not should_stop
+                                and self.ocr_failure_streak >= self.OCR_DEGRADED_STREAK
+                                and vlm_says_stop):
+                            logger.warning(
+                                f"OCR degraded ({self.ocr_failure_streak} "
+                                f"consecutive no-result cycles) — deferring to "
+                                f"VLM to end this OCR-source block")
+                            should_stop = True
+
                 # TRIANGULATION VETO: OCR-source block can be force-stopped
                 # when BOTH VLM and ASR firmly disagree. The motivating
                 # failure case: OCR picks up an ad-keyword word from a
@@ -3839,11 +3866,45 @@ class Minus:
 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # Run OCR - OCRProcess has hard 1.2s timeout with process kill
+                # Run OCR. OCRProcess returns None when it could NOT run
+                # (hard timeout + worker kill, or worker error) and a list —
+                # possibly empty — when it did.
                 ocr_results = self.ocr.ocr(frame_rgb)
                 ocr_time = (time.time() - start_time) * 1000 - capture_time
 
-                # Empty results could mean timeout (process was killed and restarted)
+                if ocr_results is None:
+                    # ABSENCE OF EVIDENCE. OCR never saw this frame, so it has
+                    # no opinion about it. Previously this incremented the
+                    # no-ad counter, which made the block drop *because the
+                    # picture got harder to read*: recognition latency scales
+                    # with the number of text regions, so a text-dense ad
+                    # frame (pharma fine print, terms-and-conditions wall,
+                    # a legal disclaimer card) is exactly what pushes
+                    # inference past the hard timeout. Three of those in a row
+                    # unblocked a live ad; once the wall of text passed, OCR
+                    # got fast again, re-read the same ad and re-blocked it.
+                    # The user sees the ad flash through mid-break.
+                    # Now the counters are left untouched: the block holds on
+                    # the evidence it already had. This cannot hold forever —
+                    # VLM keeps voting independently, the OCR-degraded
+                    # fallback below lets VLM stop an OCR-source block, and
+                    # MAX_BLOCKING_DURATION still caps everything.
+                    self.ocr_failure_streak += 1
+                    if self.ocr_failure_streak == 1 or self.ocr_failure_streak % 10 == 0:
+                        logger.warning(
+                            f"OCR #{self.frame_count}: no result "
+                            f"(streak {self.ocr_failure_streak}) — holding "
+                            f"detection state, counters unchanged"
+                            + (" [blocking]" if self.ad_detected else ""))
+                    # A degraded OCR may need VLM to end an OCR-source block.
+                    if self.ad_detected:
+                        self._update_blocking_state()
+                    continue
+
+                self.ocr_failure_streak = 0
+
+                # Empty list = OCR ran and genuinely saw no text. That IS
+                # no-ad evidence (blank frame, black transition, plain video).
                 if not ocr_results:
                     self.ocr_no_ad_count += 1
                     self.ocr_ad_detection_count = 0
