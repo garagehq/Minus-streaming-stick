@@ -8,9 +8,11 @@ Uses VLM to understand screen state and take intelligent actions.
 Device-agnostic design supports any streaming device with remote control capability.
 """
 
+import collections
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 import threading
@@ -110,6 +112,19 @@ class AutonomousMode:
     # load than general content (the point of the mode: more ad training
     # data per hour). Rotated round-robin per launch so one dead/aged seed
     # can't wedge the mode.
+    # Seeds for music mode. Every id below was verified live against YouTube's
+    # oEmbed endpoint; a dead seed is not a harmless no-op, it silently lands
+    # on the home screen (see the home-screen re-issue path), so re-verify
+    # before adding: youtube.com/oembed?url=...&format=json returns 404/400
+    # for an id that no longer resolves.
+    #
+    # Widened from 6 on 2026-09-11. The original six were all Western pop from
+    # roughly the same decade, and an overnight run surfaced exactly ONE
+    # recognisable advertiser (Audible) across the whole window: YouTube
+    # targets ad inventory by content category and audience, so a narrow seed
+    # list yields a narrow slice of ads and therefore narrow training data.
+    # These span 1985-2019, several regions (US, UK, Korea, Colombia/PR,
+    # Norway, Australia) and genres (pop, rap, EDM, rock, R&B, K-pop).
     MUSIC_VIDEO_SEEDS = [
         'kJQP7kiw5Fk',  # Luis Fonsi - Despacito ft. Daddy Yankee
         'JGwWNGJdvx8',  # Ed Sheeran - Shape of You
@@ -117,6 +132,33 @@ class AutonomousMode:
         'OPf0YbXqDm0',  # Mark Ronson - Uptown Funk ft. Bruno Mars
         'CevxZvSJLk8',  # Katy Perry - Roar
         '9bZkp7q19f0',  # PSY - Gangnam Style
+        'fRh_vgS2dFE',  # Justin Bieber - Sorry
+        'YqeW9_5kURI',  # Major Lazer & DJ Snake - Lean On
+        'hT_nvWreIhg',  # OneRepublic - Counting Stars
+        '09R8_2nJtjg',  # Maroon 5 - Sugar
+        'lp-EO5I60KA',  # Ed Sheeran - Thinking Out Loud
+        'pRpeEdMmmQ0',  # Shakira - Waka Waka
+        'uelHwf8o7_U',  # Eminem - Love The Way You Lie ft. Rihanna
+        '60ItHLz5WEA',  # Alan Walker - Faded
+        '2Vv-BfVoq4g',  # Ed Sheeran - Perfect
+        'ktvTqknDobU',  # Imagine Dragons - Radioactive
+        'SlPhMPnQ58k',  # Maroon 5 - Memories
+        'djV11Xbc914',  # a-ha - Take On Me
+        'e-ORhEE9VVg',  # Taylor Swift - Blank Space
+        '0KSOMA3QBU0',  # Katy Perry - Dark Horse ft. Juicy J
+        'papuvlVeZg8',  # Clean Bandit - Rockabye
+        'tt2k8PGm-TI',  # ZAYN - Dusk Till Dawn ft. Sia
+        'nfWlot6h_JM',  # Taylor Swift - Shake It Off
+        'ASO_zypdnsQ',  # PSY - Gentleman
+        '450p7goxZqg',  # John Legend - All of Me
+        'QcIy9NiNbmo',  # Taylor Swift - Bad Blood ft. Kendrick Lamar
+        '1w7OgIMMRc4',  # Guns N' Roses - Sweet Child O' Mine
+        'fLexgOxsZu0',  # Bruno Mars - The Lazy Song
+        'RBumgq5yVrA',  # Passenger - Let Her Go
+        'y6120QOlsfU',  # Darude - Sandstorm
+        'kffacxfA7G4',  # Justin Bieber - Baby ft. Ludacris
+        'iS1g8G_njx8',  # Ariana Grande - Problem ft. Iggy Azalea
+        'dQw4w9WgXcQ',  # Rick Astley - Never Gonna Give You Up
     ]
 
     # OCR text markers that indicate the current video is music. These only
@@ -139,6 +181,21 @@ class AutonomousMode:
     # no music evidence, because YouTube only shows title text during
     # overlays and end cards).
     LONGFORM_DURATION_RE = re.compile(r'\b\d{1,2}:[0-5]\d:[0-5]\d\b')
+
+    # H:MM:SS only catches hour-PLUS content. A 10-59 minute mix renders as
+    # MM:SS and was invisible: observed 2026-09-11, the autoplay panel queued
+    # "Club 1BD | Hip Hop, RnB, Edits, Dancehall | 40:18 | DJ Miss Milan"
+    # while the H:MM:SS rule matched nothing all night (0 frames of 3616).
+    # A music video is 2-6 minutes, so a two-digit minute count is long-form.
+    LONGFORM_MINUTES_RE = re.compile(r'\b[1-9]\d:[0-5]\d\b')
+
+    # A wall clock also renders as MM:SS and would otherwise read as a long
+    # runtime. Measured over 21,363 OCR lines: 67 carried MM:SS >= 10 and only
+    # 2 of those were a clock, always alongside a weekday/month/meridiem, so
+    # excluding that context is enough.
+    CLOCK_CONTEXT_RE = re.compile(
+        r'\b(mon|tue|wed|thu|fri|sat|sun|a\.?m|p\.?m|'
+        r'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b', re.IGNORECASE)
 
     # When the audio pipeline is unavailable (display off / alsasink can't
     # open), we normally abstain from pause detection to avoid false positives
@@ -261,19 +318,68 @@ class AutonomousMode:
         # for music evidence, re-steering when the autoplay chain drifts to
         # non-music content. Persisted with the other autonomous settings.
         self._music_mode = False
+        # Randomised rotation. A fixed order from index 0 meant every session
+        # opened on the same video and walked the same sequence, which narrows
+        # ad inventory further still and makes runs hard to compare.
+        self._music_seed_order = list(range(len(self.MUSIC_VIDEO_SEEDS)))
+        random.shuffle(self._music_seed_order)
         self._music_seed_index: int = 0
         self._music_no_evidence_checks: int = 0
         # Slow blind backstop: steer after this many info-bearing cycles with
         # NO music evidence at all. Raised 5 -> 60 (~33 min at the ~33s cycle)
         # now that the drift check actually runs every cycle: at 5 it would
         # have re-seeded every ~3 min, interrupting genuine music videos.
-        self._MUSIC_STEER_AFTER = 60
+        # Lowered 60 -> 24 (~13 min at the ~33s cycle) on 2026-09-11.
+        # This backstop is the ONLY recovery for content carrying no duration
+        # marker at all: a Pioneer DJ stream played for 18 minutes showing
+        # zero H:MM:SS, zero M:SS and zero music keywords, so the long-form
+        # detector and the music-evidence signal were both blind to it and
+        # ad yield sat at 6/h against 118-177/h on good content. 34 minutes
+        # is far too long to be the sole safety net.
+        # Lowering it cannot meaningfully hurt: music evidence appears on only
+        # 0.4% of info-bearing frames, so this counter cannot distinguish a
+        # music video with no overlay from a DJ stream with no overlay either
+        # way -- and re-seeding is the mode's documented policy AND the
+        # action that generates a fresh pre-roll, which is the point.
+        self._MUSIC_STEER_AFTER = int(
+            os.environ.get('MINUS_MUSIC_STEER_AFTER', '24'))
         # Fast targeted path: consecutive cycles showing an H:MM:SS runtime.
         # 3 cycles (~100s) of visible long-form duration is solid evidence we
         # drifted off music videos; simulated on 24h of real OCR this fires
         # ~1.8x/hour, vs ~20x/hour for the old blind counter at 5.
         self._music_longform_checks: int = 0
         self._MUSIC_LONGFORM_STEER_AFTER = 3
+        # Long-form runtime sightings, recorded from EVERY OCR frame by
+        # observe_ocr_text() rather than sampled at the drift check. See that
+        # method for why the old sample-at-decision-time approach could not
+        # fire. A sighting is a frame whose OCR text carried an H:MM:SS
+        # runtime; confirmation needs several within one overlay appearance,
+        # which is what separates a real hour-long video from a one-frame
+        # OCR misread.
+        self._longform_sightings: collections.deque = collections.deque(maxlen=128)
+        # 60s: swept against the 5.67h production trace. 45/60/90 all give
+        # the ideal outcome -- steer on the three multi-frame overlay
+        # appearances, ignore the two single-frame OCR misreads. 30s misses
+        # an appearance when no drift check lands inside it (checks run every
+        # ~34s), and 120s with a lower frame count starts double-firing.
+        self._LONGFORM_CONFIRM_WINDOW_S = float(
+            os.environ.get('MINUS_LONGFORM_CONFIRM_WINDOW', '60'))
+        self._LONGFORM_CONFIRM_FRAMES = int(
+            os.environ.get('MINUS_LONGFORM_CONFIRM_FRAMES', '3'))
+        # One overlay appearance lasts 15-19s and the drift check runs every
+        # ~34s, so without a cooldown the tail of the SAME appearance can
+        # re-confirm on the next check and steer twice off one video.
+        self._LONGFORM_STEER_COOLDOWN_S = float(
+            os.environ.get('MINUS_LONGFORM_STEER_COOLDOWN', '120'))
+        self._last_longform_steer: float = 0.0
+        # Music mode: consecutive seed re-launches attempted from the home
+        # screen. Cold-launching YouTube lands on the account picker, which
+        # SWALLOWS the deep-link VIEW intent -- see the home-screen branch of
+        # _ensure_youtube_playing. Bounded so a seed that genuinely will not
+        # load can't loop us on the home screen forever.
+        self._home_seed_attempts: int = 0
+        self._HOME_SEED_MAX_ATTEMPTS = int(
+            os.environ.get('MINUS_HOME_SEED_MAX_ATTEMPTS', '2'))
 
         # Timestamp of the last _is_audio_flowing() == True observation.
         # Destructive guards use _audio_recently_flowing() instead of the
@@ -845,6 +951,66 @@ class AutonomousMode:
             self.stats.errors += 1
             return False
 
+    def observe_ocr_text(self, texts) -> None:
+        """Record long-form runtime sightings from every OCR frame.
+
+        Called by the OCR loop (~1/s), not by the drift check (~1/34s).
+
+        The H:MM:SS runtime marker only appears while the player overlay is
+        up. Measured over a 5.67h run: it was on screen in 0.21% of OCR
+        frames (54 of 21,363), across just FIVE distinct overlay appearances
+        29-124 minutes apart, each lasting 15-19s and carrying up to 24
+        frames. The old check asked for the marker to be present AT its own
+        sampling instant, three times in a row, resetting the streak on any
+        sample without it -- odds of roughly 0.21% cubed. It logged
+        "1/3" twice all night and never fired; the box sat on hour-long DJ
+        mixes yielding 27-28 ad-keyword hits/hour against 118-177 in good
+        stretches, until the blind 34-minute backstop eventually rescued it
+        (once 72 minutes after the content changed).
+
+        The evidence is transient but the FACT it attests to -- this video is
+        over an hour long -- is not. So sightings are recorded continuously
+        here and the drift check asks whether enough landed inside one
+        overlay appearance.
+        """
+        if not self._music_mode or not texts:
+            return
+        try:
+            # Mid-block the OCR text is the ad's, which says nothing about
+            # the underlying video (mirrors the guard in _check_music_drift).
+            if getattr(self._ad_blocker, 'is_visible', False):
+                return
+            combined = ' '.join(str(t) for t in texts)
+            if self._looks_long_form(combined):
+                self._longform_sightings.append(time.time())
+        except Exception as e:
+            logger.debug(f"[AutonomousMode] observe_ocr_text error: {e}")
+
+    def _looks_long_form(self, combined: str) -> bool:
+        """True when the text carries a runtime longer than any music video.
+
+        H:MM:SS is unambiguous. MM:SS with a two-digit minute count (10-99
+        min) is the case the hour-only rule missed -- a 40-minute DJ mix
+        reads as "40:18" -- but it is also how a wall clock renders, so
+        clock/date context vetoes it.
+        """
+        if self.LONGFORM_DURATION_RE.search(combined):
+            return True
+        if self.LONGFORM_MINUTES_RE.search(combined):
+            return not self.CLOCK_CONTEXT_RE.search(combined)
+        return False
+
+    def _longform_confirmed(self) -> int:
+        """Sightings inside the current confirmation window.
+
+        Several frames from ONE overlay appearance, rather than several
+        separate appearances: measured appearances are 29-124 min apart, so
+        requiring more than one is the mistake the old code made.
+        """
+        now = time.time()
+        return sum(1 for t in self._longform_sightings
+                   if now - t <= self._LONGFORM_CONFIRM_WINDOW_S)
+
     def _check_music_drift(self, force_text: str = None) -> bool:
         """Music mode: watch OCR text for music evidence while playing.
 
@@ -884,24 +1050,25 @@ class AutonomousMode:
 
             self._music_no_evidence_checks += 1
 
-            # Fast path: positive evidence of long-form content.
-            if self.LONGFORM_DURATION_RE.search(combined):
-                self._music_longform_checks += 1
-                logger.info(f"[AutonomousMode] Music mode: long-form runtime on screen "
-                            f"({self._music_longform_checks}/"
-                            f"{self._MUSIC_LONGFORM_STEER_AFTER})")
-                if self._music_longform_checks >= self._MUSIC_LONGFORM_STEER_AFTER:
-                    logger.info("[AutonomousMode] Music mode: long-form content "
-                                "(podcast/stream/mix) — steering to music seed")
-                    self._log_event("Music mode: long-form detected - steering to seed")
-                    self._music_longform_checks = 0
-                    self._music_no_evidence_checks = 0
-                    self._launch_music_seed()
-                    return True
-            else:
-                # A cycle without a long-form marker breaks the streak; only
-                # sustained long-form evidence should steer.
+            # Fast path: positive evidence of long-form content, gathered
+            # continuously by observe_ocr_text() instead of sampled here.
+            seen = self._longform_confirmed()
+            if (seen >= self._LONGFORM_CONFIRM_FRAMES
+                    and time.time() - self._last_longform_steer
+                        >= self._LONGFORM_STEER_COOLDOWN_S):
+                self._last_longform_steer = time.time()
+                logger.info(f"[AutonomousMode] Music mode: long-form runtime confirmed "
+                            f"({seen} sightings in {self._LONGFORM_CONFIRM_WINDOW_S:.0f}s) "
+                            f"— steering to music seed")
+                self._log_event("Music mode: long-form detected - steering to seed")
+                self._longform_sightings.clear()   # don't re-steer on the same overlay
                 self._music_longform_checks = 0
+                self._music_no_evidence_checks = 0
+                self._launch_music_seed()
+                return True
+            if seen:
+                logger.debug(f"[AutonomousMode] Music mode: {seen} long-form sighting(s), "
+                             f"need {self._LONGFORM_CONFIRM_FRAMES}")
 
             # Slow blind backstop for content that shows no duration at all.
             if self._music_no_evidence_checks >= self._MUSIC_STEER_AFTER:
@@ -927,7 +1094,8 @@ class AutonomousMode:
         if not ctrl or not ctrl.is_connected():
             return False
 
-        seed = self.MUSIC_VIDEO_SEEDS[self._music_seed_index % len(self.MUSIC_VIDEO_SEEDS)]
+        order = getattr(self, '_music_seed_order', None) or list(range(len(self.MUSIC_VIDEO_SEEDS)))
+        seed = self.MUSIC_VIDEO_SEEDS[order[self._music_seed_index % len(order)]]
         self._music_seed_index += 1
         try:
             if hasattr(ctrl, 'launch_app_with_content'):
@@ -2299,6 +2467,37 @@ class AutonomousMode:
                 self._stuck_count = 0
                 self._last_screen_state = 'home'
 
+                # Music mode: re-issue the seed instead of picking a tile.
+                #
+                # Observed 2026-09-11: the session's opening deep-link logged
+                # "Music seed deep-linked (android): JGwWNGJdvx8" (Shape of
+                # You) and reported success, but the seeded video NEVER
+                # played -- "shape of you" appears in zero OCR frames.
+                # Cold-launching YouTube lands on the account picker, which
+                # swallows the VIEW intent. 35s later the guest-account
+                # handler cleared it, we arrived here, and this branch's
+                # randomised down+select picked whatever tile happened to be
+                # focused: a Pioneer DJ stream with no duration marker at
+                # all. That content shows neither an H:MM:SS runtime nor any
+                # music keyword, so BOTH drift detectors are blind to it and
+                # only the ~34-minute blind backstop could ever recover. Ad
+                # yield over the next 18 minutes was 6/h against 118-177/h on
+                # good content.
+                #
+                # The home screen is exactly the right retry point: we are in
+                # the app, past the picker, so the intent lands this time.
+                if (self._music_mode
+                        and self._home_seed_attempts < self._HOME_SEED_MAX_ATTEMPTS):
+                    self._home_seed_attempts += 1
+                    if self._launch_music_seed():
+                        logger.info(
+                            f"[AutonomousMode] Home screen in music mode — "
+                            f"re-issuing music seed instead of picking a tile "
+                            f"(attempt {self._home_seed_attempts}/"
+                            f"{self._HOME_SEED_MAX_ATTEMPTS})")
+                        self._log_event("Home screen - re-issued music seed")
+                        return True
+
                 logger.info("[AutonomousMode] YouTube home screen detected via OCR - selecting a video")
                 self._log_event("YouTube home screen detected - selecting a video")
 
@@ -2444,6 +2643,7 @@ class AutonomousMode:
                     self._menu_skip_count = 0
                     self._menu_escape_count = 0
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     logger.debug("[AutonomousMode] Screen looks good, video is playing")
                     self._check_music_drift()
                     return False
@@ -2494,6 +2694,7 @@ class AutonomousMode:
                                 "audio flowing — video is actually playing")
                     self._log_event("PAUSED vetoed: audio flowing")
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     return False
                 self._device_controller.send_command("play_pause")
                 logger.info("[AutonomousMode] Sent play_pause command (video was paused)")
@@ -2529,6 +2730,7 @@ class AutonomousMode:
                                 "audio flowing — video is playing")
                     self._log_event("DIALOG vetoed: audio flowing")
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     # Same reasoning as the MENU veto: audio flowing is a
                     # confirmed-playing path, so music-mode drift is checked
                     # here too (VLM said DIALOG 814x in 24h).
@@ -2551,6 +2753,7 @@ class AutonomousMode:
                     self._log_event("MENU vetoed: audio flowing")
                     self._overlay_veto_count = 0
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     # Music-mode drift check belongs on EVERY confirmed-playing
                     # path, not just the VLM-says-PLAYING one. Measured over
                     # 24h on this Fire TV: VLM returned MENU 1668x and DIALOG
@@ -2693,6 +2896,7 @@ class AutonomousMode:
                                 "audio flowing — video is playing")
                     self._log_event("SCREENSAVER vetoed: audio flowing")
                     self._last_screen_state = 'playing'
+                    self._home_seed_attempts = 0
                     return False
 
                 # ROKU ECP GUARD: ECP is authoritative for screensaver
