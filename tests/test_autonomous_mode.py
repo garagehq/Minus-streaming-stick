@@ -2649,12 +2649,32 @@ class TestMusicDriftReachability(unittest.TestCase):
         finally:
             _cleanup_mode(mode)
 
-    def test_blind_backstop_threshold_is_slow(self):
-        """At the old value (5) the now-every-cycle check would re-seed every
-        ~3 min, interrupting genuine music."""
+    def test_blind_backstop_is_neither_frantic_nor_useless(self):
+        """Two failure modes, one on each side.
+
+        Too fast: at the original 5, the now-every-cycle check re-seeded
+        about every 3 minutes and interrupted genuine music videos.
+
+        Too slow: at 60 (~34 min) it was the ONLY recovery for content
+        carrying no duration marker at all. Observed 2026-09-11, a DJ stream
+        played 18 minutes showing zero H:MM:SS, zero M:SS and zero music
+        keywords -- invisible to both drift detectors -- while ad yield sat
+        at 6/h against 118-177/h on good content.
+
+        Lowering it costs little: music evidence appears on only ~0.4% of
+        info-bearing frames, so this counter cannot tell a music video with
+        no overlay from a stream with no overlay in either direction, and
+        re-seeding is both the mode's documented policy and the action that
+        produces a fresh pre-roll.
+        """
         mode = self._mode(["x"])
         try:
-            self.assertGreaterEqual(mode._MUSIC_STEER_AFTER, 30)
+            cycle_s = 33.0
+            minutes = mode._MUSIC_STEER_AFTER * cycle_s / 60.0
+            self.assertGreaterEqual(minutes, 8.0,
+                                    "too frantic - would interrupt real music videos")
+            self.assertLessEqual(minutes, 20.0,
+                                 "too slow to be the sole net for no-duration content")
         finally:
             _cleanup_mode(mode)
 
