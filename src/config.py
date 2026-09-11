@@ -128,14 +128,19 @@ OCR_MODEL_DIR = _get_env_path(
 
 # Which PP-OCR generation to load. Both sets of weights ship side by side in
 # models/paddleocr/ and are selected here rather than by renaming files.
-#   'v3'   — PP-OCRv3 (default; years of production tuning behind it)
-#   'v6'   — PP-OCRv6 tiny (staged for A/B; smaller rec model, finds more
-#            text regions, not yet proven against the keyword matcher)
-#   'auto' — v3 when present, else v6
+#   'v6'   — PP-OCRv6 tiny (default since Sep 2026). Chosen on latency, not
+#            accuracy: a 5.67h production soak measured OCR inference p50
+#            195ms / p90 257ms against v3's 231ms idle / 330ms in-block and
+#            p90 550ms, and ZERO hard timeouts against 3 in 36h of v3. The
+#            tighter tail is what keeps text-dense ad frames under the 1.5s
+#            hard timeout. Accuracy is a wash (40 identical ad frames through
+#            the production keyword matcher: v3 39/40, v6 38/40).
+#   'v3'   — PP-OCRv3, kept as a one-env-var rollback
+#   'auto' — v6 when present, else v3
 # Each generation needs its OWN dictionary and its OWN DB post-process
 # thresholds; mixing them silently degrades OCR (a v3 dict against v6 weights
 # decodes to wrong characters entirely), so they are bound together below.
-OCR_MODEL_VERSION = os.environ.get('MINUS_OCR_MODEL_VERSION', 'v3').strip().lower()
+OCR_MODEL_VERSION = os.environ.get('MINUS_OCR_MODEL_VERSION', 'v6').strip().lower()
 
 OCR_MODEL_GENERATIONS = {
     # DB thresholds come from each release's inference.yml.
@@ -162,9 +167,9 @@ def resolve_ocr_models(base_dir=None, version=None):
     """
     base = Path(base_dir or OCR_MODEL_DIR)
     requested = (version or OCR_MODEL_VERSION or 'v3').strip().lower()
-    order = (['v3', 'v6'] if requested == 'auto'
+    order = (['v6', 'v3'] if requested == 'auto'
              else [requested] if requested in OCR_MODEL_GENERATIONS
-             else ['v3', 'v6'])
+             else ['v6', 'v3'])
 
     for name in order:
         gen = OCR_MODEL_GENERATIONS[name]

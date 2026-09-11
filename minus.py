@@ -3926,6 +3926,17 @@ class Minus:
                 # Store OCR texts and check for home screen / video interface keywords
                 self.last_ocr_texts = all_texts
 
+                # Feed every frame's text to autonomous mode's music-drift
+                # detector. It watches for an H:MM:SS runtime, which is on
+                # screen in ~0.2% of frames, so sampling it at the drift
+                # check's own ~34s cadence never accumulated enough evidence
+                # to fire. This loop sees every frame.
+                if self.autonomous_mode is not None:
+                    try:
+                        self.autonomous_mode.observe_ocr_text(all_texts)
+                    except Exception as e:
+                        logger.debug(f"observe_ocr_text failed: {e}")
+
                 # Periodic non-ad screenshot sampler. Captures the current
                 # frame as training data when content is unambiguously not
                 # an ad: no ad keywords matched this frame, ad blocker not

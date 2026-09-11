@@ -8,6 +8,7 @@ Uses VLM to understand screen state and take intelligent actions.
 Device-agnostic design supports any streaming device with remote control capability.
 """
 
+import collections
 import json
 import logging
 import os
@@ -274,6 +275,29 @@ class AutonomousMode:
         # ~1.8x/hour, vs ~20x/hour for the old blind counter at 5.
         self._music_longform_checks: int = 0
         self._MUSIC_LONGFORM_STEER_AFTER = 3
+        # Long-form runtime sightings, recorded from EVERY OCR frame by
+        # observe_ocr_text() rather than sampled at the drift check. See that
+        # method for why the old sample-at-decision-time approach could not
+        # fire. A sighting is a frame whose OCR text carried an H:MM:SS
+        # runtime; confirmation needs several within one overlay appearance,
+        # which is what separates a real hour-long video from a one-frame
+        # OCR misread.
+        self._longform_sightings: collections.deque = collections.deque(maxlen=128)
+        # 60s: swept against the 5.67h production trace. 45/60/90 all give
+        # the ideal outcome -- steer on the three multi-frame overlay
+        # appearances, ignore the two single-frame OCR misreads. 30s misses
+        # an appearance when no drift check lands inside it (checks run every
+        # ~34s), and 120s with a lower frame count starts double-firing.
+        self._LONGFORM_CONFIRM_WINDOW_S = float(
+            os.environ.get('MINUS_LONGFORM_CONFIRM_WINDOW', '60'))
+        self._LONGFORM_CONFIRM_FRAMES = int(
+            os.environ.get('MINUS_LONGFORM_CONFIRM_FRAMES', '3'))
+        # One overlay appearance lasts 15-19s and the drift check runs every
+        # ~34s, so without a cooldown the tail of the SAME appearance can
+        # re-confirm on the next check and steer twice off one video.
+        self._LONGFORM_STEER_COOLDOWN_S = float(
+            os.environ.get('MINUS_LONGFORM_STEER_COOLDOWN', '120'))
+        self._last_longform_steer: float = 0.0
 
         # Timestamp of the last _is_audio_flowing() == True observation.
         # Destructive guards use _audio_recently_flowing() instead of the
@@ -845,6 +869,52 @@ class AutonomousMode:
             self.stats.errors += 1
             return False
 
+    def observe_ocr_text(self, texts) -> None:
+        """Record long-form runtime sightings from every OCR frame.
+
+        Called by the OCR loop (~1/s), not by the drift check (~1/34s).
+
+        The H:MM:SS runtime marker only appears while the player overlay is
+        up. Measured over a 5.67h run: it was on screen in 0.21% of OCR
+        frames (54 of 21,363), across just FIVE distinct overlay appearances
+        29-124 minutes apart, each lasting 15-19s and carrying up to 24
+        frames. The old check asked for the marker to be present AT its own
+        sampling instant, three times in a row, resetting the streak on any
+        sample without it -- odds of roughly 0.21% cubed. It logged
+        "1/3" twice all night and never fired; the box sat on hour-long DJ
+        mixes yielding 27-28 ad-keyword hits/hour against 118-177 in good
+        stretches, until the blind 34-minute backstop eventually rescued it
+        (once 72 minutes after the content changed).
+
+        The evidence is transient but the FACT it attests to -- this video is
+        over an hour long -- is not. So sightings are recorded continuously
+        here and the drift check asks whether enough landed inside one
+        overlay appearance.
+        """
+        if not self._music_mode or not texts:
+            return
+        try:
+            # Mid-block the OCR text is the ad's, which says nothing about
+            # the underlying video (mirrors the guard in _check_music_drift).
+            if getattr(self._ad_blocker, 'is_visible', False):
+                return
+            combined = ' '.join(str(t) for t in texts)
+            if self.LONGFORM_DURATION_RE.search(combined):
+                self._longform_sightings.append(time.time())
+        except Exception as e:
+            logger.debug(f"[AutonomousMode] observe_ocr_text error: {e}")
+
+    def _longform_confirmed(self) -> int:
+        """Sightings inside the current confirmation window.
+
+        Several frames from ONE overlay appearance, rather than several
+        separate appearances: measured appearances are 29-124 min apart, so
+        requiring more than one is the mistake the old code made.
+        """
+        now = time.time()
+        return sum(1 for t in self._longform_sightings
+                   if now - t <= self._LONGFORM_CONFIRM_WINDOW_S)
+
     def _check_music_drift(self, force_text: str = None) -> bool:
         """Music mode: watch OCR text for music evidence while playing.
 
@@ -884,24 +954,25 @@ class AutonomousMode:
 
             self._music_no_evidence_checks += 1
 
-            # Fast path: positive evidence of long-form content.
-            if self.LONGFORM_DURATION_RE.search(combined):
-                self._music_longform_checks += 1
-                logger.info(f"[AutonomousMode] Music mode: long-form runtime on screen "
-                            f"({self._music_longform_checks}/"
-                            f"{self._MUSIC_LONGFORM_STEER_AFTER})")
-                if self._music_longform_checks >= self._MUSIC_LONGFORM_STEER_AFTER:
-                    logger.info("[AutonomousMode] Music mode: long-form content "
-                                "(podcast/stream/mix) — steering to music seed")
-                    self._log_event("Music mode: long-form detected - steering to seed")
-                    self._music_longform_checks = 0
-                    self._music_no_evidence_checks = 0
-                    self._launch_music_seed()
-                    return True
-            else:
-                # A cycle without a long-form marker breaks the streak; only
-                # sustained long-form evidence should steer.
+            # Fast path: positive evidence of long-form content, gathered
+            # continuously by observe_ocr_text() instead of sampled here.
+            seen = self._longform_confirmed()
+            if (seen >= self._LONGFORM_CONFIRM_FRAMES
+                    and time.time() - self._last_longform_steer
+                        >= self._LONGFORM_STEER_COOLDOWN_S):
+                self._last_longform_steer = time.time()
+                logger.info(f"[AutonomousMode] Music mode: long-form runtime confirmed "
+                            f"({seen} sightings in {self._LONGFORM_CONFIRM_WINDOW_S:.0f}s) "
+                            f"— steering to music seed")
+                self._log_event("Music mode: long-form detected - steering to seed")
+                self._longform_sightings.clear()   # don't re-steer on the same overlay
                 self._music_longform_checks = 0
+                self._music_no_evidence_checks = 0
+                self._launch_music_seed()
+                return True
+            if seen:
+                logger.debug(f"[AutonomousMode] Music mode: {seen} long-form sighting(s), "
+                             f"need {self._LONGFORM_CONFIRM_FRAMES}")
 
             # Slow blind backstop for content that shows no duration at all.
             if self._music_no_evidence_checks >= self._MUSIC_STEER_AFTER:
