@@ -286,11 +286,20 @@ class TestOCRDegradedFallback(unittest.TestCase):
 class TestOCRModelGenerations(unittest.TestCase):
     """PP-OCRv3 / v6 selection: weights, dictionary and DB thresholds move together."""
 
-    def test_v3_is_the_default(self):
+    def test_v6_is_the_default(self):
+        """v6 since Sep 2026: faster with a much tighter tail, 0 hard
+        timeouts in a 5.67h soak vs 3 in 36h on v3."""
         import importlib, config
         os.environ.pop('MINUS_OCR_MODEL_VERSION', None)
         importlib.reload(config)
-        self.assertEqual(config.OCR_MODEL_VERSION, 'v3')
+        self.assertEqual(config.OCR_MODEL_VERSION, 'v6')
+
+    def test_v3_remains_available_as_rollback(self):
+        import config
+        r = config.resolve_ocr_models(version='v3')
+        if r is None:
+            self.skipTest('v3 weights not present')
+        self.assertEqual(r['version'], 'v3')
 
     def test_each_generation_binds_its_own_dict_and_thresholds(self):
         import config
