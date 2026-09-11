@@ -91,6 +91,54 @@ class TestObserveOCRText(unittest.TestCase):
         self.assertLessEqual(len(a._longform_sightings), 128)
 
 
+class TestLongFormRuntimeShapes(unittest.TestCase):
+    """H:MM:SS is not the only long-form runtime.
+
+    Observed 2026-09-11: the hour-only rule matched 0 of 3616 OCR frames all
+    night while the autoplay panel queued "Club 1BD | Hip Hop, RnB, Edits,
+    Dancehall | 40:18 | DJ Miss Milan". A 40-minute mix renders as MM:SS and
+    was invisible. A wall clock renders the same way, so clock/date context
+    vetoes it -- measured, 67 frames carried MM:SS >= 10 and only 2 were a
+    clock, each alongside a weekday or month.
+    """
+
+    def setUp(self):
+        self.a = _am()
+
+    def test_hour_plus_runtime(self):
+        self.assertTrue(self.a._looks_long_form('Now playing 1:23:45 mix'))
+
+    def test_forty_minute_mix_from_the_autoplay_panel(self):
+        self.assertTrue(self.a._looks_long_form(
+            'X | Club 1BD | 2:26 | Hip Hop, RnB, Edits, Dancehall | 40:18 | DJ Miss Milan'))
+
+    def test_ten_minute_boundary_is_long_form(self):
+        self.assertTrue(self.a._looks_long_form('set 10:00'))
+
+    def test_normal_music_video_is_not_long_form(self):
+        for t in ('Artist - Song 3:45', 'Official Video 4:24', '0:00 / 2:26'):
+            self.assertFalse(self.a._looks_long_form(t), t)
+
+    def test_wall_clock_is_vetoed(self):
+        for t in ('11:48 | WED, SEP 9', '10:30 PM', 'FRI, OCT 3 | 22:15'):
+            self.assertFalse(self.a._looks_long_form(t), t)
+
+    def test_ad_countdown_is_not_long_form(self):
+        self.assertFalse(self.a._looks_long_form('Ad 0:30 left | Skip in 5'))
+
+    def test_observer_records_the_new_shape(self):
+        a = _am()
+        for _ in range(3):
+            a.observe_ocr_text(['Club 1BD | 40:18 | DJ Miss Milan'])
+        self.assertGreaterEqual(a._longform_confirmed(), a._LONGFORM_CONFIRM_FRAMES)
+
+    def test_observer_ignores_a_clock(self):
+        a = _am()
+        for _ in range(6):
+            a.observe_ocr_text(['11:48 | WED, SEP 9'])
+        self.assertEqual(a._longform_confirmed(), 0)
+
+
 class TestConfirmationWindow(unittest.TestCase):
 
     def test_single_sighting_does_not_confirm(self):
