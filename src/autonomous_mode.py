@@ -141,6 +141,21 @@ class AutonomousMode:
     # overlays and end cards).
     LONGFORM_DURATION_RE = re.compile(r'\b\d{1,2}:[0-5]\d:[0-5]\d\b')
 
+    # H:MM:SS only catches hour-PLUS content. A 10-59 minute mix renders as
+    # MM:SS and was invisible: observed 2026-09-11, the autoplay panel queued
+    # "Club 1BD | Hip Hop, RnB, Edits, Dancehall | 40:18 | DJ Miss Milan"
+    # while the H:MM:SS rule matched nothing all night (0 frames of 3616).
+    # A music video is 2-6 minutes, so a two-digit minute count is long-form.
+    LONGFORM_MINUTES_RE = re.compile(r'\b[1-9]\d:[0-5]\d\b')
+
+    # A wall clock also renders as MM:SS and would otherwise read as a long
+    # runtime. Measured over 21,363 OCR lines: 67 carried MM:SS >= 10 and only
+    # 2 of those were a clock, always alongside a weekday/month/meridiem, so
+    # excluding that context is enough.
+    CLOCK_CONTEXT_RE = re.compile(
+        r'\b(mon|tue|wed|thu|fri|sat|sun|a\.?m|p\.?m|'
+        r'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b', re.IGNORECASE)
+
     # When the audio pipeline is unavailable (display off / alsasink can't
     # open), we normally abstain from pause detection to avoid false positives
     # on music streams with static album art. But a genuinely-frozen video
@@ -920,10 +935,24 @@ class AutonomousMode:
             if getattr(self._ad_blocker, 'is_visible', False):
                 return
             combined = ' '.join(str(t) for t in texts)
-            if self.LONGFORM_DURATION_RE.search(combined):
+            if self._looks_long_form(combined):
                 self._longform_sightings.append(time.time())
         except Exception as e:
             logger.debug(f"[AutonomousMode] observe_ocr_text error: {e}")
+
+    def _looks_long_form(self, combined: str) -> bool:
+        """True when the text carries a runtime longer than any music video.
+
+        H:MM:SS is unambiguous. MM:SS with a two-digit minute count (10-99
+        min) is the case the hour-only rule missed -- a 40-minute DJ mix
+        reads as "40:18" -- but it is also how a wall clock renders, so
+        clock/date context vetoes it.
+        """
+        if self.LONGFORM_DURATION_RE.search(combined):
+            return True
+        if self.LONGFORM_MINUTES_RE.search(combined):
+            return not self.CLOCK_CONTEXT_RE.search(combined)
+        return False
 
     def _longform_confirmed(self) -> int:
         """Sightings inside the current confirmation window.
