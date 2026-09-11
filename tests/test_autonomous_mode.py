@@ -2567,11 +2567,20 @@ class TestMusicDriftReachability(unittest.TestCase):
         mode._music_mode = True
         return mode
 
+    # NOTE (Sep 2026): long-form evidence is no longer sampled from the OCR
+    # text AT the drift check. The H:MM:SS marker is on screen in ~0.21% of
+    # frames, so requiring it at the check's own ~34s sampling instant --
+    # three times consecutively -- was unreachable and never once fired in a
+    # 5.67h soak. Sightings are now recorded from every OCR frame by
+    # observe_ocr_text(); see tests/test_music_drift_longform.py. These tests
+    # keep verifying REACHABILITY of the check on each veto path, which is
+    # still load-bearing, via the counter that still moves there.
+
     def test_drift_check_runs_on_menu_audio_veto(self):
         mode = self._mode(["MaximumFun.Org/Join", "1:30:10", "Time"])
         try:
             mode._ensure_youtube_playing()
-            self.assertEqual(mode._music_longform_checks, 1,
+            self.assertEqual(mode._music_no_evidence_checks, 1,
                              "drift check must run on the MENU audio-veto path")
         finally:
             _cleanup_mode(mode)
@@ -2580,29 +2589,41 @@ class TestMusicDriftReachability(unittest.TestCase):
         mode = self._mode(["MaximumFun.Org/Join", "1:30:10"], screen='DIALOG')
         try:
             mode._ensure_youtube_playing()
-            self.assertEqual(mode._music_longform_checks, 1,
+            self.assertEqual(mode._music_no_evidence_checks, 1,
                              "drift check must run on the DIALOG audio-veto path")
         finally:
             _cleanup_mode(mode)
 
-    def test_longform_steers_after_threshold(self):
-        """Real podcast OCR: an H:MM:SS runtime means hour-plus content."""
+    def test_longform_steers_once_confirmed(self):
+        """Sightings gathered by the OCR loop, then the check steers."""
         mode = self._mode(["MaximumFun.Org/Join", "1:30:10", "Time"])
         try:
-            for _ in range(mode._MUSIC_LONGFORM_STEER_AFTER):
-                mode._check_music_drift()
+            for _ in range(mode._LONGFORM_CONFIRM_FRAMES):
+                mode.observe_ocr_text(["MaximumFun.Org/Join", "1:30:10"])
+            mode._check_music_drift()
             mode._launch_music_seed.assert_called_once()
-            self.assertEqual(mode._music_longform_checks, 0)
+            self.assertEqual(len(mode._longform_sightings), 0,
+                             "sightings cleared so one overlay can't steer twice")
         finally:
             _cleanup_mode(mode)
 
-    def test_music_evidence_resets_longform_streak(self):
+    def test_one_sighting_does_not_steer(self):
+        """A single frame could be an OCR misread; two of the five real
+        overlay appearances were single frames."""
+        mode = self._mode(["x"])
+        try:
+            mode.observe_ocr_text(["podcast ep 12 | 1:30:10"])
+            mode._check_music_drift(force_text="podcast ep 12 | 1:30:10")
+            mode._launch_music_seed.assert_not_called()
+        finally:
+            _cleanup_mode(mode)
+
+    def test_music_evidence_clears_the_miss_streak(self):
         mode = self._mode(["x"])
         try:
             mode._check_music_drift(force_text="podcast ep 12 | 1:30:10")
-            self.assertEqual(mode._music_longform_checks, 1)
+            self.assertEqual(mode._music_no_evidence_checks, 1)
             mode._check_music_drift(force_text="miley cyrus | vevo | 3:36")
-            self.assertEqual(mode._music_longform_checks, 0)
             self.assertEqual(mode._music_no_evidence_checks, 0)
         finally:
             _cleanup_mode(mode)

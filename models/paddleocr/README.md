@@ -118,3 +118,20 @@ exactly the text Minus cares about: a 60x22 "Skip" crop resized to 48x320 is
 Measured neutral on the product metric (v6: 38/40 ad frames either way), so it
 is documented rather than changed mid-flight. Same corpus-bias caveat. Worth
 re-testing alongside a re-converted v3 rec.
+
+## PP-OCRv6 is the default (Sep 2026)
+
+Chosen on latency, not accuracy. A 5.67h production soak measured:
+
+| | v3 | v6 |
+|---|---|---|
+| OCR inference p50 | 231 ms idle / 330 ms in-block | **195 ms** |
+| OCR inference p90 | 550 ms | **257 ms** |
+| hard timeouts | 3 in 36h | **0 in 5.67h** |
+
+The tighter tail is what keeps text-dense ad frames (fine print, disclaimer
+cards) under the 1.5 s hard timeout — the failure that used to unblock a live
+ad mid-break. Accuracy is a wash: 40 identical ad frames through the production
+keyword matcher gave v3 39/40 and v6 38/40, with v6 reading more text overall.
+
+Roll back with `MINUS_OCR_MODEL_VERSION=v3`; both model sets ship side by side.
