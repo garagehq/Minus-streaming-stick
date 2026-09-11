@@ -52,8 +52,22 @@ def ensure_localhost_available() -> bool:
 # (OCR + VLM) are requesting snapshots simultaneously
 _capture_lock = threading.Lock()
 _last_capture_time = 0.0
-_MIN_CAPTURE_INTERVAL = 0.5  # 500ms minimum between HTTP requests (reduced contention during ad detection)
-_MIN_CAPTURE_INTERVAL_BLOCKING = 1.0  # 1s during blocking (glitches during blocking are OK)
+# NOTE: this limiter is GLOBAL — the OCR loop and the VLM loop share it — so
+# each loop's effective cadence is roughly 2x the interval below.
+_MIN_CAPTURE_INTERVAL = float(os.environ.get('MINUS_CAPTURE_MIN_INTERVAL', '0.5'))
+# During a block the interval used to be RAISED to 1.0s, on the reasoning that
+# the MPP encoder is busy compositing the overlay and "glitches during blocking
+# are OK". That is true of the picture — the overlay covers it — but it also
+# throttled the only signal that can tell us the ad ENDED. Measured over 36h of
+# production: capture p50 488ms idle vs 1487ms during a block, so detection
+# cadence went 1.0s -> 2.0s and the 3-frame OCR stop took ~6s. Recovery came in
+# at p50 5.0s / p90 8.0s, i.e. seconds of real show missed after every break.
+# Blocking is when we need frames MOST, so the interval now matches idle.
+# OCR_STOP_THRESHOLD stays at 3 (tuned against the measured OCR miss
+# distribution); this buys the latency back from cadence instead of by
+# weakening the flap resistance.
+_MIN_CAPTURE_INTERVAL_BLOCKING = float(
+    os.environ.get('MINUS_CAPTURE_MIN_INTERVAL_BLOCKING', '0.5'))
 
 # Blocking state cache to avoid repeated API calls
 _blocking_state_cache = {'enabled': False, 'last_check': 0.0}

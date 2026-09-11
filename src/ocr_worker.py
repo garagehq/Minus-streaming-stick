@@ -41,25 +41,20 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from ocr import PaddleOCR
-        from config import OCR_MODEL_DIR
+        from config import OCR_MODEL_DIR, resolve_ocr_models
 
-        # Find model paths dynamically
-        base_path = Path(OCR_MODEL_DIR)
-        det_models = list(base_path.glob('ppocrv3_det_*.rknn'))
-        rec_models = list(base_path.glob('ppocrv3_rec_*.rknn'))
-        dict_file = base_path / 'ppocr_keys_v1.txt'
-
-        if not det_models or not rec_models or not dict_file.exists():
+        # Resolve the model set (PP-OCRv3 or v6 — each with its own dictionary
+        # and DB thresholds; see config.OCR_MODEL_GENERATIONS).
+        models = resolve_ocr_models()
+        if not models:
             logger.error(f"[OCRWorker] Models not found in {OCR_MODEL_DIR}")
             return
 
-        det_model = str(det_models[0])
-        rec_model = str(rec_models[0])
-        dict_path = str(dict_file)
-
         # Load models
-        logger.info("[OCRWorker] Loading models...")
-        ocr = PaddleOCR(det_model, rec_model, dict_path)
+        logger.info(f"[OCRWorker] Loading models ({models['version']}) from "
+                    f"{models['base_dir']}...")
+        ocr = PaddleOCR(models['det'], models['rec'], models['dict'],
+                        db_params=models['db_params'])
         if not ocr.load_models():
             logger.error("[OCRWorker] Failed to load models")
             return
@@ -291,11 +286,19 @@ class OCRProcess:
         """
         Run OCR with hard timeout.
 
-        Returns: OCR results list or empty list on timeout
+        Returns:
+            list  — OCR ran. May be EMPTY, which is a real observation
+                    ("this frame has no text"), i.e. genuine no-ad evidence.
+            None  — OCR could NOT run (worker down, worker error, or hard
+                    timeout + kill). This is absence of evidence, NOT evidence
+                    of absence, and callers must not treat it as a no-ad vote.
+                    Conflating the two is what made a block drop mid-ad
+                    whenever a text-dense frame pushed inference past the
+                    timeout — see the anti-waffle notes in minus.py.
         """
         if not self.is_ready or self.process is None or not self.process.is_alive():
             if not self.start():
-                return []
+                return None
 
         start_time = time.time()
 
@@ -309,9 +312,10 @@ class OCRProcess:
             if status == 'ok':
                 # Reset consecutive timeout counter on success
                 self._consecutive_timeouts = 0
-                return result
+                return result if result is not None else []
             else:
-                return []
+                # Worker reported an error — it did not observe the frame.
+                return None
 
         except:
             # TIMEOUT - kill the process
@@ -321,7 +325,7 @@ class OCRProcess:
                 f"[OCRProcess] HARD KILL after {elapsed:.1f}s (timeout #{self._consecutive_timeouts + 1}) - restarting worker"
             )
             self.restart()
-            return []
+            return None
 
     def release(self):
         """Release the OCR worker process."""
