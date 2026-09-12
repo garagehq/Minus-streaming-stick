@@ -61,6 +61,7 @@ def _minus(base=3, cap=6, min_s=5.0, esc=0, no_ad=0, last_hit=None):
     m.last_ocr_ad_time = time.time() if last_hit is None else last_hit
     # The ad clock (Sep 2026) can veto or accelerate a stop. These tests are
     # about the frame/time criterion, so give it a clock with nothing to say.
+    m.OCR_STOP_MAX_SECONDS = 9.0
     m.AD_COUNTDOWN_ENABLED = False
     from ad_countdown import AdCountdownTracker
     m.ad_countdown = AdCountdownTracker()
@@ -87,6 +88,48 @@ class TestEffectiveThreshold(unittest.TestCase):
     def test_cap_below_base_is_not_honoured(self):
         """A misconfigured cap must never make stopping easier than the base."""
         self.assertEqual(_minus(base=5, cap=2)._effective_ocr_stop_threshold(), 5)
+
+
+class TestFloorEscalatesWithFlaps(unittest.TestCase):
+    """The wall-clock floor is what needs to stretch, not the frame count.
+
+    Anti-flap escalation originally raised only the frame threshold, but
+    frames were never the binding constraint. Measured live at check 5:
+    flapping blocks ended at 5.1-5.7s "stopped by OCR" -- exactly ON the 5s
+    floor -- with the ad text returning 1-2s later. A clean ad should keep its
+    fast recovery; only an ad that has proved it flaps pays the extra wait.
+    """
+
+    def _m(self, esc=0, base=5.0, cap=9.0):
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.OCR_STOP_MIN_SECONDS = base
+        m.OCR_STOP_MAX_SECONDS = cap
+        m.flap_escalation = esc
+        return m
+
+    def test_clean_ad_keeps_the_base_floor(self):
+        self.assertEqual(self._m(esc=0)._effective_ocr_stop_seconds(), 5.0)
+
+    def test_each_flap_adds_a_second(self):
+        self.assertEqual(self._m(esc=1)._effective_ocr_stop_seconds(), 6.0)
+        self.assertEqual(self._m(esc=3)._effective_ocr_stop_seconds(), 8.0)
+
+    def test_capped(self):
+        for esc in (4, 10, 500):
+            self.assertLessEqual(self._m(esc=esc)._effective_ocr_stop_seconds(), 9.0)
+
+    def test_never_below_the_base(self):
+        self.assertGreaterEqual(self._m(esc=0)._effective_ocr_stop_seconds(), 5.0)
+
+    def test_misconfigured_cap_cannot_shorten_the_floor(self):
+        self.assertEqual(self._m(esc=0, base=7.0, cap=3.0)._effective_ocr_stop_seconds(), 7.0)
+
+    def test_covers_the_measured_flap_gaps(self):
+        """Remaining flaps returned 1-2s after the stop; one flap must cover it."""
+        base = self._m(esc=0)._effective_ocr_stop_seconds()
+        after_one_flap = self._m(esc=1)._effective_ocr_stop_seconds()
+        self.assertGreaterEqual(after_one_flap - base, 1.0)
 
 
 class TestStopCriterion(unittest.TestCase):
