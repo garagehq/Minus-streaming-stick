@@ -59,6 +59,13 @@ def _minus(base=3, cap=6, min_s=5.0, esc=0, no_ad=0, last_hit=None):
     m.flap_escalation = esc
     m.ocr_no_ad_count = no_ad
     m.last_ocr_ad_time = time.time() if last_hit is None else last_hit
+    # The ad clock (Sep 2026) can veto or accelerate a stop. These tests are
+    # about the frame/time criterion, so give it a clock with nothing to say.
+    m.OCR_STOP_MAX_SECONDS = 9.0
+    m.AD_COUNTDOWN_ENABLED = False
+    from ad_countdown import AdCountdownTracker
+    m.ad_countdown = AdCountdownTracker()
+    m.audio = None
     return m
 
 
@@ -81,6 +88,71 @@ class TestEffectiveThreshold(unittest.TestCase):
     def test_cap_below_base_is_not_honoured(self):
         """A misconfigured cap must never make stopping easier than the base."""
         self.assertEqual(_minus(base=5, cap=2)._effective_ocr_stop_threshold(), 5)
+
+
+class TestBlockStartsWithCleanEvidence(unittest.TestCase):
+    """A block must be judged on evidence gathered while it is running.
+
+    Observed live at check 6:
+
+        05:19:05 AD BLOCKING STARTED (OCR)
+        05:19:05 OCR: ad no longer detected (after 4 no-ads)
+        05:19:08 AD BLOCKING ENDED after 2.6s (stopped by OCR)
+
+    The block inherited a no-ad tally from before it existed, so it was
+    already eligible to stop the instant it began -- and ended well inside the
+    wall-clock floor. That instant re-stop feeds straight back into a
+    re-block, which is a large part of the flapping the floors exist to
+    prevent.
+    """
+
+    def test_start_clears_both_no_ad_counters(self):
+        src = (ROOT / 'minus.py').read_text()
+        start = src.index('    def _update_blocking_state')
+        body = src[start:src.index('\n    def ', start + 10)]
+        anchor = 'logger.warning(f"AD BLOCKING STARTED'
+        seg = body[body.index('if should_start:'):body.index(anchor)]
+        self.assertIn('self.ocr_no_ad_count = 0', seg)
+        self.assertIn('self.vlm_no_ad_count = 0', seg)
+
+    def test_counters_cleared_before_the_block_is_announced(self):
+        """Ordering matters: clear the tally, then start."""
+        src = (ROOT / 'minus.py').read_text()
+        start = src.index('    def _update_blocking_state')
+        body = src[start:src.index('\n    def ', start + 10)]
+        seg = body[body.index('if should_start:'):]
+        self.assertLess(seg.index('self.ocr_no_ad_count = 0'),
+                        seg.index('logger.warning(f"AD BLOCKING STARTED'))
+
+
+class TestStopFloorIsFlat(unittest.TestCase):
+    """The floor escalated with flaps for one cycle. The experiment failed.
+
+    Measured across checks 5-7: flapping went 33% -> 44% -> 69% while recovery
+    degraded from p50 5.0s to 7.0s and durations stretched from 5.0-5.7s to
+    5.0-7.3s. It paid recovery on every flappy ad and bought nothing, because
+    this content loses its ad text for 7-9s at a stretch -- longer than the 9s
+    ceiling could cover, so the floor could never win that race.
+
+    One accessor is kept so the OCR stop path and the VLM deferral cannot
+    drift apart.
+    """
+
+    def _m(self, esc=0, base=5.0):
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.OCR_STOP_MIN_SECONDS = base
+        m.OCR_STOP_MAX_SECONDS = 9.0
+        m.flap_escalation = esc
+        return m
+
+    def test_floor_does_not_move_with_flaps(self):
+        for esc in (0, 1, 3, 10):
+            self.assertEqual(self._m(esc=esc)._effective_ocr_stop_seconds(), 5.0,
+                             'the floor must stay flat; escalating it regressed both metrics')
+
+    def test_floor_follows_the_configured_base(self):
+        self.assertEqual(self._m(base=6.5)._effective_ocr_stop_seconds(), 6.5)
 
 
 class TestStopCriterion(unittest.TestCase):
@@ -146,6 +218,58 @@ class TestMeasuredDistribution(unittest.TestCase):
     def test_floor_matches_the_knee(self):
         m = _minus()
         self.assertGreaterEqual(m.OCR_STOP_MIN_SECONDS, 5.0)
+
+
+class TestVLMRespectsRecentOCRAdText(unittest.TestCase):
+    """VLM had no wall-clock discipline; OCR text outranks it.
+
+    Measured live: blocks ending after 3.5s and 3.7s, both "stopped by BOTH",
+    while OCR was still matching 'sponsored' on the same ad -- below even the
+    5s floor that governs OCR's own stop path. On a "both"-source block VLM
+    could end things the instant it voted no-ad twice, and that was the bulk
+    of a 67% flap rate.
+
+    If OCR matched an ad keyword within the floor, the ad is still on screen
+    and two VLM votes cannot contradict it.
+    """
+
+    FLOOR = 5.0
+
+    def _vlm_stop(self, vlm_no_ad, ocr_ad_seconds_ago):
+        """Mirror of the decision in _update_blocking_state."""
+        stop = vlm_no_ad >= 2
+        if (stop and ocr_ad_seconds_ago is not None
+                and ocr_ad_seconds_ago < self.FLOOR):
+            stop = False
+        return stop
+
+    def test_vlm_deferred_while_ocr_still_sees_the_ad(self):
+        self.assertFalse(self._vlm_stop(2, 1.0))
+        self.assertFalse(self._vlm_stop(5, 4.9))
+
+    def test_vlm_may_stop_once_ocr_text_is_stale(self):
+        self.assertTrue(self._vlm_stop(2, 6.0))
+        self.assertTrue(self._vlm_stop(2, 30.0))
+
+    def test_vlm_only_blocks_are_unconstrained(self):
+        """OCR never saw the ad, so it has no opinion to outrank VLM with."""
+        self.assertTrue(self._vlm_stop(2, None))
+
+    def test_threshold_still_required(self):
+        self.assertFalse(self._vlm_stop(1, 30.0))
+
+    def test_the_measured_short_blocks_would_now_be_held(self):
+        """3.5s and 3.7s blocks, OCR matching 'sponsored' throughout."""
+        for block_age in (3.5, 3.7):
+            self.assertFalse(self._vlm_stop(2, block_age),
+                             f'{block_age}s block must not be ended by VLM')
+
+    def test_wired_into_the_engine(self):
+        src = (ROOT / 'minus.py').read_text()
+        start = src.index('    def _update_blocking_state')
+        body = src[start:src.index('\n    def ', start + 10)]
+        self.assertIn('vlm_deferred', body,
+                      'the VLM floor must be applied in the stop decision')
 
 
 class TestSeedDiversity(unittest.TestCase):

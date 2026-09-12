@@ -502,6 +502,34 @@ class Minus:
         # Picked up by ad_blocker.show() to render a "(Ad) 0:30 left" hint in
         # the top-right of the blocking overlay when debug mode is on.
         self.last_matched_keywords = []
+        # Ads carry their own duration ("Ad 0:15", "Skip in 5"). OCR reads it
+        # every frame and the engine used to discard it, keeping only the
+        # boolean "a keyword matched". It is the strongest evidence available
+        # about whether the ad is still running, and about when it ends.
+        from ad_countdown import AdCountdownTracker
+        self.ad_countdown = AdCountdownTracker()
+        self.AD_COUNTDOWN_ENABLED = os.environ.get('MINUS_AD_COUNTDOWN_DISABLE', '0') != '1'
+        # Slack on the far end of the clock. Ad timers round down and the last
+        # frame often lingers, so do not declare the ad over the instant the
+        # clock hits zero.
+        self.AD_COUNTDOWN_GRACE_S = float(os.environ.get('MINUS_AD_COUNTDOWN_GRACE', '2.0'))
+        # Observability. Without these the only way to tell whether the clock
+        # is doing anything is to infer it from block timings, which is
+        # exactly the kind of guessing this feature exists to replace.
+        self.ad_clock_stats = {
+            'parsed': 0,        # frames any countdown signal was read from
+            # Split out because 'parsed' alone hid the thing that mattered:
+            # overnight it read 499 while only 6 of those were a real digit,
+            # the rest being the flat SKIP_LABEL_ASSUMED_S guess.
+            'real_digit': 0,    # ...of those, an actual number off the screen
+            'assumed': 0,       # ...of those, the digit-less label fallback
+            'holds': 0,         # stops vetoed because time remained
+            'early_release': 0, # stops allowed early because it expired
+            'pause_override': 0,  # holds abandoned because playback paused
+            'last_value': None,
+            'vlm_deferred': 0,  # VLM stops overruled by recent OCR ad text
+        }
+        self._ad_clock_log_last = 0.0
         self.home_screen_detected = False   # True if home screen keywords found
         self.home_screen_detect_time = 0    # When home screen was last detected
         self.video_interface_detected = False  # True if video player interface detected
@@ -602,6 +630,14 @@ class Minus:
         # halved flap resistance and took the flap rate from 4.2% to 66%.
         self.OCR_STOP_MIN_SECONDS = float(
             os.environ.get('MINUS_OCR_STOP_MIN_SECONDS', '5.0'))
+        # Ceiling for the escalating version of the floor below. Anti-flap
+        # escalation used to raise only the FRAME count, but the frames were
+        # never the binding constraint -- measured live, flapping blocks ended
+        # at 5.1-5.7s "stopped by OCR", i.e. exactly ON the wall-clock floor,
+        # with the ad text returning 1-2s later. The floor is what needs to
+        # stretch on a flappy ad, and only on a flappy ad.
+        self.OCR_STOP_MAX_SECONDS = float(
+            os.environ.get('MINUS_OCR_STOP_MAX_SECONDS', '9.0'))
         self.FLAP_REBLOCK_WINDOW_S = float(
             os.environ.get('MINUS_FLAP_REBLOCK_WINDOW', '5.0'))
         self.OCR_STOP_THRESHOLD_MAX = int(
@@ -857,6 +893,8 @@ class Minus:
 
         # Night mode - automatic overnight YouTube playback for training data
         self.autonomous_mode = AutonomousMode()
+        # Stand down the moment the TV is actually being watched.
+        self.autonomous_mode.set_display_in_use_predicate(self._display_in_use)
 
         # IR transmitter (REI 8K HDMI switch). Constructor is hardware-free;
         # initialize() / first send() is what touches the PWM sysfs.
@@ -2193,6 +2231,22 @@ class Minus:
             'keywords': [kw for kw, _ in matched_keywords] if matched_keywords else [],
         })
 
+    def ad_clock_snapshot(self) -> dict:
+        """Ad-countdown state for /api/status, so the signal is observable.
+
+        Counters plus the live tracker view, so a monitor can tell whether
+        the clock is parsing anything, holding blocks, or being overridden by
+        a pause -- rather than inferring it from block timings.
+        """
+        out = dict(getattr(self, 'ad_clock_stats', {}) or {})
+        out['enabled'] = getattr(self, 'AD_COUNTDOWN_ENABLED', False)
+        try:
+            if getattr(self, 'ad_countdown', None) is not None:
+                out.update(self.ad_countdown.status())
+        except Exception:
+            pass
+        return out
+
     def get_status_dict(self) -> dict:
         """Get current status as dictionary for web API."""
         # Get health status if available
@@ -2250,6 +2304,7 @@ class Minus:
             'hdmi_reconnect_grace': self.is_in_hdmi_reconnect_grace(),
             'hdmi_reconnect_grace_remaining': self.get_hdmi_reconnect_grace_remaining(),
             'thermal_degraded': self.thermal_degraded,
+            'ad_clock': self.ad_clock_snapshot(),
             'thermal': (self.thermal_monitor.get_status() if self.thermal_monitor
                         else {'degraded': False, 'temp_c': None,
                               'throttled': False, 'forced': None}),
@@ -2824,6 +2879,29 @@ class Minus:
         self._save_system_settings()
         return {'success': True, 'leds_require_display': bool(enabled)}
 
+    def _display_in_use(self) -> bool:
+        """Is someone actually watching the TV right now?
+
+        Requires BOTH halves, because either alone is misleading:
+
+        - ``display_connected`` says the display pipeline came up, but it stays
+          True until a retry loop eventually notices a real disconnect, so on
+          its own it can claim a TV that has since been switched off.
+        - the live sysfs probe says the TV is electrically there, but a TV can
+          be connected while our pipeline is down (mid-recovery, or failed to
+          start), and nothing is being shown then.
+
+        Only when the TV is present AND we are driving it is a person watching
+        -- which is exactly when autonomous mode must not be stealing the
+        remote. Fails CLOSED (returns False) on any error, so a probe failure
+        leaves autonomous mode working as it does today.
+        """
+        try:
+            return bool(self.display_connected) and bool(
+                self.is_display_connected_live())
+        except Exception:
+            return False
+
     def is_display_connected_live(self) -> bool:
         """Live HDMI-TX presence check (sysfs, no caching).
 
@@ -3309,6 +3387,82 @@ class Minus:
         return min(self.OCR_STOP_THRESHOLD + self.flap_escalation,
                    max(self.OCR_STOP_THRESHOLD, self.OCR_STOP_THRESHOLD_MAX))
 
+    def _ad_clock_says_playing(self, now=None) -> bool:
+        """True when the ad's own countdown says it is still running.
+
+        Vetoes a stop, so it is deliberately hard to satisfy:
+
+          * the countdown must be corroborated by consecutive readings that
+            decrement in real time, so one misread digit cannot pin a block;
+          * it must be recent, so a stale number cannot outlive its ad;
+          * it must not be frozen. A frozen clock is the signature of a
+            PAUSE -- the viewer pressed pause mid-ad and the timer stopped --
+            and holding the overlay through a pause is exactly the behaviour
+            the user asked us to avoid. Audio corroborates: a paused stream
+            goes silent, so silence turns a frozen clock into a hard veto.
+        """
+        if not self.AD_COUNTDOWN_ENABLED:
+            return False
+        now = now if now is not None else time.time()
+        try:
+            if not self.ad_countdown.should_hold(now):
+                return False
+            # Frozen clock is already handled inside should_hold; this is the
+            # second, independent check for a pause that the clock has not
+            # caught up with yet (audio drops the instant playback stops).
+            if self._playback_looks_paused():
+                self.ad_clock_stats['pause_override'] += 1
+                logger.info("[AdClock] playback looks paused — releasing the hold")
+                return False
+            self.ad_clock_stats['holds'] += 1
+            # Rate-limited: this fires on every OCR cycle of a held block.
+            if now - self._ad_clock_log_last >= 5.0:
+                self._ad_clock_log_last = now
+                logger.info(f"[AdClock] holding block — {self.ad_countdown.remaining(now):.0f}s "
+                            f"left on the ad's own countdown")
+            return True
+        except Exception as e:
+            logger.debug(f"ad clock check failed: {e}")
+            return False
+
+    def _playback_looks_paused(self) -> bool:
+        """Cheap audio-based pause check, used to override the ad clock.
+
+        Only consulted while the clock wants to hold a block. Audio is the
+        authoritative playback signal on this device (the same invariant the
+        autonomous-mode action guards use); if the source has gone silent the
+        stream is not advancing, whatever the frozen timer on screen says.
+        Fails OPEN -- an unreadable audio path must never pin the overlay.
+        """
+        try:
+            if self.audio is None:
+                return False
+            st = self.audio.get_status() or {}
+            if st.get('state') != 'playing':
+                return False
+            level = st.get('recent_level')
+            if level is None:
+                return False
+            return float(level) < 0.005
+        except Exception:
+            return False
+
+    def _effective_ocr_stop_seconds(self) -> float:
+        """Wall-clock floor for stopping.
+
+        This escalated with observed flaps for one cycle and the experiment
+        failed, so it is flat again. Measured across checks 5-7: flapping went
+        33% -> 44% -> 69% while recovery degraded from p50 5.0s to 7.0s and
+        block durations stretched from 5.0-5.7s to 5.0-7.3s. It was paying
+        recovery on every flappy ad and buying nothing, because this content
+        loses its ad text for 7-9s at a stretch -- longer than the 9s ceiling
+        could cover anyway, so the floor could never win that race.
+
+        Kept as a single accessor so the OCR stop path and the VLM deferral
+        cannot drift apart, and so a future attempt has one place to change.
+        """
+        return self.OCR_STOP_MIN_SECONDS
+
     def _ocr_says_stop(self) -> bool:
         """Whether OCR has seen enough no-ad evidence to end a block.
 
@@ -3322,11 +3476,32 @@ class Minus:
         in seconds, not frames. Counting only frames meant the threshold's
         real tolerance moved whenever cadence moved.
         """
+        now = time.time()
+
+        # The ad's own clock overrides both counters while it is still
+        # running. A missed keyword at 0:12-remaining is a misread, not the
+        # end of the ad, and this is the evidence the consecutive-miss
+        # counters never had. Advisory only: it needs corroborated readings,
+        # it expires, and a frozen clock (a pause) never holds -- see
+        # _ad_clock_says_playing.
+        if self._ad_clock_says_playing(now):
+            return False
+
         if self.ocr_no_ad_count < self._effective_ocr_stop_threshold():
             return False
         if self.last_ocr_ad_time <= 0:
             return True
-        return (time.time() - self.last_ocr_ad_time) >= self.OCR_STOP_MIN_SECONDS
+
+        # Once the clock has run out the ad is over, so release on the frame
+        # count alone rather than waiting out the full wall-clock floor. That
+        # floor exists to ride out mid-ad dropouts, and there is no mid-ad
+        # left to ride out.
+        if self.AD_COUNTDOWN_ENABLED and self.ad_countdown.expired(now):
+            self.ad_clock_stats['early_release'] += 1
+            logger.info("[AdClock] countdown expired — releasing without the wall-clock floor")
+            return True
+
+        return (now - self.last_ocr_ad_time) >= self._effective_ocr_stop_seconds()
 
     def _update_blocking_state(self):
         """Update combined blocking state using weighted OCR/VLM model."""
@@ -3461,6 +3636,22 @@ class Minus:
                                 f"{self._effective_ocr_stop_threshold()}")
                     else:
                         self.flap_escalation = 0
+                    # A new block must be judged on evidence gathered while it
+                    # is running. Without this the no-ad counters carry over
+                    # from before it started, so a re-block inherits a tally
+                    # that already meets the stop threshold. Observed live:
+                    #
+                    #   05:19:05 AD BLOCKING STARTED (OCR)
+                    #   05:19:05 OCR: ad no longer detected (after 4 no-ads)
+                    #   05:19:08 AD BLOCKING ENDED after 2.6s
+                    #
+                    # declared over in the same second it began, and ended
+                    # well inside the wall-clock floor. That instant re-stop
+                    # feeds straight back into a re-block, which is a large
+                    # part of the flapping the floors were meant to prevent.
+                    self.ocr_no_ad_count = 0
+                    self.vlm_no_ad_count = 0
+
                     # Reset skip and pause detection for new ad
                     self.accidental_pause_detected = False
                     self.skip_attempted_this_ad = False
@@ -3486,11 +3677,43 @@ class Minus:
                 should_stop = False
 
                 min_duration = self._current_min_blocking_duration()
+
+                # The ad's own countdown outranks every detector, not just
+                # OCR. Observed live: an ad flapped through 6 blocks in 27s
+                # and every one ended "stopped by BOTH" -- VLM was ending
+                # them, so a veto living only inside _ocr_says_stop never got
+                # a vote. If the clock says the ad is still running, nothing
+                # should end the block. Same guards as before: corroborated
+                # readings only, expires, and a frozen clock (a pause) never
+                # holds.
+                if self._ad_clock_says_playing(now):
+                    return
+
                 if blocking_elapsed >= min_duration:
                     ocr_says_stop = self._ocr_says_stop()
                     # For VLM stopping, use consecutive no-ad count (not sliding window)
                     # This ensures responsive stopping after ad ends
                     vlm_says_stop = (self.vlm_no_ad_count >= self.VLM_STOP_THRESHOLD)
+
+                    # OCR text outranks VLM on "is an ad on screen".
+                    #
+                    # VLM had no wall-clock discipline at all, so on a
+                    # "both"-source block it could end things the instant it
+                    # voted no-ad twice. Measured live: blocks ending after
+                    # 3.5s and 3.7s, both "stopped by BOTH", while OCR was
+                    # still matching 'sponsored' on the same ad -- below even
+                    # the 5s floor that governs OCR's own stop path. That is
+                    # the bulk of a 67% flap rate.
+                    #
+                    # If OCR matched an ad keyword within the floor, the ad is
+                    # still on screen and two VLM no-ad votes are not enough to
+                    # contradict it. OCR's own stop path, the max-duration cap
+                    # and the frozen-stream safeguard all still end the block.
+                    if (vlm_says_stop and self.last_ocr_ad_time > 0
+                            and (now - self.last_ocr_ad_time) < self._effective_ocr_stop_seconds()):
+                        vlm_says_stop = False
+                        self.ad_clock_stats['vlm_deferred'] = (
+                            self.ad_clock_stats.get('vlm_deferred', 0) + 1)
 
                     if self.blocking_source == "vlm":
                         # VLM triggered alone - VLM must also agree to stop
@@ -3733,6 +3956,8 @@ class Minus:
                     self.last_vlm_ad_frame_time = 0.0
                     # Track when blocking ended (for accidental pause detection)
                     self.blocking_end_time = time.time()
+                    if self.AD_COUNTDOWN_ENABLED:
+                        self.ad_countdown.reset()
                     # Reset skip state for next ad
                     self.skip_available = False
                     self.skip_attempted_this_ad = False
@@ -4064,6 +4289,52 @@ class Minus:
                             _now_fs - self._ocr_text_stable_since)
                 if matched_keywords:
                     self.last_matched_keywords = matched_keywords
+                    # Feed the ad clock. Prefer the ad's own remaining-time
+                    # readout; fall back to "skip in N", which only bounds the
+                    # start of the skip window and so can hold a block but must
+                    # never end one.
+                    if self.AD_COUNTDOWN_ENABLED:
+                        try:
+                            from ad_countdown import (parse_ad_remaining,
+                                                      parse_skip_in_candidates,
+                                                      has_skip_countdown_label,
+                                                      SKIP_LABEL_ASSUMED_S)
+                            secs = parse_ad_remaining(all_texts)
+                            if secs is not None:
+                                self.ad_countdown.observe(secs, is_skip_bound=False)
+                                self.ad_clock_stats['parsed'] += 1
+                                self.ad_clock_stats['last_value'] = secs
+                            else:
+                                # Several numbers per frame can look like the
+                                # countdown; the tracker picks the one that fits
+                                # the clock it is already running.
+                                cands = parse_skip_in_candidates(all_texts)
+                                skip_s = self.ad_countdown.observe_candidates(
+                                    cands, is_skip_bound=True) if cands else None
+                                if skip_s is not None:
+                                    self.ad_clock_stats['parsed'] += 1
+                                    self.ad_clock_stats['real_digit'] += 1
+                                    self.ad_clock_stats['last_value'] = f"skip:{skip_s}"
+                                elif has_skip_countdown_label(all_texts):
+                                    # "Skip in" with the digit unreadable.
+                                    # Measured live: 0 of 36 in-block frames on
+                                    # a Disney+ pre-roll yielded a number while
+                                    # the label was plainly on screen. The label
+                                    # alone still states a fact -- the skip gate
+                                    # has not opened, so the ad is definitely
+                                    # still running. Assume the usual ~5s gate;
+                                    # it refreshes while the label keeps being
+                                    # read and lapses once it goes. Marked
+                                    # skip-bound so it can hold a block but can
+                                    # never declare the ad over.
+                                    self.ad_countdown.observe(SKIP_LABEL_ASSUMED_S,
+                                                              is_skip_bound=True,
+                                                              synthetic=True)
+                                    self.ad_clock_stats['parsed'] += 1
+                                    self.ad_clock_stats['assumed'] += 1
+                                    self.ad_clock_stats['last_value'] = 'skip-label'
+                        except Exception as e:
+                            logger.debug(f"ad countdown parse failed: {e}")
                     # Record timestamp if any "strong" keyword (Skip in / Skip Ad /
                     # Ad with timestamp / etc.) was matched — used by the static
                     # suppressor to keep its hands off active video ads. See
