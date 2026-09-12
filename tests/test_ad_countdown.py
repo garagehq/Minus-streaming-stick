@@ -171,6 +171,85 @@ class TestTracker(unittest.TestCase):
         self.assertFalse(t.should_hold(now))
 
 
+class TestRetargetAndQuarantine(unittest.TestCase):
+    """Agreeing readings retarget; contradicting ones are quarantined.
+
+    A reading that agrees with the running clock re-anchors on it, so 0:15
+    followed by 0:12 leaves a 12-second deadline. A reading that contradicts
+    an established clock (0:15 -> 0:99) is far more likely a misread than a
+    real ad, so it must not reassign on the spot -- that would both fabricate
+    a 99-second hold and discard the corroboration already earned, collapsing
+    a legitimate hold mid-ad. It is held aside and adopted only once a later
+    reading agrees with IT (0:99 then 0:97), which is also what a genuine
+    resync into the next ad of a pod looks like.
+    """
+
+    def _established(self, base=1000.0, values=(30, 28, 26, 24)):
+        t = AdCountdownTracker()
+        for i, v in enumerate(values):
+            t.observe(v, base + i * 2)
+        return t, base + (len(values) - 1) * 2
+
+    def test_agreeing_reading_retargets(self):
+        t = AdCountdownTracker(); n = 1000.0
+        t.observe(15, n)
+        t.observe(12, n + 3)
+        self.assertAlmostEqual(t.remaining(n + 3), 12, delta=0.5)
+        self.assertTrue(t.should_hold(n + 3))
+
+    def test_it_keeps_retargeting_as_the_ad_runs_down(self):
+        t = AdCountdownTracker(); n = 1000.0
+        for i, v in enumerate((20, 18, 16, 14, 12)):
+            t.observe(v, n + i * 2)
+        self.assertAlmostEqual(t.remaining(n + 8), 12, delta=0.5)
+
+    def test_single_outlier_does_not_reassign_the_deadline(self):
+        t, now = self._established()
+        before = t.remaining(now)
+        t.observe(99, now + 2)
+        self.assertLess(t.remaining(now + 2), before,
+                        'a wild reading must not become the new deadline')
+        self.assertLess(t.remaining(now + 2), 30)
+
+    def test_single_outlier_does_not_collapse_an_earned_hold(self):
+        """The regression this guards: one bad read used to end a live hold."""
+        t, now = self._established()
+        self.assertTrue(t.should_hold(now))
+        t.observe(99, now + 2)
+        self.assertTrue(t.should_hold(now + 2))
+
+    def test_good_readings_resume_after_an_outlier(self):
+        t, now = self._established()
+        t.observe(99, now + 2)
+        t.observe(22, now + 4)
+        self.assertAlmostEqual(t.remaining(now + 4), 22, delta=1.0)
+        self.assertTrue(t.should_hold(now + 4))
+
+    def test_corroborated_jump_is_adopted(self):
+        """0:99 then 0:97 -- a real resync, one reading later."""
+        t, now = self._established()
+        t.observe(99, now + 2)
+        t.observe(97, now + 4)
+        self.assertAlmostEqual(t.remaining(now + 4), 97, delta=1.0)
+        self.assertTrue(t.should_hold(now + 4))
+
+    def test_next_ad_in_a_pod_is_picked_up(self):
+        """A 30s ad ends and a 60s one starts: adopted after corroboration."""
+        t, now = self._established(values=(6, 4, 2))
+        t.observe(60, now + 2)
+        self.assertLess(t.remaining(now + 2), 10, 'not adopted on one reading')
+        t.observe(58, now + 4)
+        self.assertAlmostEqual(t.remaining(now + 4), 58, delta=1.0)
+
+    def test_two_unrelated_outliers_never_adopt(self):
+        """Noise that never agrees with itself must not take over."""
+        t, now = self._established()
+        t.observe(99, now + 2)
+        t.observe(41, now + 4)
+        t.observe(77, now + 6)
+        self.assertLess(t.remaining(now + 6), 30)
+
+
 class TestPauseIsTheDangerousCase(unittest.TestCase):
     """A pause freezes the countdown. Holding through it is the failure."""
 
