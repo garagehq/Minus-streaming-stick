@@ -59,6 +59,12 @@ def _minus(base=3, cap=6, min_s=5.0, esc=0, no_ad=0, last_hit=None):
     m.flap_escalation = esc
     m.ocr_no_ad_count = no_ad
     m.last_ocr_ad_time = time.time() if last_hit is None else last_hit
+    # The ad clock (Sep 2026) can veto or accelerate a stop. These tests are
+    # about the frame/time criterion, so give it a clock with nothing to say.
+    m.AD_COUNTDOWN_ENABLED = False
+    from ad_countdown import AdCountdownTracker
+    m.ad_countdown = AdCountdownTracker()
+    m.audio = None
     return m
 
 
