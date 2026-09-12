@@ -691,5 +691,59 @@ class TestAssumedGateLength(unittest.TestCase):
         self.assertFalse(t.expired(n + 2 + SKIP_LABEL_ASSUMED_S + 1))
 
 
+class TestSingleLabelSightingHolds(unittest.TestCase):
+    """OCR usually gives one readable frame per ad, then nothing.
+
+    Measured over an hour of live ads: blocks that ran short had a median of
+    ONE OCR frame with any text, blocks that ran to completion had 29. Under
+    MIN_READINGS the clock could never become confident in the first case, so
+    it never held and the block died to empty OCR frames with the ad still on
+    screen -- 15 of 24 blocks, every one of them re-blocking seconds later.
+    """
+
+    def test_one_label_sighting_holds_through_an_ocr_dropout(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe(SKIP_LABEL_ASSUMED_S, n, is_skip_bound=True, synthetic=True)
+        self.assertTrue(t.is_confident(n))
+        # 5.7s was the exact point production used to give up.
+        self.assertTrue(t.should_hold(n + 5.7))
+
+    def test_the_hold_still_lapses(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe(SKIP_LABEL_ASSUMED_S, n, is_skip_bound=True, synthetic=True)
+        self.assertFalse(t.should_hold(n + SKIP_LABEL_ASSUMED_S + 1))
+
+    def test_a_single_parsed_number_still_cannot_hold(self):
+        """The misread protection MIN_READINGS exists for is untouched."""
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe(45, n, is_skip_bound=False)
+        self.assertFalse(t.is_confident(n))
+        self.assertFalse(t.should_hold(n + 1))
+
+    def test_a_single_cross_element_candidate_still_cannot_hold(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe_candidates([33], n, is_skip_bound=True)
+        self.assertFalse(t.should_hold(n + 1))
+
+    def test_label_anchor_never_ends_a_block(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe(SKIP_LABEL_ASSUMED_S, n, is_skip_bound=True, synthetic=True)
+        self.assertFalse(t.expired(n + 60))
+
+    def test_a_real_number_supersedes_the_label_and_regains_strictness(self):
+        """Once a number arrives, the clock is a number clock again."""
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe(SKIP_LABEL_ASSUMED_S, n, is_skip_bound=True, synthetic=True)
+        # A contradicting number is quarantined, not adopted on the spot.
+        t.observe(40, n + 1, is_skip_bound=True)
+        self.assertLess(t.remaining(n + 1), SKIP_LABEL_ASSUMED_S + 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

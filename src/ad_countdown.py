@@ -315,6 +315,7 @@ class AdCountdownTracker:
         self._last_seen = 0.0       # when we last parsed any value
         self._value_since = 0.0     # when _last_value was first seen
         self._is_skip_bound = False  # from "skip in", a lower bound only
+        self._from_label = False    # anchored on the label, not a parsed number
         # Quarantine for readings that contradict an established countdown.
         self._pending_deadline = 0.0
         self._pending_count = 0
@@ -398,12 +399,12 @@ class AdCountdownTracker:
 
         if projected is not None and abs(projected - seconds) <= self.TOLERANCE_S:
             self._readings += 1
-            self._anchor(seconds, now, is_skip_bound)
+            self._anchor(seconds, now, is_skip_bound, synthetic)
             return
 
         if not established:
             self._readings = 1
-            self._anchor(seconds, now, is_skip_bound)
+            self._anchor(seconds, now, is_skip_bound, synthetic)
             return
 
         # Contradicts a running clock: quarantine rather than reassign.
@@ -416,15 +417,17 @@ class AdCountdownTracker:
             if self._pending_count >= self.MIN_READINGS:
                 # Corroborated twice: this really is a different countdown.
                 self._readings = self._pending_count
-                self._anchor(seconds, now, is_skip_bound)
+                self._anchor(seconds, now, is_skip_bound, synthetic)
         else:
             self._pending_deadline = now + seconds
             self._pending_count = 1
 
-    def _anchor(self, seconds: int, now: float, is_skip_bound: bool) -> None:
+    def _anchor(self, seconds: int, now: float, is_skip_bound: bool,
+                synthetic: bool = False) -> None:
         """Adopt a reading as the live countdown."""
         self._deadline = now + seconds
         self._is_skip_bound = is_skip_bound
+        self._from_label = synthetic
         self._pending_deadline = 0.0
         self._pending_count = 0
 
@@ -458,9 +461,30 @@ class AdCountdownTracker:
         return (now - self._last_seen) >= self.STALE_AFTER_S
 
     def is_confident(self, now: Optional[float] = None) -> bool:
-        """Enough corroboration to let this influence blocking."""
-        return (self._readings >= self.MIN_READINGS
-                and not self.is_stale(now))
+        """Enough corroboration to let this influence blocking.
+
+        MIN_READINGS guards against a single MISREAD NUMBER pinning a block --
+        the whole reason the quarantine exists. A label-derived reading carries
+        no such risk: there is no number to misread, only the presence of
+        "Skip in", which states that the skip gate has not opened yet.
+
+        Requiring two sightings of it was the binding constraint in practice.
+        OCR frequently yields exactly one readable frame at the start of an ad
+        and then returns nothing at all for several seconds; measured over an
+        hour, blocks that ran short had a median of ONE frame with any text
+        while blocks that ran to completion had 29. With MIN_READINGS the clock
+        could never become confident in the first case, so it never held, and
+        the block died to empty OCR frames while the ad was still on screen.
+
+        One sighting is also already the standard applied elsewhere: "skip in"
+        is in DEFINITIVE_AD_KEYWORD_NAMES, so a single frame of it is trusted
+        enough to START a block with no dwell. Demanding two to HOLD one was
+        inconsistent. The exposure is bounded either way -- a label anchor only
+        ever buys SKIP_LABEL_ASSUMED_S, it can never end a block, and the audio
+        pause check still releases it.
+        """
+        needed = 1 if self._from_label else self.MIN_READINGS
+        return self._readings >= needed and not self.is_stale(now)
 
     def should_hold(self, now: Optional[float] = None) -> bool:
         """Does the clock say the ad is definitely still running?
