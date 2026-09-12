@@ -655,23 +655,15 @@ class TestAssumedGateLength(unittest.TestCase):
     ended at 5-6s, the constant's own length.
     """
 
-    def test_assumption_outlasts_a_typical_ocr_label_dropout(self):
-        """The label is legible on roughly one frame in three, so the hold has
-        to bridge the frames where it is missed."""
-        self.assertGreaterEqual(SKIP_LABEL_ASSUMED_S, 8)
+    def test_assumption_cannot_outlast_the_shortest_ads(self):
+        """Some platforms run 5-second ads. Guessing longer than that pins the
+        overlay over content that has already come back, and the clock is a
+        combination signal, never a definite flag -- when it is guessing it
+        should guess small and let OCR/VLM/ASR decide."""
+        self.assertLessEqual(SKIP_LABEL_ASSUMED_S, 5)
 
-    def test_assumption_stays_well_inside_the_recovery_budget(self):
-        """It is also the worst-case over-hold once the ad really has ended."""
-        self.assertLessEqual(SKIP_LABEL_ASSUMED_S, 15)
-
-    def test_hold_survives_a_gap_that_used_to_end_the_block(self):
-        t = AdCountdownTracker()
-        n = 1000.0
-        for i in range(3):
-            t.observe(SKIP_LABEL_ASSUMED_S, n + i, is_skip_bound=True,
-                      synthetic=True)
-        # 6s after the last sighting the old constant had already lapsed.
-        self.assertTrue(t.should_hold(n + 2 + 6))
+    def test_assumption_is_still_long_enough_to_be_worth_having(self):
+        self.assertGreaterEqual(SKIP_LABEL_ASSUMED_S, 3)
 
     def test_hold_still_lapses_rather_than_pinning_the_overlay(self):
         t = AdCountdownTracker()
@@ -702,12 +694,26 @@ class TestSingleLabelSightingHolds(unittest.TestCase):
     """
 
     def test_one_label_sighting_holds_through_an_ocr_dropout(self):
+        """Before this, a single sighting gave NO hold at all -- the clock
+        needed two readings it was never going to get. Now it holds for the
+        assumed window from the last sighting, whatever that window is set to.
+        """
         t = AdCountdownTracker()
         n = 1000.0
         t.observe(SKIP_LABEL_ASSUMED_S, n, is_skip_bound=True, synthetic=True)
         self.assertTrue(t.is_confident(n))
-        # 5.7s was the exact point production used to give up.
-        self.assertTrue(t.should_hold(n + 5.7))
+        self.assertTrue(t.should_hold(n + SKIP_LABEL_ASSUMED_S - 0.5))
+
+    def test_each_further_sighting_extends_the_hold(self):
+        """The label being re-read is what carries a long unskippable phase;
+        the assumed constant only has to bridge the gaps between sightings."""
+        t = AdCountdownTracker()
+        n = 1000.0
+        for i in range(6):
+            t.observe(SKIP_LABEL_ASSUMED_S, n + i * 2, is_skip_bound=True,
+                      synthetic=True)
+        # Held continuously across 10s of ad despite a 5s assumed window.
+        self.assertTrue(t.should_hold(n + 10 + SKIP_LABEL_ASSUMED_S - 0.5))
 
     def test_the_hold_still_lapses(self):
         t = AdCountdownTracker()
