@@ -234,6 +234,11 @@ class AutonomousMode:
         self._active = False           # Currently in active window
         self._running = False          # Thread running
         self._manual_override = False  # User manually started outside schedule
+        # When this returns True the TV is on and showing our pipeline, which
+        # means a person is watching. Autonomous mode drives the remote, so it
+        # has to get out of the way. See _display_in_use().
+        self._display_in_use_predicate = None
+        self._display_suppressed = False
 
         # Schedule (configurable)
         self._start_hour = self.DEFAULT_START_HOUR
@@ -745,6 +750,29 @@ class AutonomousMode:
             self._thread.join(timeout=5.0)
             self._thread = None
 
+    def set_display_in_use_predicate(self, predicate):
+        """Install the check for 'someone is actually watching the TV'.
+
+        Mirrors the status-LED drive_predicate idiom. Passing None removes it.
+        """
+        with self._lock:
+            self._display_in_use_predicate = predicate
+
+    def _display_in_use(self) -> bool:
+        """Is the TV on with our display pipeline running?
+
+        Fails OPEN -- an unreadable display state returns False so a flaky
+        probe can never silently stop autonomous mode from ever running.
+        """
+        pred = self._display_in_use_predicate
+        if pred is None:
+            return False
+        try:
+            return bool(pred())
+        except Exception as e:
+            logger.debug(f"[AutonomousMode] display-in-use check failed: {e}")
+            return False
+
     def _run_loop(self):
         """Main autonomous mode loop."""
         logger.info("[AutonomousMode] Monitoring thread started")
@@ -756,11 +784,29 @@ class AutonomousMode:
             try:
                 should_be_active = self._manual_override or self.is_scheduled_time()
 
+                # The TV coming on means someone is trying to watch it. This
+                # overrides EVERYTHING, manual override included: a person
+                # reaching for the remote is a stronger signal than any way
+                # this session was started, and autonomous mode driving the
+                # device would fight them for it.
+                display_busy = self._display_in_use()
+                if display_busy:
+                    if not self._display_suppressed:
+                        self._display_suppressed = True
+                        logger.info("[AutonomousMode] Display is in use — "
+                                    "standing down so it does not interfere")
+                    should_be_active = False
+                elif self._display_suppressed:
+                    self._display_suppressed = False
+                    logger.info("[AutonomousMode] Display no longer in use — "
+                                "autonomous mode may resume")
+
                 if should_be_active and not self._active:
                     # Activate autonomous mode
                     self._activate()
-                elif not should_be_active and self._active and not self._manual_override:
-                    # Deactivate (only if not manual override)
+                elif not should_be_active and self._active and (
+                        not self._manual_override or display_busy):
+                    # Deactivate (manual override yields only to the display)
                     self._deactivate()
 
                 if self._active:
