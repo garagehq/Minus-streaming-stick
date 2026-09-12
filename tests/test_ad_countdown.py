@@ -88,6 +88,19 @@ class TestParsing(unittest.TestCase):
         """Video runtime and ad timer both on screen: the ad is the shorter."""
         self.assertEqual(parse_ad_remaining(['Ad 0:12', '4:35']), 12)
 
+    def test_rejects_a_wall_clock_as_an_ad_timer(self):
+        """Caught live: "CIil | 12:49 | a" parsed as 769 seconds.
+
+        12:49 is a clock, not an ad timer, and a fabricated 12-minute
+        deadline is exactly what could pin a block. Real ad breaks top out
+        around 2-3 minutes.
+        """
+        self.assertIsNone(parse_ad_remaining(['CIil', '12:49', 'a']))
+        self.assertIsNone(parse_ad_remaining(['10:30']))
+
+    def test_still_accepts_a_long_but_plausible_ad(self):
+        self.assertEqual(parse_ad_remaining(['Ad 2:30']), 150)
+
     def test_rejects_implausible_and_absent(self):
         for texts in ([], None, ['no numbers here'], ['Ad 0:00'], ['99:99']):
             self.assertIsNone(parse_ad_remaining(texts), texts)
@@ -379,6 +392,34 @@ class TestEngineIntegration(unittest.TestCase):
         """TV off routes playback to fakesink; that is not the viewer pausing."""
         m = self._minus(hold=True, state='null', level=0.0)
         self.assertFalse(m._playback_looks_paused())
+
+
+class TestVetoAppliesToEverySource(unittest.TestCase):
+    """The clock must outrank VLM too, not just OCR.
+
+    Observed live: an ad flapped through 6 blocks in 27 seconds and every one
+    ended "stopped by BOTH" -- VLM was ending them. A veto living only inside
+    _ocr_says_stop never got a vote on those, so it has to sit above the
+    per-source branches in _update_blocking_state.
+    """
+
+    def _body(self):
+        """The whole _update_blocking_state method."""
+        src = (ROOT / 'minus.py').read_text()
+        start = src.index('    def _update_blocking_state')
+        nxt = src.index('\n    def ', start + 10)
+        return src[start:nxt]
+
+    def test_veto_is_consulted_in_update_blocking_state(self):
+        self.assertIn('_ad_clock_says_playing', self._body(),
+                      'the clock must gate the stop decision for every source')
+
+    def test_veto_runs_before_the_per_source_branches(self):
+        body = self._body()
+        veto = body.index('_ad_clock_says_playing')
+        branch = body.index('should_stop = vlm_says_stop')
+        self.assertLess(veto, branch,
+                        'the veto must precede the VLM/OCR/both branches')
 
 
 class TestScenario(unittest.TestCase):

@@ -3606,6 +3606,18 @@ class Minus:
                 should_stop = False
 
                 min_duration = self._current_min_blocking_duration()
+
+                # The ad's own countdown outranks every detector, not just
+                # OCR. Observed live: an ad flapped through 6 blocks in 27s
+                # and every one ended "stopped by BOTH" -- VLM was ending
+                # them, so a veto living only inside _ocr_says_stop never got
+                # a vote. If the clock says the ad is still running, nothing
+                # should end the block. Same guards as before: corroborated
+                # readings only, expires, and a frozen clock (a pause) never
+                # holds.
+                if self._ad_clock_says_playing(now):
+                    return
+
                 if blocking_elapsed >= min_duration:
                     ocr_says_stop = self._ocr_says_stop()
                     # For VLM stopping, use consecutive no-ad count (not sliding window)
