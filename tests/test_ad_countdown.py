@@ -75,6 +75,21 @@ class TestParsing(unittest.TestCase):
         for texts in ([], None, ['no numbers here'], ['Ad 0:00'], ['99:99']):
             self.assertIsNone(parse_ad_remaining(texts), texts)
 
+    def test_countdown_split_across_ocr_elements(self):
+        """The live shape: OCR returns the label and the digit separately.
+
+        Observed on the device as "Sponsored | Skip in | 5".
+        """
+        self.assertEqual(parse_skip_in(['Sponsored', 'Skip in', '5']), 5)
+        self.assertEqual(parse_skip_in(['Sponsored | Skip in | 5']), 5)
+        self.assertEqual(parse_ad_remaining(['Ad', '0:15']), 15)
+        self.assertEqual(parse_ad_remaining(['Ad | 10']), 10)
+
+    def test_skip_intro_is_not_a_countdown(self):
+        """'Skip Intro' is a show control, not an ad timer."""
+        self.assertIsNone(parse_skip_in(['Skip Intro']))
+        self.assertIsNone(parse_ad_remaining(['Skip Intro']))
+
     def test_skip_in(self):
         self.assertEqual(parse_skip_in(['Skip in 5']), 5)
         self.assertEqual(parse_skip_in(['Skip Ad in 12s']), 12)

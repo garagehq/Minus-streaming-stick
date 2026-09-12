@@ -50,11 +50,17 @@ _DIGIT_FIX = str.maketrans({
 _TS_RE = re.compile(r'(?<![0-9])([0-9oOlIisS]{1,2})[:;.]([0-9oOlIisS]{2})(?![0-9])')
 
 # "Ad 15" / "Ad15" -- Netflix-style bare seconds countdown.
-_BARE_RE = re.compile(r'\bad\s*([0-9oOlIisS]{1,2})\b')
+_BARE_RE = re.compile(r'\bad' + r'[\s|·,]{0,3}' + r'([0-9oOlIisS]{1,2})\b')
 
 # "Skip in 5" / "Skip ad in 12s". This is time until the SKIP BUTTON
 # appears, not until the ad ends, so it is only a lower bound.
-_SKIP_RE = re.compile(r'skip\s*(?:ad\s*)?(?:in\s*)?([0-9oOlIisS]{1,2})\s*s?\b')
+# OCR frequently returns the label and the digit as SEPARATE text elements,
+# which arrive here joined -- observed live as "Sponsored | Skip in | 5". A
+# short run of separator characters is therefore allowed between the label and
+# the number. Kept short so a digit elsewhere on screen cannot be captured.
+_SEP = r'[\s|:·,.\-]{0,4}'
+_SKIP_RE = re.compile(r'skip' + _SEP + r'(?:ad' + _SEP + r')?(?:in' + _SEP + r')?'
+                      r'([0-9oOlIisS]{1,2})\s*s?\b')
 
 # An ad is not an hour long. A parsed value beyond this is a misread, or a
 # programme runtime that wandered into the ad text.
