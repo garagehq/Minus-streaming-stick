@@ -142,6 +142,34 @@ def parse_ad_remaining(texts) -> Optional[int]:
     return None
 
 
+# "Skip in" with the digit missing. OCR drops the countdown number constantly
+# -- measured live on a Disney+ pre-roll, 0 of 36 in-block frames yielded a
+# number while "Skip in" / "Skip I" was plainly on screen. The label alone
+# still carries a fact: the skip button is NOT yet available, so the ad is in
+# its unskippable opening phase and is definitely still running. "Skip intro"
+# is a show control and must never match.
+_SKIP_LABEL_RE = re.compile(r'skip' + r'[\s|:·,.\-]{0,4}' + r'(?:ad[\s|:·,.\-]{0,4})?i(?:n\b|\b)')
+_SKIP_INTRO_RE = re.compile(r's[k]?[i1lI]p[\s|:·,.\-]{0,4}[i1lI]ntro')
+
+# How long to assume an unskippable phase lasts when the digit is unreadable.
+# Streaming skip gates are ~5s. Deliberately short: it refreshes for as long
+# as the label keeps being read, and lapses within this window once the label
+# goes, so it can only ever hold slightly past the real skip gate.
+SKIP_LABEL_ASSUMED_S = 5
+
+
+def has_skip_countdown_label(texts) -> bool:
+    """True when "Skip in" is on screen but its digit was not readable."""
+    if not texts:
+        return False
+    low = ' '.join(str(t) for t in texts if t).lower()
+    if _SKIP_INTRO_RE.search(low):
+        return False
+    if parse_skip_in(texts) is not None:
+        return False        # the digit WAS readable; use the real number
+    return bool(_SKIP_LABEL_RE.search(low))
+
+
 def parse_skip_in(texts) -> Optional[int]:
     """Seconds until the skip button appears. Lower bound on ad length."""
     if not texts:
@@ -193,7 +221,7 @@ class AdCountdownTracker:
         self._pending_count = 0
 
     def observe(self, seconds: Optional[int], now: Optional[float] = None,
-                is_skip_bound: bool = False) -> None:
+                is_skip_bound: bool = False, synthetic: bool = False) -> None:
         """Record a countdown reading. None means the frame had no clock.
 
         Three cases, and the distinction between them is the whole point:
@@ -223,7 +251,14 @@ class AdCountdownTracker:
         # Freshness and the frozen-clock check follow every observation,
         # adopted or not: "the same number keeps arriving" is what a pause
         # looks like, regardless of whether we act on the number.
-        if seconds != self._last_value or not self._value_since:
+        #
+        # Synthetic readings are exempt. They come from a countdown LABEL whose
+        # digit was unreadable, so the value is a constant we chose -- it
+        # repeats by construction and would trip the freeze detector on every
+        # ad, killing the hold it exists to provide. Pause protection for this
+        # path comes from audio instead (_playback_looks_paused), which is the
+        # authoritative playback signal and does not depend on the number.
+        if synthetic or seconds != self._last_value or not self._value_since:
             self._value_since = now
         self._last_value = seconds
         self._last_seen = now

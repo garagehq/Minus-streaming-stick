@@ -4204,7 +4204,9 @@ class Minus:
                     # never end one.
                     if self.AD_COUNTDOWN_ENABLED:
                         try:
-                            from ad_countdown import parse_ad_remaining, parse_skip_in
+                            from ad_countdown import (parse_ad_remaining, parse_skip_in,
+                                                      has_skip_countdown_label,
+                                                      SKIP_LABEL_ASSUMED_S)
                             secs = parse_ad_remaining(all_texts)
                             if secs is not None:
                                 self.ad_countdown.observe(secs, is_skip_bound=False)
@@ -4216,6 +4218,23 @@ class Minus:
                                     self.ad_countdown.observe(skip_s, is_skip_bound=True)
                                     self.ad_clock_stats['parsed'] += 1
                                     self.ad_clock_stats['last_value'] = f"skip:{skip_s}"
+                                elif has_skip_countdown_label(all_texts):
+                                    # "Skip in" with the digit unreadable.
+                                    # Measured live: 0 of 36 in-block frames on
+                                    # a Disney+ pre-roll yielded a number while
+                                    # the label was plainly on screen. The label
+                                    # alone still states a fact -- the skip gate
+                                    # has not opened, so the ad is definitely
+                                    # still running. Assume the usual ~5s gate;
+                                    # it refreshes while the label keeps being
+                                    # read and lapses once it goes. Marked
+                                    # skip-bound so it can hold a block but can
+                                    # never declare the ad over.
+                                    self.ad_countdown.observe(SKIP_LABEL_ASSUMED_S,
+                                                              is_skip_bound=True,
+                                                              synthetic=True)
+                                    self.ad_clock_stats['parsed'] += 1
+                                    self.ad_clock_stats['last_value'] = 'skip-label'
                         except Exception as e:
                             logger.debug(f"ad countdown parse failed: {e}")
                     # Record timestamp if any "strong" keyword (Skip in / Skip Ad /
