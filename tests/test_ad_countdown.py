@@ -238,12 +238,26 @@ class TestEngineIntegration(unittest.TestCase):
         m.ad_countdown.remaining.return_value = remaining
         m.audio = MagicMock()
         m.audio.get_status.return_value = {'state': state, 'recent_level': level}
+        # Observability counters the engine bumps as it decides.
+        m.ad_clock_stats = {'parsed': 0, 'holds': 0, 'early_release': 0,
+                            'pause_override': 0, 'last_value': None}
+        m._ad_clock_log_last = 0.0
         return m
 
     def test_clock_holds_the_block_against_the_counters(self):
         """Counters say stop, clock says 12s left. The clock wins."""
         m = self._minus(hold=True, remaining=12.0)
         self.assertFalse(m._ocr_says_stop())
+        self.assertEqual(m.ad_clock_stats['holds'], 1, 'the hold must be counted')
+
+    def test_counters_record_what_the_clock_did(self):
+        """The signal has to be observable, or a soak can only guess."""
+        m = self._minus(expired=True, no_ad=3, last_hit_ago=1.0)
+        m._ocr_says_stop()
+        self.assertEqual(m.ad_clock_stats['early_release'], 1)
+        m2 = self._minus(hold=True, remaining=9.0, level=0.0)
+        m2._ocr_says_stop()
+        self.assertEqual(m2.ad_clock_stats['pause_override'], 1)
 
     def test_silent_audio_overrides_the_clock(self):
         """Paused mid-ad: audio drops, so the hold is abandoned."""
