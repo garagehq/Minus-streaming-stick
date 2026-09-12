@@ -182,35 +182,80 @@ class AdCountdownTracker:
         self._last_seen = 0.0       # when we last parsed any value
         self._value_since = 0.0     # when _last_value was first seen
         self._is_skip_bound = False  # from "skip in", a lower bound only
+        # Quarantine for readings that contradict an established countdown.
+        self._pending_deadline = 0.0
+        self._pending_count = 0
 
     def observe(self, seconds: Optional[int], now: Optional[float] = None,
                 is_skip_bound: bool = False) -> None:
-        """Record a countdown reading. None means the frame had no clock."""
+        """Record a countdown reading. None means the frame had no clock.
+
+        Three cases, and the distinction between them is the whole point:
+
+        AGREES -- the reading is close to what the running clock projects.
+        Re-anchor on it. This is how 0:15 then 0:12 becomes a 12-second
+        deadline: each agreeing reading retargets, absorbing OCR cadence
+        jitter and any drift.
+
+        CONTRADICTS, with no clock running -- bootstrap. One reading is
+        never enough to hold a block (MIN_READINGS), so this is safe.
+
+        CONTRADICTS an established clock -- quarantine it. A jump from 0:15
+        to 0:99 is far more likely a misread than a real ad, so it must NOT
+        reassign the deadline on the spot; doing that both fabricates a
+        99-second hold and throws away the corroboration already earned,
+        collapsing a legitimate hold mid-ad. The value is held aside instead
+        and only adopted once a LATER reading agrees with IT -- 0:99 followed
+        by 0:97. That is also exactly how a genuine resync looks when the
+        next ad in a pod starts, so real transitions are still picked up,
+        just one reading later.
+        """
         if seconds is None:
             return
         now = now if now is not None else time.time()
-        projected = self._deadline - now if self._deadline else None
 
-        if projected is not None and abs(projected - seconds) <= self.TOLERANCE_S:
-            # Consistent with the running countdown: corroboration.
-            self._readings += 1
-        else:
-            # A new or re-synced countdown (next ad in the pod, or the first
-            # reading). Start over rather than averaging two different ads.
-            self._readings = 1
-
-        if seconds == self._last_value:
-            # Same number again; keep the original timestamp so a frozen
-            # clock is measurable.
-            if not self._value_since:
-                self._value_since = now
-        else:
+        # Freshness and the frozen-clock check follow every observation,
+        # adopted or not: "the same number keeps arriving" is what a pause
+        # looks like, regardless of whether we act on the number.
+        if seconds != self._last_value or not self._value_since:
             self._value_since = now
-
-        self._deadline = now + seconds
         self._last_value = seconds
         self._last_seen = now
+
+        established = self._deadline > 0 and self._readings > 0
+        projected = (self._deadline - now) if established else None
+
+        if projected is not None and abs(projected - seconds) <= self.TOLERANCE_S:
+            self._readings += 1
+            self._anchor(seconds, now, is_skip_bound)
+            return
+
+        if not established:
+            self._readings = 1
+            self._anchor(seconds, now, is_skip_bound)
+            return
+
+        # Contradicts a running clock: quarantine rather than reassign.
+        pending_projected = ((self._pending_deadline - now)
+                             if self._pending_count else None)
+        if (pending_projected is not None
+                and abs(pending_projected - seconds) <= self.TOLERANCE_S):
+            self._pending_count += 1
+            self._pending_deadline = now + seconds
+            if self._pending_count >= self.MIN_READINGS:
+                # Corroborated twice: this really is a different countdown.
+                self._readings = self._pending_count
+                self._anchor(seconds, now, is_skip_bound)
+        else:
+            self._pending_deadline = now + seconds
+            self._pending_count = 1
+
+    def _anchor(self, seconds: int, now: float, is_skip_bound: bool) -> None:
+        """Adopt a reading as the live countdown."""
+        self._deadline = now + seconds
         self._is_skip_bound = is_skip_bound
+        self._pending_deadline = 0.0
+        self._pending_count = 0
 
     def remaining(self, now: Optional[float] = None) -> float:
         """Seconds the ad is still expected to run. 0 once it has elapsed."""
