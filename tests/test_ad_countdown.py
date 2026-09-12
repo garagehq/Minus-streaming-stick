@@ -411,6 +411,7 @@ class TestEngineIntegration(unittest.TestCase):
         m.OCR_STOP_THRESHOLD = 3
         m.OCR_STOP_THRESHOLD_MAX = 6
         m.OCR_STOP_MIN_SECONDS = 5.0
+        m.OCR_STOP_MAX_SECONDS = 9.0
         m.flap_escalation = 0
         m.ocr_no_ad_count = no_ad
         m.last_ocr_ad_time = time.time() - last_hit_ago

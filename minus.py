@@ -625,6 +625,14 @@ class Minus:
         # halved flap resistance and took the flap rate from 4.2% to 66%.
         self.OCR_STOP_MIN_SECONDS = float(
             os.environ.get('MINUS_OCR_STOP_MIN_SECONDS', '5.0'))
+        # Ceiling for the escalating version of the floor below. Anti-flap
+        # escalation used to raise only the FRAME count, but the frames were
+        # never the binding constraint -- measured live, flapping blocks ended
+        # at 5.1-5.7s "stopped by OCR", i.e. exactly ON the wall-clock floor,
+        # with the ad text returning 1-2s later. The floor is what needs to
+        # stretch on a flappy ad, and only on a flappy ad.
+        self.OCR_STOP_MAX_SECONDS = float(
+            os.environ.get('MINUS_OCR_STOP_MAX_SECONDS', '9.0'))
         self.FLAP_REBLOCK_WINDOW_S = float(
             os.environ.get('MINUS_FLAP_REBLOCK_WINDOW', '5.0'))
         self.OCR_STOP_THRESHOLD_MAX = int(
@@ -3409,6 +3417,16 @@ class Minus:
         except Exception:
             return False
 
+    def _effective_ocr_stop_seconds(self) -> float:
+        """Wall-clock floor for stopping, after anti-flap escalation.
+
+        Grows by a second per observed flap, capped. A clean ad keeps the
+        base floor and its fast recovery; only an ad that has already proved
+        it flaps pays the extra wait.
+        """
+        return min(self.OCR_STOP_MIN_SECONDS + self.flap_escalation,
+                   max(self.OCR_STOP_MIN_SECONDS, self.OCR_STOP_MAX_SECONDS))
+
     def _ocr_says_stop(self) -> bool:
         """Whether OCR has seen enough no-ad evidence to end a block.
 
@@ -3447,7 +3465,7 @@ class Minus:
             logger.info("[AdClock] countdown expired — releasing without the wall-clock floor")
             return True
 
-        return (now - self.last_ocr_ad_time) >= self.OCR_STOP_MIN_SECONDS
+        return (now - self.last_ocr_ad_time) >= self._effective_ocr_stop_seconds()
 
     def _update_blocking_state(self):
         """Update combined blocking state using weighted OCR/VLM model."""
@@ -3640,7 +3658,7 @@ class Minus:
                     # contradict it. OCR's own stop path, the max-duration cap
                     # and the frozen-stream safeguard all still end the block.
                     if (vlm_says_stop and self.last_ocr_ad_time > 0
-                            and (now - self.last_ocr_ad_time) < self.OCR_STOP_MIN_SECONDS):
+                            and (now - self.last_ocr_ad_time) < self._effective_ocr_stop_seconds()):
                         vlm_says_stop = False
                         self.ad_clock_stats['vlm_deferred'] = (
                             self.ad_clock_stats.get('vlm_deferred', 0) + 1)
