@@ -37,7 +37,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src'))
 sys.path.insert(0, str(ROOT))
 
-from ad_countdown import (AdCountdownTracker, parse_ad_remaining,  # noqa: E402
+from ad_countdown import (AdCountdownTracker, SKIP_LABEL_ASSUMED_S,  # noqa: E402
+                          has_skip_countdown_label, parse_ad_remaining,
                           parse_skip_in)
 
 
@@ -124,6 +125,95 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(parse_skip_in(['Skip in 5']), 5)
         self.assertEqual(parse_skip_in(['Skip Ad in 12s']), 12)
         self.assertIsNone(parse_skip_in(['Skip Ad']))
+
+
+class TestUnreadableSkipDigit(unittest.TestCase):
+    """OCR drops the countdown digit constantly.
+
+    Measured live on a Disney+ pre-roll: 0 of 36 in-block frames yielded a
+    number while "Skip in" / "Skip I" was plainly on screen, and 20 of those
+    36 frames read pure garbage ("O07"). The label alone still states a fact --
+    the skip gate has not opened, so the ad is definitely still running -- so
+    it is worth a bounded hold even without a number.
+    """
+
+    REAL_FRAMES = [
+        ['Sponsored • Now streaming', 'Send to phone', '90+', 'Skip I',
+         'disneyplus.com', 'The Devil Wears'],
+        ['Sponsored · Now streaming', 'Send to phone', 'Skip in',
+         'disneyplus.com', 'TheDevilWarsPrada'],
+    ]
+
+    def test_detects_the_label_on_real_frames(self):
+        for f in self.REAL_FRAMES:
+            self.assertTrue(has_skip_countdown_label(f), f)
+
+    def test_a_readable_digit_takes_precedence(self):
+        """When the number IS readable, use it rather than the assumption."""
+        self.assertFalse(has_skip_countdown_label(['Skip in 5']))
+        self.assertEqual(parse_skip_in(['Skip in 5']), 5)
+
+    def test_skip_intro_never_matches(self):
+        """A show control, not an ad timer."""
+        for t in (['Skip Intro'], ['Sk1p 1ntro'], ['skip intro']):
+            self.assertFalse(has_skip_countdown_label(t), t)
+
+    def test_ready_skip_button_is_not_a_countdown(self):
+        """'Skip' alone means the gate is already open."""
+        for t in (['Skip'], ['skip ad'], ['Sponsored']):
+            self.assertFalse(has_skip_countdown_label(t), t)
+
+    def test_hold_persists_across_the_real_read_pattern(self):
+        """The label is legible on roughly one frame in three."""
+        t = AdCountdownTracker()
+        n = 1000.0
+        reads = {0, 3, 6, 8, 11}
+        held = []
+        for i in range(17):
+            if i in reads:
+                t.observe(SKIP_LABEL_ASSUMED_S, n + i,
+                          is_skip_bound=True, synthetic=True)
+            held.append(t.should_hold(n + i))
+        self.assertTrue(all(held[4:13]),
+                        'the hold must bridge the frames OCR cannot read')
+
+    def test_hold_lapses_after_the_label_goes(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        for i in (0, 2, 4):
+            t.observe(SKIP_LABEL_ASSUMED_S, n + i, is_skip_bound=True, synthetic=True)
+        self.assertTrue(t.should_hold(n + 4))
+        self.assertFalse(t.should_hold(n + 4 + SKIP_LABEL_ASSUMED_S + 1))
+
+    def test_synthetic_readings_are_exempt_from_freeze(self):
+        """The assumed value is constant by construction.
+
+        Without the exemption it trips the frozen-clock detector on every ad
+        and kills the hold it exists to provide. Pause protection for this
+        path comes from audio instead.
+        """
+        t = AdCountdownTracker()
+        n = 1000.0
+        for i in range(10):
+            t.observe(SKIP_LABEL_ASSUMED_S, n + i, is_skip_bound=True, synthetic=True)
+        self.assertFalse(t.is_frozen(n + 9))
+        self.assertTrue(t.should_hold(n + 9))
+
+    def test_a_real_repeating_number_still_freezes(self):
+        """The exemption must not disarm pause detection for real readings."""
+        t = AdCountdownTracker()
+        n = 1000.0
+        for i in range(10):
+            t.observe(18, n + i)
+        self.assertTrue(t.is_frozen(n + 9))
+        self.assertFalse(t.should_hold(n + 9))
+
+    def test_label_hold_never_declares_the_ad_over(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        for i in (0, 2):
+            t.observe(SKIP_LABEL_ASSUMED_S, n + i, is_skip_bound=True, synthetic=True)
+        self.assertFalse(t.expired(n + 30))
 
 
 class TestTracker(unittest.TestCase):
