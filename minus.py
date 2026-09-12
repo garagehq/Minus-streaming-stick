@@ -513,6 +513,17 @@ class Minus:
         # frame often lingers, so do not declare the ad over the instant the
         # clock hits zero.
         self.AD_COUNTDOWN_GRACE_S = float(os.environ.get('MINUS_AD_COUNTDOWN_GRACE', '2.0'))
+        # Observability. Without these the only way to tell whether the clock
+        # is doing anything is to infer it from block timings, which is
+        # exactly the kind of guessing this feature exists to replace.
+        self.ad_clock_stats = {
+            'parsed': 0,        # frames a countdown was read from
+            'holds': 0,         # stops vetoed because time remained
+            'early_release': 0, # stops allowed early because it expired
+            'pause_override': 0,  # holds abandoned because playback paused
+            'last_value': None,
+        }
+        self._ad_clock_log_last = 0.0
         self.home_screen_detected = False   # True if home screen keywords found
         self.home_screen_detect_time = 0    # When home screen was last detected
         self.video_interface_detected = False  # True if video player interface detected
@@ -2204,6 +2215,22 @@ class Minus:
             'keywords': [kw for kw, _ in matched_keywords] if matched_keywords else [],
         })
 
+    def ad_clock_snapshot(self) -> dict:
+        """Ad-countdown state for /api/status, so the signal is observable.
+
+        Counters plus the live tracker view, so a monitor can tell whether
+        the clock is parsing anything, holding blocks, or being overridden by
+        a pause -- rather than inferring it from block timings.
+        """
+        out = dict(getattr(self, 'ad_clock_stats', {}) or {})
+        out['enabled'] = getattr(self, 'AD_COUNTDOWN_ENABLED', False)
+        try:
+            if getattr(self, 'ad_countdown', None) is not None:
+                out.update(self.ad_countdown.status())
+        except Exception:
+            pass
+        return out
+
     def get_status_dict(self) -> dict:
         """Get current status as dictionary for web API."""
         # Get health status if available
@@ -2261,6 +2288,7 @@ class Minus:
             'hdmi_reconnect_grace': self.is_in_hdmi_reconnect_grace(),
             'hdmi_reconnect_grace_remaining': self.get_hdmi_reconnect_grace_remaining(),
             'thermal_degraded': self.thermal_degraded,
+            'ad_clock': self.ad_clock_snapshot(),
             'thermal': (self.thermal_monitor.get_status() if self.thermal_monitor
                         else {'degraded': False, 'temp_c': None,
                               'throttled': False, 'forced': None}),
@@ -3344,7 +3372,15 @@ class Minus:
             # second, independent check for a pause that the clock has not
             # caught up with yet (audio drops the instant playback stops).
             if self._playback_looks_paused():
+                self.ad_clock_stats['pause_override'] += 1
+                logger.info("[AdClock] playback looks paused — releasing the hold")
                 return False
+            self.ad_clock_stats['holds'] += 1
+            # Rate-limited: this fires on every OCR cycle of a held block.
+            if now - self._ad_clock_log_last >= 5.0:
+                self._ad_clock_log_last = now
+                logger.info(f"[AdClock] holding block — {self.ad_countdown.remaining(now):.0f}s "
+                            f"left on the ad's own countdown")
             return True
         except Exception as e:
             logger.debug(f"ad clock check failed: {e}")
@@ -3406,6 +3442,8 @@ class Minus:
         # floor exists to ride out mid-ad dropouts, and there is no mid-ad
         # left to ride out.
         if self.AD_COUNTDOWN_ENABLED and self.ad_countdown.expired(now):
+            self.ad_clock_stats['early_release'] += 1
+            logger.info("[AdClock] countdown expired — releasing without the wall-clock floor")
             return True
 
         return (now - self.last_ocr_ad_time) >= self.OCR_STOP_MIN_SECONDS
@@ -4158,10 +4196,14 @@ class Minus:
                             secs = parse_ad_remaining(all_texts)
                             if secs is not None:
                                 self.ad_countdown.observe(secs, is_skip_bound=False)
+                                self.ad_clock_stats['parsed'] += 1
+                                self.ad_clock_stats['last_value'] = secs
                             else:
                                 skip_s = parse_skip_in(all_texts)
                                 if skip_s is not None:
                                     self.ad_countdown.observe(skip_s, is_skip_bound=True)
+                                    self.ad_clock_stats['parsed'] += 1
+                                    self.ad_clock_stats['last_value'] = f"skip:{skip_s}"
                         except Exception as e:
                             logger.debug(f"ad countdown parse failed: {e}")
                     # Record timestamp if any "strong" keyword (Skip in / Skip Ad /
