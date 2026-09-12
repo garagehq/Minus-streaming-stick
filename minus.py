@@ -3600,6 +3600,22 @@ class Minus:
                                 f"{self._effective_ocr_stop_threshold()}")
                     else:
                         self.flap_escalation = 0
+                    # A new block must be judged on evidence gathered while it
+                    # is running. Without this the no-ad counters carry over
+                    # from before it started, so a re-block inherits a tally
+                    # that already meets the stop threshold. Observed live:
+                    #
+                    #   05:19:05 AD BLOCKING STARTED (OCR)
+                    #   05:19:05 OCR: ad no longer detected (after 4 no-ads)
+                    #   05:19:08 AD BLOCKING ENDED after 2.6s
+                    #
+                    # declared over in the same second it began, and ended
+                    # well inside the wall-clock floor. That instant re-stop
+                    # feeds straight back into a re-block, which is a large
+                    # part of the flapping the floors were meant to prevent.
+                    self.ocr_no_ad_count = 0
+                    self.vlm_no_ad_count = 0
+
                     # Reset skip and pause detection for new ad
                     self.accidental_pause_detected = False
                     self.skip_attempted_this_ad = False

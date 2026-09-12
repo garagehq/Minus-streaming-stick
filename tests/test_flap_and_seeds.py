@@ -90,6 +90,41 @@ class TestEffectiveThreshold(unittest.TestCase):
         self.assertEqual(_minus(base=5, cap=2)._effective_ocr_stop_threshold(), 5)
 
 
+class TestBlockStartsWithCleanEvidence(unittest.TestCase):
+    """A block must be judged on evidence gathered while it is running.
+
+    Observed live at check 6:
+
+        05:19:05 AD BLOCKING STARTED (OCR)
+        05:19:05 OCR: ad no longer detected (after 4 no-ads)
+        05:19:08 AD BLOCKING ENDED after 2.6s (stopped by OCR)
+
+    The block inherited a no-ad tally from before it existed, so it was
+    already eligible to stop the instant it began -- and ended well inside the
+    wall-clock floor. That instant re-stop feeds straight back into a
+    re-block, which is a large part of the flapping the floors exist to
+    prevent.
+    """
+
+    def test_start_clears_both_no_ad_counters(self):
+        src = (ROOT / 'minus.py').read_text()
+        start = src.index('    def _update_blocking_state')
+        body = src[start:src.index('\n    def ', start + 10)]
+        anchor = 'logger.warning(f"AD BLOCKING STARTED'
+        seg = body[body.index('if should_start:'):body.index(anchor)]
+        self.assertIn('self.ocr_no_ad_count = 0', seg)
+        self.assertIn('self.vlm_no_ad_count = 0', seg)
+
+    def test_counters_cleared_before_the_block_is_announced(self):
+        """Ordering matters: clear the tally, then start."""
+        src = (ROOT / 'minus.py').read_text()
+        start = src.index('    def _update_blocking_state')
+        body = src[start:src.index('\n    def ', start + 10)]
+        seg = body[body.index('if should_start:'):]
+        self.assertLess(seg.index('self.ocr_no_ad_count = 0'),
+                        seg.index('logger.warning(f"AD BLOCKING STARTED'))
+
+
 class TestFloorEscalatesWithFlaps(unittest.TestCase):
     """The wall-clock floor is what needs to stretch, not the frame count.
 
