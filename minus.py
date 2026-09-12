@@ -3418,14 +3418,20 @@ class Minus:
             return False
 
     def _effective_ocr_stop_seconds(self) -> float:
-        """Wall-clock floor for stopping, after anti-flap escalation.
+        """Wall-clock floor for stopping.
 
-        Grows by a second per observed flap, capped. A clean ad keeps the
-        base floor and its fast recovery; only an ad that has already proved
-        it flaps pays the extra wait.
+        This escalated with observed flaps for one cycle and the experiment
+        failed, so it is flat again. Measured across checks 5-7: flapping went
+        33% -> 44% -> 69% while recovery degraded from p50 5.0s to 7.0s and
+        block durations stretched from 5.0-5.7s to 5.0-7.3s. It was paying
+        recovery on every flappy ad and buying nothing, because this content
+        loses its ad text for 7-9s at a stretch -- longer than the 9s ceiling
+        could cover anyway, so the floor could never win that race.
+
+        Kept as a single accessor so the OCR stop path and the VLM deferral
+        cannot drift apart, and so a future attempt has one place to change.
         """
-        return min(self.OCR_STOP_MIN_SECONDS + self.flap_escalation,
-                   max(self.OCR_STOP_MIN_SECONDS, self.OCR_STOP_MAX_SECONDS))
+        return self.OCR_STOP_MIN_SECONDS
 
     def _ocr_says_stop(self) -> bool:
         """Whether OCR has seen enough no-ad evidence to end a block.
