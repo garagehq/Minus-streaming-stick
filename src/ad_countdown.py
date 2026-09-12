@@ -62,9 +62,15 @@ _SEP = r'[\s|:·,.\-]{0,4}'
 _SKIP_RE = re.compile(r'skip' + _SEP + r'(?:ad' + _SEP + r')?(?:in' + _SEP + r')?'
                       r'([0-9oOlIisS]{1,2})\s*s?\b')
 
-# An ad is not an hour long. A parsed value beyond this is a misread, or a
-# programme runtime that wandered into the ad text.
-MAX_PLAUSIBLE_SECONDS = 15 * 60
+# An ad timer is short. Anything longer is a wall clock, a programme runtime
+# or a misread that wandered into the ad text.
+#
+# Caught live: "CIil | 12:49 | a" parsed as 769 seconds. 12:49 is a clock, and
+# at the old 15-minute ceiling it sailed through -- a fabricated 12-minute
+# deadline is exactly the kind of thing that could pin a block. Real ad breaks
+# top out around 2-3 minutes, so 180s rejects the nonsense while leaving every
+# plausible ad timer intact.
+MAX_PLAUSIBLE_SECONDS = 180
 
 
 def _to_int(raw: str) -> Optional[int]:
