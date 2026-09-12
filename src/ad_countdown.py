@@ -30,7 +30,7 @@ evidence of a pause, and the caller corroborates it with audio.
 
 import re
 import time
-from typing import Optional
+from typing import List, Optional
 
 # OCR misreads digits in ad timers constantly. Documented in CLAUDE.md:
 # 0 -> o/O, 1 -> l/L/I/i, and the separator : -> ; or .
@@ -43,11 +43,20 @@ _DIGIT_FIX = str.maketrans({
 })
 
 # M:SS or MM:SS, allowing the misread characters above in either position.
-# Bounded by DIGITS only, not letters: the timer is very often glued to the
-# keyword ('Ad0:30', 'Ado:15'), so a letter before the first digit is the
-# normal case rather than a reason to reject. Digit bounds still stop us
-# slicing a longer number apart.
-_TS_RE = re.compile(r'(?<![0-9])([0-9oOlIisS]{1,2})[:;.]([0-9oOlIisS]{2})(?![0-9])')
+# Bounded by digits AND by the separator, not by letters: the timer is very
+# often glued to the keyword ('Ad0:30', 'Ado:15'), so a letter before the first
+# digit is the normal case rather than a reason to reject. The digit bounds
+# stop us slicing a longer number apart, and the separator bounds stop us
+# slicing an H:MM:SS runtime apart.
+#
+# The separator half was caught live: a 70-minute music mix shows its runtime
+# as "1:10:55", whose leading "1:10" is a perfectly well-formed M:SS and parsed
+# as a 70-second ad countdown on 286 non-ad frames in one night. MAX_PLAUSIBLE_
+# SECONDS cannot catch that -- 70 is an entirely plausible ad length. Refusing
+# to match when a colon sits on either side leaves real ad timers untouched
+# (nothing renders "Ad 0:30" inside a longer timestamp) and drops the whole
+# class.
+_TS_RE = re.compile(r'(?<![0-9:;.])([0-9oOlIisS]{1,2})[:;.]([0-9oOlIisS]{2})(?![0-9:;.])')
 
 # "Ad 15" / "Ad15" -- Netflix-style bare seconds countdown.
 _BARE_RE = re.compile(r'\bad' + r'[\s|·,]{0,3}' + r'([0-9oOlIisS]{1,2})\b')
@@ -137,7 +146,7 @@ def parse_ad_remaining(texts) -> Optional[int]:
     m = _BARE_RE.search(low_nopod)
     if m:
         v = _to_int(m.group(1))
-        if v is not None and 0 < v <= 120:
+        if v is not None and 0 < v <= MAX_SKIP_GATE_SECONDS:
             return v
     return None
 
@@ -170,16 +179,95 @@ def has_skip_countdown_label(texts) -> bool:
     return bool(_SKIP_LABEL_RE.search(low))
 
 
+# A standalone number sitting in its own OCR element, e.g. the "20" in
+# ['Sponsored', 'Skip in', 'Uber', 'Send to phone', '20', 'uber.com'].
+_LONE_NUM_RE = re.compile(r'^[0-9oOlIisS]{1,2}$')
+
+# A skip gate is ~5-30s in practice; nothing makes a viewer wait longer before
+# offering the button. A loose cap just lets unrelated on-screen numbers in --
+# the Uber creative that counts 20..14 also renders a "75" and a "73", and at
+# the old 120s ceiling the "75" was accepted as a countdown because it happened
+# to sit right after the label. Applies to both the adjacent and cross-element
+# forms.
+MAX_SKIP_GATE_SECONDS = 60
+
+
+def _skip_in_cross_element_candidates(texts) -> List[int]:
+    """Recover a skip countdown whose digit landed in a separate OCR element.
+
+    PaddleOCR returns each detected text box as its own element, and the
+    countdown digit on a YouTube skip button is its own box. The element
+    ORDER follows detection, not layout, so the digit routinely arrives
+    several elements away from the label -- measured overnight, the digit was
+    present on 46 of 107 'Skip in' frames but immediately after the label on
+    only 2. The adjacency-based regex therefore saw almost none of them and
+    the tracker fell back to a flat assumption for the rest.
+
+    Only ever a lower bound, same as the adjacent form. A candidate still has
+    to survive the tracker's corroboration before it can hold a block, so a
+    stray number that happens to be in range cannot pin anything on its own --
+    it has to decrement in real time across frames to be believed.
+    """
+    if not texts:
+        return []
+    elements = [str(t).strip() for t in texts if t and str(t).strip()]
+    label_at = None
+    for i, el in enumerate(elements):
+        if _SKIP_LABEL_RE.search(el.lower()):
+            label_at = i
+            break
+    if label_at is None:
+        return []
+    found = []
+    for i, el in enumerate(elements):
+        if i == label_at or not _LONE_NUM_RE.match(el):
+            continue
+        v = _to_int(el)
+        if v is None or not 0 < v <= MAX_SKIP_GATE_SECONDS:
+            continue
+        # Nearest to the label first; the smaller value breaks a tie, since a
+        # countdown is the number on screen that is heading for zero.
+        found.append((abs(i - label_at), v))
+    return [v for _, v in sorted(found)]
+
+
+def parse_skip_in_candidates(texts) -> List[int]:
+    """Every plausible skip countdown in the frame, best guess first.
+
+    A frame often contains more than one number that could be the countdown:
+    the real one, plus whatever the creative happens to render. Position alone
+    cannot separate them -- a Disney+ ad puts a static "33" right where the
+    countdown sits. Resolving it needs the running clock, which lives in
+    AdCountdownTracker, so the candidates are handed there rather than being
+    collapsed to one guess here. See AdCountdownTracker.observe_candidates.
+    """
+    if not texts:
+        return []
+    low = ' '.join(str(t) for t in texts if t).lower()
+    out = []
+    m = _SKIP_RE.search(low)
+    if m:
+        v = _to_int(m.group(1))
+        if v is not None and 0 < v <= MAX_SKIP_GATE_SECONDS:
+            out.append(v)
+    for v in _skip_in_cross_element_candidates(texts):
+        if v not in out:
+            out.append(v)
+    return out
+
+
 def parse_skip_in(texts) -> Optional[int]:
     """Seconds until the skip button appears. Lower bound on ad length."""
     if not texts:
         return None
     low = ' '.join(str(t) for t in texts if t).lower()
     m = _SKIP_RE.search(low)
-    if not m:
-        return None
-    v = _to_int(m.group(1))
-    return v if v is not None and 0 < v <= 120 else None
+    if m:
+        v = _to_int(m.group(1))
+        if v is not None and 0 < v <= MAX_SKIP_GATE_SECONDS:
+            return v
+    cands = _skip_in_cross_element_candidates(texts)
+    return cands[0] if cands else None
 
 
 class AdCountdownTracker:
@@ -219,6 +307,37 @@ class AdCountdownTracker:
         # Quarantine for readings that contradict an established countdown.
         self._pending_deadline = 0.0
         self._pending_count = 0
+
+    def observe_candidates(self, candidates, now: Optional[float] = None,
+                           is_skip_bound: bool = False) -> Optional[int]:
+        """Observe the candidate that best fits the clock already running.
+
+        OCR hands back several numbers per frame and only one of them is the
+        countdown. Position is a weak tie-breaker and gets it wrong on real
+        creatives, but a countdown that is already anchored makes the choice
+        almost free: the right number is the one near where this clock says it
+        should be. Measured overnight, the noise values (a static 33, a
+        recurring 2) sit nowhere near the projection while the true reading
+        lands within a second of it.
+
+        With no clock running yet there is nothing to match against, so the
+        first candidate (nearest the label) is taken and MIN_READINGS still
+        stops it holding anything until a second reading agrees.
+
+        Returns the value actually observed, for logging.
+        """
+        if not candidates:
+            return None
+        now = now if now is not None else time.time()
+        chosen = candidates[0]
+        if self._deadline > 0 and self._readings > 0:
+            projected = self._deadline - now
+            fits = [c for c in candidates
+                    if abs(projected - c) <= self.TOLERANCE_S]
+            if fits:
+                chosen = min(fits, key=lambda c: abs(projected - c))
+        self.observe(chosen, now, is_skip_bound=is_skip_bound)
+        return chosen
 
     def observe(self, seconds: Optional[int], now: Optional[float] = None,
                 is_skip_bound: bool = False, synthetic: bool = False) -> None:

@@ -39,7 +39,7 @@ sys.path.insert(0, str(ROOT))
 
 from ad_countdown import (AdCountdownTracker, SKIP_LABEL_ASSUMED_S,  # noqa: E402
                           has_skip_countdown_label, parse_ad_remaining,
-                          parse_skip_in)
+                          parse_skip_in, parse_skip_in_candidates)
 
 
 class TestParsing(unittest.TestCase):
@@ -529,6 +529,119 @@ class TestScenario(unittest.TestCase):
             held.append(t.should_hold(now))
         self.assertTrue(all(held[2:28]), 'block must hold across the dropout')
         self.assertFalse(t.should_hold(start + 31), 'and release once elapsed')
+
+class TestCrossElementSkipCountdown(unittest.TestCase):
+    """OCR returns each text box separately, so the skip digit arrives as its
+    own element and rarely next to the label.
+
+    Measured over a 5h soak: the digit was present on 46 of 107 "Skip in"
+    frames but immediately after the label on 2, so the adjacency regex saw
+    almost none of them and the tracker ran on the flat assumed value instead.
+    """
+
+    def test_digit_several_elements_from_the_label(self):
+        els = ['Sponsored - Women Preferences', 'Skip in', 'Uber',
+               'Send to phone', '20', 'uber.com']
+        self.assertEqual(parse_skip_in(els), 20)
+
+    def test_digit_before_the_label(self):
+        els = ['Sponsored', '19', 'Skip in', 'Uber', 'Send to phone']
+        self.assertEqual(parse_skip_in(els), 19)
+
+    def test_adjacent_form_still_wins(self):
+        self.assertEqual(parse_skip_in(['Skip in 5']), 5)
+
+    def test_no_label_means_no_countdown(self):
+        """A number on screen is not a countdown without the label."""
+        self.assertIsNone(parse_skip_in(['Uber', '20', 'uber.com']))
+
+    def test_skip_intro_is_not_a_countdown(self):
+        self.assertIsNone(parse_skip_in(['Sponsored', 'Skip Intro', '12']))
+
+    def test_implausible_gate_rejected(self):
+        """A skip gate is never 90s; that number is something else on screen."""
+        self.assertIsNone(parse_skip_in(['Skip in', '90']))
+        self.assertEqual(parse_skip_in(['Skip in', '30']), 30)
+
+    def test_candidates_are_ordered_nearest_label_first(self):
+        els = ['Sponsored', 'Send to phone', '49', 'Skip I(', 'doordash.com',
+               '5', '29']
+        self.assertEqual(parse_skip_in_candidates(els)[0], 49)
+        self.assertIn(5, parse_skip_in_candidates(els))
+
+    def test_label_without_digit_still_reports_no_number(self):
+        self.assertIsNone(parse_skip_in(['Sponsored', 'Skip in', 'uber.com']))
+        self.assertTrue(has_skip_countdown_label(['Sponsored', 'Skip in']))
+
+
+class TestCandidateDisambiguation(unittest.TestCase):
+    """The creative renders numbers too, so more than one candidate is normal.
+
+    A Disney+ ad parks a static "33" where the countdown sits and a recurring
+    "2" shows up mid-countdown. Position cannot separate those from the real
+    reading; the running clock can.
+    """
+
+    def test_projection_picks_the_real_countdown_over_noise(self):
+        t = AdCountdownTracker()
+        now = 1000.0
+        self.assertEqual(t.observe_candidates([25, 2], now, is_skip_bound=True), 25)
+        # Noise listed FIRST from here on; the clock should still track truth.
+        self.assertEqual(t.observe_candidates([2, 24], now + 1, is_skip_bound=True), 24)
+        self.assertEqual(t.observe_candidates([2, 23], now + 2, is_skip_bound=True), 23)
+        self.assertAlmostEqual(t.remaining(now + 2), 23.0, places=1)
+        self.assertTrue(t.is_confident(now + 2))
+
+    def test_first_candidate_taken_with_no_clock_running(self):
+        t = AdCountdownTracker()
+        self.assertEqual(t.observe_candidates([15, 3], 1000.0, is_skip_bound=True), 15)
+
+    def test_single_reading_cannot_hold_a_block(self):
+        """MIN_READINGS still applies to a candidate-chosen value."""
+        t = AdCountdownTracker()
+        t.observe_candidates([33], 1000.0, is_skip_bound=True)
+        self.assertFalse(t.is_confident(1000.0))
+
+    def test_static_number_does_not_masquerade_as_a_countdown(self):
+        """A creative's fixed 33 repeats instead of counting down, so it reads
+        as frozen rather than as time left to hold on."""
+        t = AdCountdownTracker()
+        now = 1000.0
+        for i in range(8):
+            t.observe_candidates([33], now + i, is_skip_bound=True)
+        self.assertTrue(t.is_frozen(now + 8))
+
+    def test_empty_candidates_are_a_no_op(self):
+        t = AdCountdownTracker()
+        self.assertIsNone(t.observe_candidates([], 1000.0))
+
+
+class TestLongFormRuntimeIsNotACountdown(unittest.TestCase):
+    """An H:MM:SS runtime contains a well-formed M:SS.
+
+    A 70-minute music mix renders "1:10:55"; its leading "1:10" parsed as a
+    70-second countdown on 286 non-ad frames in a single night. The plausible-
+    seconds ceiling cannot catch it, because 70 seconds is a perfectly ordinary
+    ad length -- the tell is the trailing colon, not the magnitude.
+    """
+
+    def test_hour_long_runtime_is_rejected(self):
+        self.assertIsNone(parse_ad_remaining(['1:10:55']))
+        self.assertIsNone(parse_ad_remaining(['2:05:00']))
+
+    def test_runtime_amongst_real_video_text_is_rejected(self):
+        els = ['X', 'Book Club Radio', 'That Funky House Mix', '1:10:55',
+               'Next in 19']
+        self.assertIsNone(parse_ad_remaining(els))
+
+    def test_real_ad_timers_still_parse(self):
+        self.assertEqual(parse_ad_remaining(['Ad 0:30']), 30)
+        self.assertEqual(parse_ad_remaining(['Ad 1:45']), 105)
+        self.assertEqual(parse_ad_remaining(['Ado:15']), 15)
+        self.assertEqual(parse_ad_remaining(['Ad0:30']), 30)
+
+    def test_wall_clock_still_rejected(self):
+        self.assertIsNone(parse_ad_remaining(['CIil', '12:49', 'a']))
 
 
 if __name__ == "__main__":
