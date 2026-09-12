@@ -51,8 +51,25 @@ class TestParsing(unittest.TestCase):
     def test_ocr_misreads(self):
         """The exact shapes CLAUDE.md documents, plus the user's '0:1s'."""
         for text, expect in (('Ado:15', 15), ('Ad0:1s', 15), ('Ado:3o', 30),
-                             ('Adl:lo', 70), ('Ad0;30', 30), ('Ad0.30', 30)):
+                             ('Ad0;30', 30), ('Ad0.30', 30)):
             self.assertEqual(parse_ad_remaining([text]), expect, text)
+
+    def test_fully_misread_timer_is_skipped_not_guessed(self):
+        """'Adl:lo' is 1:10 with every character misread.
+
+        We decline it. The same shape without a real digit also matches
+        ordinary words -- 'hello:so' would parse as 10:50 -- and a fabricated
+        deadline pins a block. Skipping costs nothing because the countdown
+        is advisory; guessing wrong costs a held overlay.
+        """
+        self.assertIsNone(parse_ad_remaining(['Adl:lo']))
+        self.assertIsNone(parse_ad_remaining(['hello:so']))
+
+    def test_plural_ads_is_not_five_seconds(self):
+        """Caught live: 'Free with ads PG' read as ad + s, and s->5."""
+        self.assertIsNone(parse_ad_remaining(['Free with ads PG']))
+        self.assertIsNone(parse_ad_remaining(['Press and hold for ad options']))
+        self.assertIsNone(parse_skip_in(['skip ads']))
 
     def test_bare_seconds_countdown(self):
         """Netflix style 'Ad 10'."""
