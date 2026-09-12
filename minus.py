@@ -517,7 +517,12 @@ class Minus:
         # is doing anything is to infer it from block timings, which is
         # exactly the kind of guessing this feature exists to replace.
         self.ad_clock_stats = {
-            'parsed': 0,        # frames a countdown was read from
+            'parsed': 0,        # frames any countdown signal was read from
+            # Split out because 'parsed' alone hid the thing that mattered:
+            # overnight it read 499 while only 6 of those were a real digit,
+            # the rest being the flat SKIP_LABEL_ASSUMED_S guess.
+            'real_digit': 0,    # ...of those, an actual number off the screen
+            'assumed': 0,       # ...of those, the digit-less label fallback
             'holds': 0,         # stops vetoed because time remained
             'early_release': 0, # stops allowed early because it expired
             'pause_override': 0,  # holds abandoned because playback paused
@@ -4265,7 +4270,8 @@ class Minus:
                     # never end one.
                     if self.AD_COUNTDOWN_ENABLED:
                         try:
-                            from ad_countdown import (parse_ad_remaining, parse_skip_in,
+                            from ad_countdown import (parse_ad_remaining,
+                                                      parse_skip_in_candidates,
                                                       has_skip_countdown_label,
                                                       SKIP_LABEL_ASSUMED_S)
                             secs = parse_ad_remaining(all_texts)
@@ -4274,10 +4280,15 @@ class Minus:
                                 self.ad_clock_stats['parsed'] += 1
                                 self.ad_clock_stats['last_value'] = secs
                             else:
-                                skip_s = parse_skip_in(all_texts)
+                                # Several numbers per frame can look like the
+                                # countdown; the tracker picks the one that fits
+                                # the clock it is already running.
+                                cands = parse_skip_in_candidates(all_texts)
+                                skip_s = self.ad_countdown.observe_candidates(
+                                    cands, is_skip_bound=True) if cands else None
                                 if skip_s is not None:
-                                    self.ad_countdown.observe(skip_s, is_skip_bound=True)
                                     self.ad_clock_stats['parsed'] += 1
+                                    self.ad_clock_stats['real_digit'] += 1
                                     self.ad_clock_stats['last_value'] = f"skip:{skip_s}"
                                 elif has_skip_countdown_label(all_texts):
                                     # "Skip in" with the digit unreadable.
@@ -4295,6 +4306,7 @@ class Minus:
                                                               is_skip_bound=True,
                                                               synthetic=True)
                                     self.ad_clock_stats['parsed'] += 1
+                                    self.ad_clock_stats['assumed'] += 1
                                     self.ad_clock_stats['last_value'] = 'skip-label'
                         except Exception as e:
                             logger.debug(f"ad countdown parse failed: {e}")
