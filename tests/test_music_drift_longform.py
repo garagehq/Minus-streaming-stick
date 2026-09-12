@@ -139,6 +139,71 @@ class TestLongFormRuntimeShapes(unittest.TestCase):
         self.assertEqual(a._longform_confirmed(), 0)
 
 
+class TestAdDrought(unittest.TestCase):
+    """The text-independent drift signal.
+
+    Every other drift check keys off OCR text, so content carrying almost
+    none is invisible to all of them. Measured live: 27 minutes with zero
+    ads, zero seeds and zero steers, because only 14% of frames were
+    info-bearing -- at the drift cadence the blind backstop needed about 105
+    minutes to fire. Music mode exists to harvest ads, so a long stretch with
+    no ad keyword at all IS the drift signal.
+    """
+
+    def _mode(self, last_ad=0.0, drought=900.0, last_steer=0.0):
+        a = _am()
+        a._AD_DROUGHT_S = drought
+        a._drought_since = 0.0
+        a._last_longform_steer = last_steer
+        a._LONGFORM_STEER_COOLDOWN_S = 120.0
+        a._ad_blocker.last_ocr_ad_time = last_ad
+        a._launch_music_seed = MagicMock(return_value=True)
+        a._log_event = MagicMock()
+        return a
+
+    def test_no_steer_before_the_threshold(self):
+        a = self._mode()
+        now = time.time()
+        a._check_ad_drought(now)           # arms the reference
+        self.assertFalse(a._check_ad_drought(now + 600))
+        a._launch_music_seed.assert_not_called()
+
+    def test_steers_after_a_long_drought(self):
+        a = self._mode()
+        now = time.time()
+        a._check_ad_drought(now)
+        self.assertTrue(a._check_ad_drought(now + 901))
+        a._launch_music_seed.assert_called_once()
+
+    def test_a_recent_ad_resets_the_drought(self):
+        """Healthy content that keeps serving ads must never trip this."""
+        a = self._mode()
+        now = time.time()
+        a._check_ad_drought(now)
+        a._ad_blocker.last_ocr_ad_time = now + 800
+        self.assertFalse(a._check_ad_drought(now + 901))
+
+    def test_cooldown_prevents_repeat_steers(self):
+        a = self._mode()
+        now = time.time()
+        a._check_ad_drought(now)
+        self.assertTrue(a._check_ad_drought(now + 901))
+        self.assertFalse(a._check_ad_drought(now + 902),
+                         'must not steer again immediately')
+
+    def test_threshold_clears_the_worst_healthy_break_spacing(self):
+        """4.4 breaks/h is ~13.6 min; the threshold must sit beyond it."""
+        a = self._mode()
+        self.assertGreater(a._AD_DROUGHT_S, 13.6 * 60)
+
+    def test_works_with_no_ocr_text_at_all(self):
+        """The whole point: it must not depend on anything being written."""
+        a = self._mode()
+        now = time.time()
+        a._check_ad_drought(now)
+        self.assertTrue(a._check_ad_drought(now + 901))
+
+
 class TestConfirmationWindow(unittest.TestCase):
 
     def test_single_sighting_does_not_confirm(self):
