@@ -165,17 +165,16 @@ _SKIP_INTRO_RE = re.compile(r's[k]?[i1lI]p[\s|:·,.\-]{0,4}[i1lI]ntro')
 # holding after the label was last read, since the deadline refreshes on every
 # frame the label appears.
 #
-# The original 5 was picked from "streaming skip gates are ~5s", which the
-# soak disproved for this content: gates measured p50 21.5s and up to 53s.
-# Worse, 5s was short enough to end the block mid-ad and then re-block, and it
-# did -- 60% of every block that night ended at 5-6s, the constant's own
-# length, and half of all blocks re-blocked within 5s.
+# Kept SHORT on purpose. The clock is a combination signal alongside OCR, VLM
+# and ASR, never a definite flag, so when it is guessing it should guess small:
+# some platforms run 5-second ads, and holding 10s on one of those pins the
+# overlay over content that has already come back. Under-holding just means the
+# other signals decide, which is the normal path anyway.
 #
-# 10 is the expected remaining gate time given an unreadable digit: with a
-# ~21s gate and no information about where in it we are, the midpoint is the
-# estimate. It is still only a lower bound (skip-bound), so it can hold a
-# block but never end one, and the audio pause check still releases it.
-SKIP_LABEL_ASSUMED_S = 10
+# Measured gates on YouTube ran p50 21.5s, so 5 is well under the typical gate
+# -- but that is the point. When the digit IS readable the real number is used
+# and counted down properly; this value only ever covers the blind case.
+SKIP_LABEL_ASSUMED_S = 5
 
 
 def has_skip_countdown_label(texts) -> bool:

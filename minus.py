@@ -893,6 +893,8 @@ class Minus:
 
         # Night mode - automatic overnight YouTube playback for training data
         self.autonomous_mode = AutonomousMode()
+        # Stand down the moment the TV is actually being watched.
+        self.autonomous_mode.set_display_in_use_predicate(self._display_in_use)
 
         # IR transmitter (REI 8K HDMI switch). Constructor is hardware-free;
         # initialize() / first send() is what touches the PWM sysfs.
@@ -2876,6 +2878,29 @@ class Minus:
         self._system_settings['leds_require_display'] = bool(enabled)
         self._save_system_settings()
         return {'success': True, 'leds_require_display': bool(enabled)}
+
+    def _display_in_use(self) -> bool:
+        """Is someone actually watching the TV right now?
+
+        Requires BOTH halves, because either alone is misleading:
+
+        - ``display_connected`` says the display pipeline came up, but it stays
+          True until a retry loop eventually notices a real disconnect, so on
+          its own it can claim a TV that has since been switched off.
+        - the live sysfs probe says the TV is electrically there, but a TV can
+          be connected while our pipeline is down (mid-recovery, or failed to
+          start), and nothing is being shown then.
+
+        Only when the TV is present AND we are driving it is a person watching
+        -- which is exactly when autonomous mode must not be stealing the
+        remote. Fails CLOSED (returns False) on any error, so a probe failure
+        leaves autonomous mode working as it does today.
+        """
+        try:
+            return bool(self.display_connected) and bool(
+                self.is_display_connected_live())
+        except Exception:
+            return False
 
     def is_display_connected_live(self) -> bool:
         """Live HDMI-TX presence check (sysfs, no caching).
