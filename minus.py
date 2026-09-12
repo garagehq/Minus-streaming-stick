@@ -522,6 +522,7 @@ class Minus:
             'early_release': 0, # stops allowed early because it expired
             'pause_override': 0,  # holds abandoned because playback paused
             'last_value': None,
+            'vlm_deferred': 0,  # VLM stops overruled by recent OCR ad text
         }
         self._ad_clock_log_last = 0.0
         self.home_screen_detected = False   # True if home screen keywords found
@@ -3623,6 +3624,26 @@ class Minus:
                     # For VLM stopping, use consecutive no-ad count (not sliding window)
                     # This ensures responsive stopping after ad ends
                     vlm_says_stop = (self.vlm_no_ad_count >= self.VLM_STOP_THRESHOLD)
+
+                    # OCR text outranks VLM on "is an ad on screen".
+                    #
+                    # VLM had no wall-clock discipline at all, so on a
+                    # "both"-source block it could end things the instant it
+                    # voted no-ad twice. Measured live: blocks ending after
+                    # 3.5s and 3.7s, both "stopped by BOTH", while OCR was
+                    # still matching 'sponsored' on the same ad -- below even
+                    # the 5s floor that governs OCR's own stop path. That is
+                    # the bulk of a 67% flap rate.
+                    #
+                    # If OCR matched an ad keyword within the floor, the ad is
+                    # still on screen and two VLM no-ad votes are not enough to
+                    # contradict it. OCR's own stop path, the max-duration cap
+                    # and the frozen-stream safeguard all still end the block.
+                    if (vlm_says_stop and self.last_ocr_ad_time > 0
+                            and (now - self.last_ocr_ad_time) < self.OCR_STOP_MIN_SECONDS):
+                        vlm_says_stop = False
+                        self.ad_clock_stats['vlm_deferred'] = (
+                            self.ad_clock_stats.get('vlm_deferred', 0) + 1)
 
                     if self.blocking_source == "vlm":
                         # VLM triggered alone - VLM must also agree to stop

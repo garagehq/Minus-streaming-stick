@@ -154,6 +154,58 @@ class TestMeasuredDistribution(unittest.TestCase):
         self.assertGreaterEqual(m.OCR_STOP_MIN_SECONDS, 5.0)
 
 
+class TestVLMRespectsRecentOCRAdText(unittest.TestCase):
+    """VLM had no wall-clock discipline; OCR text outranks it.
+
+    Measured live: blocks ending after 3.5s and 3.7s, both "stopped by BOTH",
+    while OCR was still matching 'sponsored' on the same ad -- below even the
+    5s floor that governs OCR's own stop path. On a "both"-source block VLM
+    could end things the instant it voted no-ad twice, and that was the bulk
+    of a 67% flap rate.
+
+    If OCR matched an ad keyword within the floor, the ad is still on screen
+    and two VLM votes cannot contradict it.
+    """
+
+    FLOOR = 5.0
+
+    def _vlm_stop(self, vlm_no_ad, ocr_ad_seconds_ago):
+        """Mirror of the decision in _update_blocking_state."""
+        stop = vlm_no_ad >= 2
+        if (stop and ocr_ad_seconds_ago is not None
+                and ocr_ad_seconds_ago < self.FLOOR):
+            stop = False
+        return stop
+
+    def test_vlm_deferred_while_ocr_still_sees_the_ad(self):
+        self.assertFalse(self._vlm_stop(2, 1.0))
+        self.assertFalse(self._vlm_stop(5, 4.9))
+
+    def test_vlm_may_stop_once_ocr_text_is_stale(self):
+        self.assertTrue(self._vlm_stop(2, 6.0))
+        self.assertTrue(self._vlm_stop(2, 30.0))
+
+    def test_vlm_only_blocks_are_unconstrained(self):
+        """OCR never saw the ad, so it has no opinion to outrank VLM with."""
+        self.assertTrue(self._vlm_stop(2, None))
+
+    def test_threshold_still_required(self):
+        self.assertFalse(self._vlm_stop(1, 30.0))
+
+    def test_the_measured_short_blocks_would_now_be_held(self):
+        """3.5s and 3.7s blocks, OCR matching 'sponsored' throughout."""
+        for block_age in (3.5, 3.7):
+            self.assertFalse(self._vlm_stop(2, block_age),
+                             f'{block_age}s block must not be ended by VLM')
+
+    def test_wired_into_the_engine(self):
+        src = (ROOT / 'minus.py').read_text()
+        start = src.index('    def _update_blocking_state')
+        body = src[start:src.index('\n    def ', start + 10)]
+        self.assertIn('vlm_deferred', body,
+                      'the VLM floor must be applied in the stop decision')
+
+
 class TestSeedDiversity(unittest.TestCase):
 
     def _seeds(self):
