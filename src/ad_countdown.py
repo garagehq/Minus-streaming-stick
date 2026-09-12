@@ -160,11 +160,22 @@ def parse_ad_remaining(texts) -> Optional[int]:
 _SKIP_LABEL_RE = re.compile(r'skip' + r'[\s|:·,.\-]{0,4}' + r'(?:ad[\s|:·,.\-]{0,4})?i(?:n\b|\b)')
 _SKIP_INTRO_RE = re.compile(r's[k]?[i1lI]p[\s|:·,.\-]{0,4}[i1lI]ntro')
 
-# How long to assume an unskippable phase lasts when the digit is unreadable.
-# Streaming skip gates are ~5s. Deliberately short: it refreshes for as long
-# as the label keeps being read, and lapses within this window once the label
-# goes, so it can only ever hold slightly past the real skip gate.
-SKIP_LABEL_ASSUMED_S = 5
+# How much longer to assume the unskippable phase runs when the digit is
+# unreadable. This is NOT the length of the gate -- it is how long to keep
+# holding after the label was last read, since the deadline refreshes on every
+# frame the label appears.
+#
+# The original 5 was picked from "streaming skip gates are ~5s", which the
+# soak disproved for this content: gates measured p50 21.5s and up to 53s.
+# Worse, 5s was short enough to end the block mid-ad and then re-block, and it
+# did -- 60% of every block that night ended at 5-6s, the constant's own
+# length, and half of all blocks re-blocked within 5s.
+#
+# 10 is the expected remaining gate time given an unreadable digit: with a
+# ~21s gate and no information about where in it we are, the midpoint is the
+# estimate. It is still only a lower bound (skip-bound), so it can hold a
+# block but never end one, and the audio pause check still releases it.
+SKIP_LABEL_ASSUMED_S = 10
 
 
 def has_skip_countdown_label(texts) -> bool:

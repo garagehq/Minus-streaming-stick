@@ -644,5 +644,52 @@ class TestLongFormRuntimeIsNotACountdown(unittest.TestCase):
         self.assertIsNone(parse_ad_remaining(['CIil', '12:49', 'a']))
 
 
+
+
+class TestAssumedGateLength(unittest.TestCase):
+    """The fallback used when "Skip in" is readable but its digit is not.
+
+    The original 5s came from an assumption about streaming skip gates that a
+    soak disproved: measured gates ran p50 21.5s and up to 53s, and 5s was
+    short enough to release mid-ad and re-block -- 60% of blocks that night
+    ended at 5-6s, the constant's own length.
+    """
+
+    def test_assumption_outlasts_a_typical_ocr_label_dropout(self):
+        """The label is legible on roughly one frame in three, so the hold has
+        to bridge the frames where it is missed."""
+        self.assertGreaterEqual(SKIP_LABEL_ASSUMED_S, 8)
+
+    def test_assumption_stays_well_inside_the_recovery_budget(self):
+        """It is also the worst-case over-hold once the ad really has ended."""
+        self.assertLessEqual(SKIP_LABEL_ASSUMED_S, 15)
+
+    def test_hold_survives_a_gap_that_used_to_end_the_block(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        for i in range(3):
+            t.observe(SKIP_LABEL_ASSUMED_S, n + i, is_skip_bound=True,
+                      synthetic=True)
+        # 6s after the last sighting the old constant had already lapsed.
+        self.assertTrue(t.should_hold(n + 2 + 6))
+
+    def test_hold_still_lapses_rather_than_pinning_the_overlay(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        for i in range(3):
+            t.observe(SKIP_LABEL_ASSUMED_S, n + i, is_skip_bound=True,
+                      synthetic=True)
+        self.assertFalse(t.should_hold(n + 2 + SKIP_LABEL_ASSUMED_S + 1))
+
+    def test_assumption_never_ends_a_block(self):
+        """Skip-bound is a lower bound: it may hold, never release."""
+        t = AdCountdownTracker()
+        n = 1000.0
+        for i in range(3):
+            t.observe(SKIP_LABEL_ASSUMED_S, n + i, is_skip_bound=True,
+                      synthetic=True)
+        self.assertFalse(t.expired(n + 2 + SKIP_LABEL_ASSUMED_S + 1))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
