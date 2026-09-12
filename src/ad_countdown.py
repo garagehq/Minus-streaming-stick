@@ -68,6 +68,25 @@ MAX_PLAUSIBLE_SECONDS = 15 * 60
 
 
 def _to_int(raw: str) -> Optional[int]:
+    """Digits, after undoing OCR letter misreads.
+
+    Requires at least one ACTUAL digit. The misread table maps s->5 and
+    o->0, so without this an all-letter run reads as a number: the plural
+    in "Free with ads PG" parses as ad + s = 5 seconds, which is how this
+    was caught live. A real timer always contains a real digit.
+    """
+    if not any(c.isdigit() for c in raw):
+        return None
+    return _to_int_lenient(raw)
+
+
+def _to_int_lenient(raw: str) -> Optional[int]:
+    """Same conversion without the real-digit requirement.
+
+    Used for the halves of a M:SS timer, where the digit rule applies to the
+    match as a WHOLE -- "Ado:3o" is 0:30 and its only real digit lives in the
+    seconds half, so checking each half separately would reject it.
+    """
     fixed = raw.translate(_DIGIT_FIX)
     return int(fixed) if fixed.isdigit() else None
 
@@ -89,7 +108,18 @@ def parse_ad_remaining(texts) -> Optional[int]:
 
     best = None
     for m in _TS_RE.finditer(low_nopod):
-        mins, secs = _to_int(m.group(1)), _to_int(m.group(2))
+        # At least one real digit across the whole timer.
+        #
+        # This deliberately gives up on a FULLY misread timer such as
+        # "Adl:lo" (1:10, every character a misread). Without the rule the
+        # same pattern also accepts ordinary words -- "hello:so" parses as
+        # 10:50 -- and a fabricated 650-second deadline would pin a block.
+        # Skipping an unreadable frame costs nothing: the countdown is
+        # advisory and the existing counters still decide. Guessing wrong
+        # costs a held overlay.
+        if not any(c.isdigit() for c in m.group(1) + m.group(2)):
+            continue
+        mins, secs = _to_int_lenient(m.group(1)), _to_int_lenient(m.group(2))
         if mins is None or secs is None or secs >= 60:
             continue
         total = mins * 60 + secs
