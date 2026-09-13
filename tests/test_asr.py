@@ -919,9 +919,7 @@ class TestOCRTriangulationVeto(unittest.TestCase):
         # Ad-countdown clock: off, so these cases exercise the triangulation
         # veto rather than the clock's stop veto.
         m.AD_COUNTDOWN_ENABLED = False
-        m.ad_clock_stats = {'holds': 0, 'early_release': 0, 'text_release': 0,
-                            'pause_override': 0, 'vlm_deferred': 0}
-        m._ocr_noad_run_has_text = False
+        m.ad_clock_stats = {'holds': 0, 'early_release': 0, 'pause_override': 0}
         m.flap_escalation = 0
         m.OCR_STOP_THRESHOLD_MAX = 5
         m.OCR_STOP_MIN_SECONDS = 5.0
