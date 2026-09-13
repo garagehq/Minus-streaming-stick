@@ -414,9 +414,6 @@ class TestEngineIntegration(unittest.TestCase):
         m.OCR_STOP_MAX_SECONDS = 9.0
         m.flap_escalation = 0
         m.ocr_no_ad_count = no_ad
-        # A run of empty reads unless a test says otherwise: that is the
-        # case the wall-clock floor exists for.
-        m._ocr_noad_run_has_text = False
         m.last_ocr_ad_time = time.time() - last_hit_ago
         m.ad_countdown = MagicMock()
         m.ad_countdown.should_hold.return_value = hold

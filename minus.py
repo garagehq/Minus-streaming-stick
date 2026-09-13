@@ -376,10 +376,6 @@ class Minus:
         self.ocr_ad_detected = False
         self.ocr_ad_detection_count = 0
         self.ocr_no_ad_count = 0
-        # Does the CURRENT run of no-ad frames contain any real OCR text, or
-        # is it entirely empty reads? They are very different evidence -- see
-        # _ocr_says_stop.
-        self._ocr_noad_run_has_text = False
         # Consecutive OCR cycles that produced no result at all (hard timeout
         # + worker kill, or worker error). Distinct from ocr_no_ad_count,
         # which counts frames OCR actually READ and found no ad in. See the
@@ -529,10 +525,8 @@ class Minus:
             'assumed': 0,       # ...of those, the digit-less label fallback
             'holds': 0,         # stops vetoed because time remained
             'early_release': 0, # stops allowed early because it expired
-            'text_release': 0,  # stops taken on positive text evidence
             'pause_override': 0,  # holds abandoned because playback paused
             'last_value': None,
-            'vlm_deferred': 0,  # VLM stops overruled by recent OCR ad text
         }
         self._ad_clock_log_last = 0.0
         self.home_screen_detected = False   # True if home screen keywords found
@@ -3506,30 +3500,6 @@ class Minus:
             logger.info("[AdClock] countdown expired — releasing without the wall-clock floor")
             return True
 
-        # Reading real text with no ad keyword in it is positive evidence that
-        # something else is on screen. Reading NOTHING is not -- an empty frame
-        # is just as likely to be OCR losing an ad it is still looking at.
-        #
-        # Measured over 153 stops: those taken while OCR was returning text
-        # re-blocked within 5s in 0 of 9 cases; those taken on empty reads did
-        # so in 33 of 56 (59%). So the wall-clock floor earns its keep when all
-        # we have is silence, and is pure latency once we can see the content.
-        # On the stops that had text, it was available a median of 5s before
-        # the block actually released.
-        #
-        # The consecutive-frame threshold above still applies either way, so a
-        # single stray text frame mid-ad cannot end a block on its own.
-        if self._ocr_noad_run_has_text:
-            if self.ad_clock_stats.get('text_release', 0) == 0 or (
-                    now - getattr(self, '_text_release_log_last', 0.0)) >= 10.0:
-                self._text_release_log_last = now
-                logger.info("[Stop] releasing on text evidence "
-                            f"({self.ocr_no_ad_count} no-ad frames, "
-                            f"{now - self.last_ocr_ad_time:.1f}s since ad text)")
-            self.ad_clock_stats['text_release'] = (
-                self.ad_clock_stats.get('text_release', 0) + 1)
-            return True
-
         return (now - self.last_ocr_ad_time) >= self._effective_ocr_stop_seconds()
 
     def _update_blocking_state(self):
@@ -3679,7 +3649,6 @@ class Minus:
                     # feeds straight back into a re-block, which is a large
                     # part of the flapping the floors were meant to prevent.
                     self.ocr_no_ad_count = 0
-                    self._ocr_noad_run_has_text = False
                     self.vlm_no_ad_count = 0
 
                     # Reset skip and pause detection for new ad
@@ -3724,26 +3693,6 @@ class Minus:
                     # For VLM stopping, use consecutive no-ad count (not sliding window)
                     # This ensures responsive stopping after ad ends
                     vlm_says_stop = (self.vlm_no_ad_count >= self.VLM_STOP_THRESHOLD)
-
-                    # OCR text outranks VLM on "is an ad on screen".
-                    #
-                    # VLM had no wall-clock discipline at all, so on a
-                    # "both"-source block it could end things the instant it
-                    # voted no-ad twice. Measured live: blocks ending after
-                    # 3.5s and 3.7s, both "stopped by BOTH", while OCR was
-                    # still matching 'sponsored' on the same ad -- below even
-                    # the 5s floor that governs OCR's own stop path. That is
-                    # the bulk of a 67% flap rate.
-                    #
-                    # If OCR matched an ad keyword within the floor, the ad is
-                    # still on screen and two VLM no-ad votes are not enough to
-                    # contradict it. OCR's own stop path, the max-duration cap
-                    # and the frozen-stream safeguard all still end the block.
-                    if (vlm_says_stop and self.last_ocr_ad_time > 0
-                            and (now - self.last_ocr_ad_time) < self._effective_ocr_stop_seconds()):
-                        vlm_says_stop = False
-                        self.ad_clock_stats['vlm_deferred'] = (
-                            self.ad_clock_stats.get('vlm_deferred', 0) + 1)
 
                     if self.blocking_source == "vlm":
                         # VLM triggered alone - VLM must also agree to stop
@@ -3946,7 +3895,6 @@ class Minus:
                     should_stop = True
                     self.ocr_ad_detected = False
                     self.ocr_no_ad_count = 0
-                    self._ocr_noad_run_has_text = False
                     self.ocr_ad_detection_count = 0
                     self.vlm_no_ad_count = 0
                     # If the safeguard fired because the upstream video
@@ -4176,7 +4124,6 @@ class Minus:
                             )
                             self.ocr_ad_detected = False
                             self.ocr_no_ad_count = 0
-                            self._ocr_noad_run_has_text = False
                             self.ocr_ad_detection_count = 0
                             self.vlm_ad_detected = False
                             self.vlm_no_ad_count = 0
@@ -4565,7 +4512,6 @@ class Minus:
                     self.transition_hold_start = 0.0  # ad present → reset gap timer
                     self.ocr_ad_detection_count += 1
                     self.ocr_no_ad_count = 0
-                    self._ocr_noad_run_has_text = False
                     self.last_ocr_ad_time = time.time()
 
                     # Transience guard: require ≥OCR_TRANSIENCE_MIN_FRAMES
@@ -4635,9 +4581,6 @@ class Minus:
                     else:
                         self.ocr_no_ad_count += 1
                         self.ocr_ad_detection_count = 0
-                        # OCR read real text and none of it was an ad keyword:
-                        # positive evidence that something else is on screen.
-                        self._ocr_noad_run_has_text = True
 
                         if self.ocr_ad_detected and self._ocr_says_stop():
                             self.ocr_ad_detected = False
