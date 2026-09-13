@@ -916,6 +916,19 @@ class TestOCRTriangulationVeto(unittest.TestCase):
         m.VLM_STOP_THRESHOLD = 2
         m.vlm_min_decisions = 3
 
+        # Ad-countdown clock: off, so these cases exercise the triangulation
+        # veto rather than the clock's stop veto.
+        m.AD_COUNTDOWN_ENABLED = False
+        m.ad_clock_stats = {'holds': 0, 'early_release': 0, 'text_release': 0,
+                            'pause_override': 0, 'vlm_deferred': 0}
+        m._ocr_noad_run_has_text = False
+        m.flap_escalation = 0
+        m.OCR_STOP_THRESHOLD_MAX = 5
+        m.OCR_STOP_MIN_SECONDS = 5.0
+        m.OCR_STOP_MAX_SECONDS = 9.0
+        m.ocr_failure_streak = 0
+        m.OCR_DEGRADED_STREAK = 3
+
         # Triangulation constants (mirror minus.py defaults)
         m.OCR_TRIANGULATION_MIN_BLOCK_S = 4.0
         m.OCR_TRIANGULATION_VLM_NOAD_RATIO = 0.80
