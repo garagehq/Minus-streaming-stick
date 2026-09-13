@@ -350,6 +350,24 @@ class AdCountdownTracker:
         self.observe(chosen, now, is_skip_bound=is_skip_bound)
         return chosen
 
+    def _floor_skip_bound(self, seconds: int, is_skip_bound: bool) -> int:
+        """A skip-gate digit may only ever EXTEND the hold, never shorten it.
+
+        "Skip in 2" says the button appears in 2 seconds. It does NOT say the
+        ad ends in 2 seconds -- the ad runs on well past the gate opening. So a
+        small digit carries strictly less information than the bare label, and
+        letting it anchor a 2-second hold makes us *less* protected than seeing
+        no digit at all.
+
+        That was live: 39% of holds ran under 5s, with the most common cross-
+        element misread being a lone "2" appearing 53 times in one sample. Each
+        of those replaced the assumed window with something shorter and the
+        block fell out from under the ad.
+        """
+        if is_skip_bound and seconds < SKIP_LABEL_ASSUMED_S:
+            return SKIP_LABEL_ASSUMED_S
+        return seconds
+
     def observe(self, seconds: Optional[int], now: Optional[float] = None,
                 is_skip_bound: bool = False, synthetic: bool = False) -> None:
         """Record a countdown reading. None means the frame had no clock.
@@ -377,6 +395,7 @@ class AdCountdownTracker:
         if seconds is None:
             return
         now = now if now is not None else time.time()
+        seconds = self._floor_skip_bound(seconds, is_skip_bound)
 
         # Freshness and the frozen-clock check follow every observation,
         # adopted or not: "the same number keeps arriving" is what a pause

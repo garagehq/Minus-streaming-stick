@@ -3520,6 +3520,12 @@ class Minus:
         # The consecutive-frame threshold above still applies either way, so a
         # single stray text frame mid-ad cannot end a block on its own.
         if self._ocr_noad_run_has_text:
+            if self.ad_clock_stats.get('text_release', 0) == 0 or (
+                    now - getattr(self, '_text_release_log_last', 0.0)) >= 10.0:
+                self._text_release_log_last = now
+                logger.info("[Stop] releasing on text evidence "
+                            f"({self.ocr_no_ad_count} no-ad frames, "
+                            f"{now - self.last_ocr_ad_time:.1f}s since ad text)")
             self.ad_clock_stats['text_release'] = (
                 self.ad_clock_stats.get('text_release', 0) + 1)
             return True
