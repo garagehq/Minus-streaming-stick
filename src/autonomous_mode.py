@@ -104,7 +104,7 @@ class AutonomousMode:
 
     # Default schedule
     DEFAULT_START_HOUR = 0   # Midnight
-    DEFAULT_END_HOUR = 8     # 8 AM
+    DEFAULT_END_HOUR = 9     # 9 AM
 
     # Music mode: seed videos to deep-link into when steering toward music
     # content. All are popular official music videos — YouTube autoplay from

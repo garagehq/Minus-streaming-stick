@@ -58,6 +58,9 @@ def _minus(base=3, cap=6, min_s=5.0, esc=0, no_ad=0, last_hit=None):
     m.OCR_STOP_MIN_SECONDS = min_s
     m.flap_escalation = esc
     m.ocr_no_ad_count = no_ad
+    # A run of empty reads unless a test says otherwise: that is the
+    # case the wall-clock floor exists for.
+    m._ocr_noad_run_has_text = False
     m.last_ocr_ad_time = time.time() if last_hit is None else last_hit
     # The ad clock (Sep 2026) can veto or accelerate a stop. These tests are
     # about the frame/time criterion, so give it a clock with nothing to say.
@@ -180,6 +183,7 @@ class TestStopCriterion(unittest.TestCase):
         m = _minus(esc=3, no_ad=5, last_hit=time.time() - 30.0)
         self.assertFalse(m._ocr_says_stop(), 'needs 6 frames once escalated')
         m.ocr_no_ad_count = 6
+        m._ocr_noad_run_has_text = False
         self.assertTrue(m._ocr_says_stop())
 
     def test_no_recorded_hit_falls_back_to_frames(self):
