@@ -180,7 +180,7 @@ class TestScheduleManagement(unittest.TestCase):
 
     def test_default_schedule(self):
         self.assertEqual(self.mode._start_hour, 0)
-        self.assertEqual(self.mode._end_hour, 8)
+        self.assertEqual(self.mode._end_hour, 9)   # midnight-9am ET
         self.assertFalse(self.mode._always_on)
 
     def test_set_schedule_normal_range(self):
