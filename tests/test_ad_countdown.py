@@ -754,5 +754,38 @@ class TestSingleLabelSightingHolds(unittest.TestCase):
         self.assertLess(t.remaining(n + 1), SKIP_LABEL_ASSUMED_S + 1)
 
 
+class TestSkipDigitOnlyExtends(unittest.TestCase):
+    """A skip-gate digit may extend the hold but never shorten it.
+
+    "Skip in 2" says the button appears in 2s, not that the ad ends in 2s, so a
+    small digit carries strictly LESS information than the bare label. Letting
+    it anchor a 2s hold left us less protected than seeing no digit at all --
+    live, 39% of holds ran under 5s and the block fell out from under the ad.
+    """
+
+    def test_small_skip_digit_is_floored(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe(2, n, is_skip_bound=True)
+        t.observe(2, n + 1, is_skip_bound=True)
+        self.assertGreaterEqual(t.remaining(n + 1), SKIP_LABEL_ASSUMED_S - 0.01)
+
+    def test_large_skip_digit_is_untouched(self):
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe(20, n, is_skip_bound=True)
+        t.observe(19, n + 1, is_skip_bound=True)
+        self.assertAlmostEqual(t.remaining(n + 1), 19.0, places=1)
+
+    def test_a_real_remaining_time_is_never_floored(self):
+        """An explicit 'ad ends in 2s' readout IS the truth and must not be
+        inflated -- that would hold the overlay over returning content."""
+        t = AdCountdownTracker()
+        n = 1000.0
+        t.observe(2, n, is_skip_bound=False)
+        t.observe(1, n + 1, is_skip_bound=False)
+        self.assertLess(t.remaining(n + 1), SKIP_LABEL_ASSUMED_S)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
