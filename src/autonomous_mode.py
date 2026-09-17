@@ -50,6 +50,10 @@ DEVICE_TYPE_GOOGLE_TV = 'google_tv'
 CHECK_INTERVAL = 15.0              # Base check interval
 KEEPALIVE_INTERVAL_PLAYING = 20.0  # When video is playing, check every 20s (catches unexpected exits)
 KEEPALIVE_INTERVAL_NAV = 10.0      # On navigation screens (home/login), check every 10s
+# How often to retry waking a source that has powered its HDMI output down.
+# Long enough that a device which simply takes a while to come back is not
+# hammered, short enough that a night is not lost to a sleeping stick.
+SOURCE_WAKE_INTERVAL = float(os.environ.get('MINUS_SOURCE_WAKE_INTERVAL', '60'))
 
 
 class AutonomousModeStats:
@@ -239,6 +243,11 @@ class AutonomousMode:
         # has to get out of the way. See _display_in_use().
         self._display_in_use_predicate = None
         self._display_suppressed = False
+        # True when the HDMI INPUT is carrying a picture. When it is not, the
+        # source device has powered its output down and every frame-based
+        # check below is looking at nothing. See _wake_sleeping_source().
+        self._signal_present_predicate = None
+        self._last_source_wake = 0.0
 
         # Schedule (configurable)
         self._start_hour = self.DEFAULT_START_HOUR
@@ -757,6 +766,54 @@ class AutonomousMode:
         """
         with self._lock:
             self._display_in_use_predicate = predicate
+
+    def set_signal_present_predicate(self, predicate):
+        """Install the check for 'the HDMI input is carrying a picture'."""
+        with self._lock:
+            self._signal_present_predicate = predicate
+
+    def _signal_present(self) -> bool:
+        """Fails OPEN: an unreadable signal state is treated as present, so a
+        broken probe cannot make us hammer the remote."""
+        pred = self._signal_present_predicate
+        if pred is None:
+            return True
+        try:
+            return bool(pred())
+        except Exception as e:
+            logger.debug(f"[AutonomousMode] signal check failed: {e}")
+            return True
+
+    def _wake_sleeping_source(self) -> bool:
+        """Wake a source device that has powered down its HDMI output.
+
+        A Fire TV left alone long enough stops driving HDMI entirely. Minus
+        correctly shows NO SIGNAL, but autonomous mode carried on regardless:
+        it has no frames, so every screen check is classifying nothing, and the
+        recovery it reaches for is an ADB deep-link. ADB accepts those happily
+        while the display stays asleep, so it logs success forever and nothing
+        changes. Observed live: the input sat dark for 12.7 hours while music
+        seeds were dispatched into it, and one `home` keypress fixed it.
+
+        A KEY EVENT is what wakes the output -- an intent is not input. So when
+        there is no signal we send Home and nothing else: there is no picture
+        to reason about, so any smarter choice would be guesswork.
+        """
+        now = time.time()
+        if now - self._last_source_wake < SOURCE_WAKE_INTERVAL:
+            return False
+        if not self._device_controller or not self._device_controller.is_connected():
+            return False
+        self._last_source_wake = now
+        logger.warning("[AutonomousMode] No HDMI signal — source is asleep; "
+                       "sending Home to wake it")
+        self._log_event("No signal - waking source with Home")
+        try:
+            self._device_controller.send_command("home")
+        except Exception as e:
+            logger.warning(f"[AutonomousMode] wake keypress failed: {e}")
+            return False
+        return True
 
     def _display_in_use(self) -> bool:
         """Is the TV on with our display pipeline running?
@@ -2358,6 +2415,12 @@ class AutonomousMode:
         """
         if not self._device_controller or not self._device_controller.is_connected():
             return False
+
+        # Nothing below this line can work without a picture: the frame
+        # capture, the VLM screen query and the OCR fallbacks all read frames
+        # that do not exist. Wake the source first and try again next cycle.
+        if not self._signal_present():
+            return self._wake_sleeping_source()
 
         try:
             # For Roku: check active app via ECP before VLM

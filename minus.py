@@ -894,6 +894,8 @@ class Minus:
         self.autonomous_mode = AutonomousMode()
         # Stand down the moment the TV is actually being watched.
         self.autonomous_mode.set_display_in_use_predicate(self._display_in_use)
+        # ...and wake the source when it has powered its HDMI output down.
+        self.autonomous_mode.set_signal_present_predicate(self._hdmi_signal_present)
 
         # IR transmitter (REI 8K HDMI switch). Constructor is hardware-free;
         # initialize() / first send() is what touches the PWM sysfs.
@@ -2877,6 +2879,17 @@ class Minus:
         self._system_settings['leds_require_display'] = bool(enabled)
         self._save_system_settings()
         return {'success': True, 'leds_require_display': bool(enabled)}
+
+    def _hdmi_signal_present(self) -> bool:
+        """Is the HDMI INPUT carrying a picture right now?
+
+        This is the source device's output, not the TV. It goes away when the
+        streaming stick powers its HDMI down after being idle, which is
+        invisible to ADB -- the device still answers, it just is not driving a
+        picture. Autonomous mode needs to know, because with no signal there
+        are no frames for it to reason about.
+        """
+        return not getattr(self, '_hdmi_signal_lost', False)
 
     def _display_in_use(self) -> bool:
         """Is someone actually watching the TV right now?
