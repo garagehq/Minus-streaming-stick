@@ -110,5 +110,69 @@ class TestTXProbeFailsOpen(unittest.TestCase):
             self.assertTrue(AudioPassthrough._hdmi_tx_connected(a))
 
 
+class TestTXReinitOnNormalStartup(unittest.TestCase):
+    """The transmitter must be re-initialised before audio opens its PCM.
+
+    The rockchip HDMI-TX driver programs its audio infoframe and clock
+    regeneration at PCM prepare time. If the link was not freshly trained the
+    lane comes up DEAD, and nothing above ALSA can tell: the PCM runs, hw_ptr
+    advances, state is RUNNING, jack and ELD read fine, and the sink is silent.
+
+    Reopening the PCM does not fix it -- measured directly on the box, hw_ptr
+    reset and advanced with the sink still silent. Only a DPMS cycle recovers
+    it. The reconnect and no-signal paths already did this; normal start-up did
+    not, so booting with the display attached gave silent HDMI-TX audio that
+    survived every service restart.
+    """
+
+    def _blocker(self, attached):
+        from ad_blocker import DRMAdBlocker
+        b = object.__new__(DRMAdBlocker)
+        b._force_hdmi_reinit = MagicMock()
+        paths = []
+        if attached:
+            c = MagicMock()
+            c.__truediv__ = lambda self, o: MagicMock(
+                exists=lambda: True, read_text=lambda: 'connected\n')
+            paths.append(c)
+        else:
+            c = MagicMock()
+            c.__truediv__ = lambda self, o: MagicMock(
+                exists=lambda: True, read_text=lambda: 'disconnected\n')
+            paths.append(c)
+        return b, paths
+
+    def test_reinit_runs_when_a_display_is_attached(self):
+        b, paths = self._blocker(attached=True)
+        with patch('pathlib.Path.glob', return_value=paths):
+            b._force_hdmi_reinit_if_connected()
+        b._force_hdmi_reinit.assert_called_once()
+
+    def test_reinit_skipped_with_nothing_attached(self):
+        """No link to train, and it would fight the no-signal path."""
+        b, paths = self._blocker(attached=False)
+        with patch('pathlib.Path.glob', return_value=paths):
+            b._force_hdmi_reinit_if_connected()
+        b._force_hdmi_reinit.assert_not_called()
+
+    def test_probe_failure_is_not_fatal(self):
+        """Video must come up even if the re-init cannot be attempted."""
+        from ad_blocker import DRMAdBlocker
+        b = object.__new__(DRMAdBlocker)
+        b._force_hdmi_reinit = MagicMock(side_effect=RuntimeError('modetest gone'))
+        with patch('pathlib.Path.glob', side_effect=OSError('sysfs gone')):
+            b._force_hdmi_reinit_if_connected()
+
+    def test_startup_path_calls_it_before_building_the_pipeline(self):
+        src = (ROOT / 'src' / 'ad_blocker.py').read_text()
+        body = src[src.index('    def start(self):'):]
+        body = body[:body.index('\n    def ', 10)]
+        self.assertIn('_force_hdmi_reinit_if_connected', body,
+                      'normal start-up no longer re-inits the transmitter')
+        self.assertLess(body.index('_force_hdmi_reinit_if_connected'),
+                        body.index('self._init_pipeline()'),
+                        're-init must happen while DRM is still free')
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
