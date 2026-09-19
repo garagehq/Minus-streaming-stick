@@ -789,6 +789,21 @@ class AudioPassthrough:
             needs_restart = False
             restart_reason = ""
 
+            # Stranded on fakesink after the TV came back.
+            #
+            # The playback branch falls back to fakesink when HDMI-TX is
+            # absent, so HDMI-RX capture and the ASR tap stay alive with the
+            # TV off. Nothing rebuilt it when the TV returned, and NOTHING
+            # ELSE IN THIS LOOP CAN NOTICE: the pipeline is genuinely healthy,
+            # buffers flow, the state is PLAYING, the source is not silent --
+            # it is playing perfectly into /dev/null. Every stall and zombie
+            # check stays green. Seen live after 63h of uptime: the TV was
+            # connected and audible in every diagnostic while playback had
+            # been routed to fakesink since boot.
+            if getattr(self, '_playback_fakesink', False) and self._hdmi_tx_connected():
+                needs_restart = True
+                restart_reason = "playback stranded on fakesink after TV reconnect"
+
             # A/V drift check: two cheap property reads; resyncs in-place
             # (no restart) when the sync queue has crept off its baseline.
             try:
