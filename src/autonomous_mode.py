@@ -50,6 +50,10 @@ DEVICE_TYPE_GOOGLE_TV = 'google_tv'
 CHECK_INTERVAL = 15.0              # Base check interval
 KEEPALIVE_INTERVAL_PLAYING = 20.0  # When video is playing, check every 20s (catches unexpected exits)
 KEEPALIVE_INTERVAL_NAV = 10.0      # On navigation screens (home/login), check every 10s
+# How often to retry waking a source that has powered its HDMI output down.
+# Long enough that a device which simply takes a while to come back is not
+# hammered, short enough that a night is not lost to a sleeping stick.
+SOURCE_WAKE_INTERVAL = float(os.environ.get('MINUS_SOURCE_WAKE_INTERVAL', '60'))
 
 
 class AutonomousModeStats:
@@ -104,7 +108,7 @@ class AutonomousMode:
 
     # Default schedule
     DEFAULT_START_HOUR = 0   # Midnight
-    DEFAULT_END_HOUR = 8     # 8 AM
+    DEFAULT_END_HOUR = 9     # 9 AM
 
     # Music mode: seed videos to deep-link into when steering toward music
     # content. All are popular official music videos — YouTube autoplay from
@@ -234,6 +238,16 @@ class AutonomousMode:
         self._active = False           # Currently in active window
         self._running = False          # Thread running
         self._manual_override = False  # User manually started outside schedule
+        # When this returns True the TV is on and showing our pipeline, which
+        # means a person is watching. Autonomous mode drives the remote, so it
+        # has to get out of the way. See _display_in_use().
+        self._display_in_use_predicate = None
+        self._display_suppressed = False
+        # True when the HDMI INPUT is carrying a picture. When it is not, the
+        # source device has powered its output down and every frame-based
+        # check below is looking at nothing. See _wake_sleeping_source().
+        self._signal_present_predicate = None
+        self._last_source_wake = 0.0
 
         # Schedule (configurable)
         self._start_hour = self.DEFAULT_START_HOUR
@@ -372,6 +386,21 @@ class AutonomousMode:
         self._LONGFORM_STEER_COOLDOWN_S = float(
             os.environ.get('MINUS_LONGFORM_STEER_COOLDOWN', '120'))
         self._last_longform_steer: float = 0.0
+        # Ad drought: the text-INDEPENDENT drift signal.
+        #
+        # Every other drift check keys off OCR text, so content that carries
+        # almost none is invisible to all of them. Measured live: 27 minutes
+        # with zero ads, zero seeds and zero steers, because only 14% of
+        # frames were info-bearing -- at the drift cadence the blind backstop
+        # needed about 105 minutes to fire. Music mode exists to harvest ads,
+        # so a long stretch with no ad keyword at all IS the drift signal,
+        # whatever is or is not written on screen.
+        #
+        # 15 min is comfortably past the worst healthy break spacing measured
+        # (4.4 breaks/h = ~13.6 min). A false steer is cheap anyway: it
+        # deep-links a new video, which itself serves a pre-roll.
+        self._AD_DROUGHT_S = float(os.environ.get('MINUS_AD_DROUGHT_SECONDS', '900'))
+        self._drought_since: float = 0.0
         # Music mode: consecutive seed re-launches attempted from the home
         # screen. Cold-launching YouTube lands on the account picker, which
         # SWALLOWS the deep-link VIEW intent -- see the home-screen branch of
@@ -730,6 +759,77 @@ class AutonomousMode:
             self._thread.join(timeout=5.0)
             self._thread = None
 
+    def set_display_in_use_predicate(self, predicate):
+        """Install the check for 'someone is actually watching the TV'.
+
+        Mirrors the status-LED drive_predicate idiom. Passing None removes it.
+        """
+        with self._lock:
+            self._display_in_use_predicate = predicate
+
+    def set_signal_present_predicate(self, predicate):
+        """Install the check for 'the HDMI input is carrying a picture'."""
+        with self._lock:
+            self._signal_present_predicate = predicate
+
+    def _signal_present(self) -> bool:
+        """Fails OPEN: an unreadable signal state is treated as present, so a
+        broken probe cannot make us hammer the remote."""
+        pred = self._signal_present_predicate
+        if pred is None:
+            return True
+        try:
+            return bool(pred())
+        except Exception as e:
+            logger.debug(f"[AutonomousMode] signal check failed: {e}")
+            return True
+
+    def _wake_sleeping_source(self) -> bool:
+        """Wake a source device that has powered down its HDMI output.
+
+        A Fire TV left alone long enough stops driving HDMI entirely. Minus
+        correctly shows NO SIGNAL, but autonomous mode carried on regardless:
+        it has no frames, so every screen check is classifying nothing, and the
+        recovery it reaches for is an ADB deep-link. ADB accepts those happily
+        while the display stays asleep, so it logs success forever and nothing
+        changes. Observed live: the input sat dark for 12.7 hours while music
+        seeds were dispatched into it, and one `home` keypress fixed it.
+
+        A KEY EVENT is what wakes the output -- an intent is not input. So when
+        there is no signal we send Home and nothing else: there is no picture
+        to reason about, so any smarter choice would be guesswork.
+        """
+        now = time.time()
+        if now - self._last_source_wake < SOURCE_WAKE_INTERVAL:
+            return False
+        if not self._device_controller or not self._device_controller.is_connected():
+            return False
+        self._last_source_wake = now
+        logger.warning("[AutonomousMode] No HDMI signal — source is asleep; "
+                       "sending Home to wake it")
+        self._log_event("No signal - waking source with Home")
+        try:
+            self._device_controller.send_command("home")
+        except Exception as e:
+            logger.warning(f"[AutonomousMode] wake keypress failed: {e}")
+            return False
+        return True
+
+    def _display_in_use(self) -> bool:
+        """Is the TV on with our display pipeline running?
+
+        Fails OPEN -- an unreadable display state returns False so a flaky
+        probe can never silently stop autonomous mode from ever running.
+        """
+        pred = self._display_in_use_predicate
+        if pred is None:
+            return False
+        try:
+            return bool(pred())
+        except Exception as e:
+            logger.debug(f"[AutonomousMode] display-in-use check failed: {e}")
+            return False
+
     def _run_loop(self):
         """Main autonomous mode loop."""
         logger.info("[AutonomousMode] Monitoring thread started")
@@ -741,11 +841,29 @@ class AutonomousMode:
             try:
                 should_be_active = self._manual_override or self.is_scheduled_time()
 
+                # The TV coming on means someone is trying to watch it. This
+                # overrides EVERYTHING, manual override included: a person
+                # reaching for the remote is a stronger signal than any way
+                # this session was started, and autonomous mode driving the
+                # device would fight them for it.
+                display_busy = self._display_in_use()
+                if display_busy:
+                    if not self._display_suppressed:
+                        self._display_suppressed = True
+                        logger.info("[AutonomousMode] Display is in use — "
+                                    "standing down so it does not interfere")
+                    should_be_active = False
+                elif self._display_suppressed:
+                    self._display_suppressed = False
+                    logger.info("[AutonomousMode] Display no longer in use — "
+                                "autonomous mode may resume")
+
                 if should_be_active and not self._active:
                     # Activate autonomous mode
                     self._activate()
-                elif not should_be_active and self._active and not self._manual_override:
-                    # Deactivate (only if not manual override)
+                elif not should_be_active and self._active and (
+                        not self._manual_override or display_busy):
+                    # Deactivate (manual override yields only to the display)
                     self._deactivate()
 
                 if self._active:
@@ -1000,6 +1118,33 @@ class AutonomousMode:
             return not self.CLOCK_CONTEXT_RE.search(combined)
         return False
 
+    def _check_ad_drought(self, now: float) -> bool:
+        """Re-seed when nothing has produced an ad for a long time.
+
+        Independent of OCR text, so it still works on content that shows
+        none. The reference point is the later of the last ad keyword and the
+        last steer, so a healthy stream that keeps serving ads never trips it.
+        """
+        try:
+            last_ad = float(getattr(self._ad_blocker, 'last_ocr_ad_time', 0) or 0)
+        except Exception:
+            last_ad = 0.0
+        if not self._drought_since:
+            self._drought_since = now
+        reference = max(last_ad, self._drought_since)
+        if (now - reference) < self._AD_DROUGHT_S:
+            return False
+        if (now - self._last_longform_steer) < self._LONGFORM_STEER_COOLDOWN_S:
+            return False
+        mins = (now - reference) / 60.0
+        logger.info(f"[AutonomousMode] Music mode: no ads for {mins:.0f} min "
+                    f"— steering to music seed")
+        self._log_event("Music mode: ad drought - steering to seed")
+        self._last_longform_steer = now
+        self._drought_since = now
+        self._launch_music_seed()
+        return True
+
     def _longform_confirmed(self) -> int:
         """Sightings inside the current confirmation window.
 
@@ -1041,6 +1186,12 @@ class AutonomousMode:
             else:
                 texts = getattr(self._ad_blocker, 'last_ocr_texts', None) or []
                 combined = ' '.join(str(t) for t in texts).lower()
+            # Text-independent check FIRST: the drought signal has to work on
+            # content that shows no text, which is exactly where every
+            # text-based check goes blind.
+            if self._check_ad_drought(time.time()):
+                return True
+
             if len(combined.strip()) < 12:
                 return False  # no information this cycle
             if any(k in combined for k in self.MUSIC_EVIDENCE_KEYWORDS):
@@ -2264,6 +2415,12 @@ class AutonomousMode:
         """
         if not self._device_controller or not self._device_controller.is_connected():
             return False
+
+        # Nothing below this line can work without a picture: the frame
+        # capture, the VLM screen query and the OCR fallbacks all read frames
+        # that do not exist. Wake the source first and try again next cycle.
+        if not self._signal_present():
+            return self._wake_sleeping_source()
 
         try:
             # For Roku: check active app via ECP before VLM

@@ -616,6 +616,25 @@ class DRMAdBlocker:
                 except Exception as e:
                     logger.debug(f"[DRMAdBlocker] Error during pipeline cleanup: {e}")
                 self.pipeline = None
+
+            # DRM is free right here -- the old pipeline is NULL and the new
+            # one does not exist yet -- which is the only window in this path
+            # where the HDMI transmitter can be re-initialised.
+            #
+            # It has to happen before audio opens its PCM. The rockchip HDMI-TX
+            # driver programs its audio infoframe and clock regeneration at PCM
+            # prepare time, and if the link was not freshly trained the lane
+            # comes up dead: the PCM runs, hw_ptr advances, ALSA reports
+            # RUNNING, jack and ELD read fine, and the sink plays nothing. No
+            # watchdog can see it, and reopening the PCM does NOT fix it --
+            # measured directly, hw_ptr reset and advanced with the sink still
+            # silent. Only this DPMS cycle brings the lane back.
+            #
+            # The reconnect and no-signal paths already did this; normal
+            # start-up did not, so a boot with the display already attached
+            # produced silent HDMI-TX audio that survived every restart.
+            self._force_hdmi_reinit_if_connected()
+
             # Reinitialize the normal pipeline
             self._init_pipeline()
 
@@ -675,6 +694,27 @@ class DRMAdBlocker:
         if self._watchdog_thread:
             self._watchdog_thread.join(timeout=2.0)
             self._watchdog_thread = None
+
+    def _force_hdmi_reinit_if_connected(self):
+        """DPMS-cycle the transmitter, but only when something is attached.
+
+        With no display present there is no link to train, and cycling DPMS
+        would only fight the no-signal path that owns the output in that state.
+        Failure is never fatal: the video pipeline is what matters here, and it
+        comes up regardless.
+        """
+        try:
+            from pathlib import Path
+            attached = any(
+                (c / 'status').read_text().strip() == 'connected'
+                for c in Path('/sys/class/drm').glob('card0-HDMI-A-*')
+                if (c / 'status').exists())
+            if not attached:
+                logger.debug("[DRMAdBlocker] No HDMI output attached — skipping TX re-init")
+                return
+            self._force_hdmi_reinit()
+        except Exception as e:
+            logger.warning(f"[DRMAdBlocker] HDMI TX re-init skipped: {e}")
 
     def _force_hdmi_reinit(self):
         """Force HDMI PHY reinitialization via DPMS cycle.
