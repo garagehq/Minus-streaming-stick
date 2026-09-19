@@ -528,6 +528,8 @@ class DRMAdBlocker:
         Returns:
             dict with success status and current values
         """
+        before = self.get_color_settings()
+
         if not self.pipeline:
             # No pipeline at all (e.g. mid signal-loss recovery). Persist the
             # values so _init_pipeline bakes them in at the next start —
@@ -584,6 +586,15 @@ class DRMAdBlocker:
                 colorbalance.set_property('hue', hue)
 
             current = self.get_color_settings()
+            # Log what CHANGED, not just where we landed. Tracing an
+            # unexplained picture change previously meant diffing two
+            # consecutive log lines and guessing which field moved.
+            deltas = [f"{k} {before.get(k, 0.0):.2f}->{current[k]:.2f}"
+                      for k in ('saturation', 'brightness', 'contrast', 'hue')
+                      if abs(before.get(k, 0.0) - current[k]) > 1e-6]
+            if deltas:
+                logger.warning("[DRMAdBlocker] Picture settings changed: "
+                               + ", ".join(deltas))
             logger.info(f"[DRMAdBlocker] Color settings updated: sat={current['saturation']:.2f} "
                        f"bright={current['brightness']:.2f} contrast={current['contrast']:.2f} "
                        f"hue={current['hue']:.2f}")
