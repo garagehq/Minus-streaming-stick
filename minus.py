@@ -3350,10 +3350,20 @@ class Minus:
         def _reprepare():
             time.sleep(delay)
             try:
-                if (self.audio and self.audio.is_running
-                        and not getattr(self.audio, '_playback_fakesink', False)):
-                    logger.info(f"[Audio] Re-preparing HDMI-TX audio ({reason})")
-                    self.audio.restart(reason=f"re-prepare: {reason}")
+                if not (self.audio and self.audio.is_running):
+                    return
+                on_fakesink = getattr(self.audio, '_playback_fakesink', False)
+                tx_up = self.audio._hdmi_tx_connected()
+                # Being on fakesink used to skip this entirely, which had it
+                # exactly backwards: fakesink plus a TV that is now present is
+                # the one state that MUST be rebuilt, because the pipeline has
+                # no alsasink in it at all and no amount of re-preparing a PCM
+                # will conjure one. Skip only when the TV really is still away.
+                if on_fakesink and not tx_up:
+                    return
+                logger.info(f"[Audio] Re-preparing HDMI-TX audio ({reason})"
+                            + (" — moving off fakesink" if on_fakesink else ""))
+                self.audio.restart(reason=f"re-prepare: {reason}")
             except Exception as e:
                 logger.warning(f"[Audio] Re-prepare failed: {e}")
 
