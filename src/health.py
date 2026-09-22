@@ -44,6 +44,7 @@ class HealthStatus:
     ocr_ready: bool = False
     memory_percent: float = 0
     disk_free_mb: float = 0
+    disk_used_percent: float = 0
     uptime_seconds: float = 0
     output_fps: float = 0.0
 
@@ -177,6 +178,7 @@ class HealthMonitor:
         # Resources
         status.memory_percent = self._get_memory_percent()
         status.disk_free_mb = self._get_disk_free_mb()
+        status.disk_used_percent = self._get_disk_used_percent()
 
         return status
 
@@ -961,6 +963,23 @@ class HealthMonitor:
             return free_bytes / (1024 * 1024)
         except Exception:
             return 0
+
+    def _get_disk_used_percent(self) -> float:
+        """Percentage of the filesystem in use.
+
+        Measured against the space actually available to us (used + available)
+        rather than the raw total, so the root-only reserve is not counted as
+        headroom we can spend -- otherwise this reads comfortable while writes
+        are already failing.
+        """
+        try:
+            stat = os.statvfs('.')
+            avail = stat.f_bavail * stat.f_frsize
+            used = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+            total = used + avail
+            return (used / total * 100.0) if total > 0 else 0.0
+        except Exception:
+            return 0.0
 
     # Recovery action setters
     def on_hdmi_lost(self, callback: Callable):

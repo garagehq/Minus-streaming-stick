@@ -270,6 +270,7 @@
                     <span id="asr-status" class="system-badge">ASR: --</span>
                     <span id="memory-status" class="system-badge">Mem: --</span>
                     <span id="temp-status" class="system-badge">Temp: --</span>
+                    <span id="disk-status" class="system-badge" title="Disk usage">Disk: --</span>
                     <span id="hdmi-status" class="system-badge">HDMI: --</span>
                 </div>
             </section>
@@ -1453,6 +1454,27 @@
                 } else {
                     tempStatus.textContent = 'Temp: --';
                     tempStatus.className = 'system-badge';
+                }
+
+                const diskStatus = document.getElementById('disk-status');
+                if (status.disk_used_percent != null && status.disk_used_percent > 0) {
+                    const used = Math.round(status.disk_used_percent);
+                    const freeMb = status.disk_free_mb || 0;
+                    const free = freeMb >= 1024
+                        ? `${(freeMb / 1024).toFixed(1)} GB`
+                        : `${Math.round(freeMb)} MB`;
+                    diskStatus.textContent = `Disk: ${used}%`;
+                    diskStatus.title = `${free} free`;
+                    // Screenshots accumulate here, so a full disk is a real
+                    // failure mode rather than a curiosity. The health monitor
+                    // warns below 500 MB free, so flag before that bites.
+                    diskStatus.className = (freeMb < 500 || used >= 95) ? 'system-badge error'
+                                         : (freeMb < 2048 || used >= 85) ? 'system-badge warning'
+                                         : 'system-badge ok';
+                } else {
+                    diskStatus.textContent = 'Disk: --';
+                    diskStatus.title = 'Disk usage';
+                    diskStatus.className = 'system-badge';
                 }
 
                 const hdmiStatus = document.getElementById('hdmi-status');
