@@ -2350,6 +2350,9 @@ class Minus:
 
             # Memory/health
             'memory_percent': health_status.memory_percent if health_status else 0,
+            'disk_free_mb': health_status.disk_free_mb if health_status else 0,
+            'disk_used_percent': (health_status.disk_used_percent
+                                  if health_status else 0),
             'temperature_c': self._get_soc_temperature(),
             'ustreamer_ok': health_status.ustreamer_responding if health_status else True,
             'video_ok': health_status.video_pipeline_ok if health_status else True,
