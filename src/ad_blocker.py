@@ -83,6 +83,8 @@ class DRMAdBlocker:
         self._last_error_time = 0
         self._pipeline_restarting = False
         self._restart_lock = threading.Lock()
+        # Serialises display-pipeline construction. See _init_pipeline.
+        self._build_lock = threading.RLock()
 
         # FPS tracking
         self._frame_count = 0
@@ -328,8 +330,53 @@ class DRMAdBlocker:
                 and abs(s.get('contrast', 1.0) - 1.0) < 1e-6
                 and abs(s.get('hue', 0.0)) < 1e-6)
 
+    def _teardown_pipeline(self):
+        """Stop and release the current display pipeline, if any.
+
+        Removes the bus signal watch before dropping the pipeline -- skipping
+        that leaks a file descriptor per rebuild (see the bus-watch FD leak).
+        """
+        pipeline, self.pipeline = self.pipeline, None
+        if pipeline is None:
+            return
+        try:
+            if self.bus:
+                self.bus.remove_signal_watch()
+                self.bus = None
+            pipeline.set_state(Gst.State.NULL)
+        except Exception as e:
+            logger.debug(f"[DRMAdBlocker] Error tearing down pipeline: {e}")
+
     def _init_pipeline(self):
-        """Initialize simple GStreamer display pipeline with queue element."""
+        """Build the display pipeline, replacing any that is already live.
+
+        There must only ever be ONE display pipeline. Two paths build one --
+        start() and _restart_pipeline() -- and nothing stopped them racing.
+        Observed live: the TV came on, the health monitor's reconnect restart
+        and the display retry loop both rebuilt at the same second, and the
+        loser was overwritten in self.pipeline while still PLAYING. Nothing
+        referenced it any more, so nothing ever stopped it.
+
+        It cost twice over. Both pipelines decoded 4K at 60fps, doubling VPU
+        and CPU load on a SoC already riding its thermal trip. And the thermal
+        frame gate keeps its token bucket on this object, not per pipeline, so
+        in degraded mode the two split the 30fps budget and the screen got ~15.
+
+        So the invariant is enforced here, where pipelines are born: take the
+        build lock, tear down whatever is live, then build.
+        """
+        with self._build_lock:
+            if self.pipeline is not None:
+                logger.warning("[DRMAdBlocker] Replacing a live display pipeline "
+                               "— tearing it down first so it cannot be orphaned")
+                self._teardown_pipeline()
+            # A fresh pipeline gets a fresh frame budget.
+            self._framegate_credit = 0.0
+            self._framegate_last_ts = None
+            return self._build_pipeline()
+
+    def _build_pipeline(self):
+        """Construct the display pipeline. Call only via _init_pipeline."""
         try:
             # Simple pipeline with small queue for low latency
             # - 3 buffer queue provides minimal latency while absorbing brief hiccups

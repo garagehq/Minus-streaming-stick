@@ -268,6 +268,7 @@
                     <span id="ocr-status" class="system-badge">OCR: --</span>
                     <span id="vlm-status" class="system-badge">VLM: --</span>
                     <span id="asr-status" class="system-badge">ASR: --</span>
+                    <span id="cpu-status" class="system-badge" title="CPU usage, all cores">CPU: --</span>
                     <span id="memory-status" class="system-badge">Mem: --</span>
                     <span id="temp-status" class="system-badge">Temp: --</span>
                     <span id="disk-status" class="system-badge" title="Disk usage">Disk: --</span>
@@ -1435,6 +1436,20 @@
                     if (o.disabled) { ocrBadge.textContent = 'off'; ocrBadge.className = 'connection-badge-sm disconnected'; }
                     else if (o.ready) { ocrBadge.textContent = 'live'; ocrBadge.className = 'connection-badge-sm connected'; }
                     else { ocrBadge.textContent = 'loading'; ocrBadge.className = 'connection-badge-sm disconnected'; }
+                }
+
+                const cpuStatus = document.getElementById('cpu-status');
+                if (status.cpu_percent != null && status.cpu_percent > 0) {
+                    const cpu = Math.round(status.cpu_percent);
+                    cpuStatus.textContent = `CPU: ${cpu}%`;
+                    // Averaged over all 8 cores, so sustained high numbers mean
+                    // real contention -- and on this SoC, heat.
+                    cpuStatus.className = cpu >= 90 ? 'system-badge error'
+                                        : cpu >= 70 ? 'system-badge warning'
+                                        : 'system-badge ok';
+                } else {
+                    cpuStatus.textContent = 'CPU: --';
+                    cpuStatus.className = 'system-badge';
                 }
 
                 const memStatus = document.getElementById('memory-status');
