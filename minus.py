@@ -2350,6 +2350,7 @@ class Minus:
 
             # Memory/health
             'memory_percent': health_status.memory_percent if health_status else 0,
+            'cpu_percent': health_status.cpu_percent if health_status else 0,
             'disk_free_mb': health_status.disk_free_mb if health_status else 0,
             'disk_used_percent': (health_status.disk_used_percent
                                   if health_status else 0),

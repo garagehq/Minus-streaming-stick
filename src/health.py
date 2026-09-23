@@ -43,6 +43,7 @@ class HealthStatus:
     vlm_consecutive_timeouts: int = 0
     ocr_ready: bool = False
     memory_percent: float = 0
+    cpu_percent: float = 0
     disk_free_mb: float = 0
     disk_used_percent: float = 0
     uptime_seconds: float = 0
@@ -177,6 +178,7 @@ class HealthMonitor:
 
         # Resources
         status.memory_percent = self._get_memory_percent()
+        status.cpu_percent = self._get_cpu_percent()
         status.disk_free_mb = self._get_disk_free_mb()
         status.disk_used_percent = self._get_disk_used_percent()
 
@@ -902,6 +904,31 @@ class HealthMonitor:
         except Exception as e:
             logger.debug(f"[HealthMonitor] ALSA zombie check error: {e}")
             return False
+
+    def _get_cpu_percent(self) -> float:
+        """Whole-system CPU busy percentage since the previous health check.
+
+        /proc/stat holds cumulative jiffies, so a single read says nothing
+        about NOW -- it is the difference between two reads that matters. The
+        first call only records a baseline and reports 0. iowait counts as
+        idle: the core is free, just waiting on storage.
+        """
+        try:
+            with open('/proc/stat') as f:
+                fields = [int(x) for x in f.readline().split()[1:9]]
+            idle = fields[3] + fields[4]
+            total = sum(fields)
+            prev = getattr(self, '_cpu_prev', None)
+            self._cpu_prev = (total, idle)
+            if prev is None:
+                return 0.0
+            d_total = total - prev[0]
+            d_idle = idle - prev[1]
+            if d_total <= 0:
+                return 0.0
+            return max(0.0, min(100.0, (1.0 - d_idle / d_total) * 100.0))
+        except Exception:
+            return 0.0
 
     def _get_memory_percent(self) -> float:
         """Get current memory usage percentage."""
