@@ -1773,6 +1773,12 @@ input:checked + .toggle-slider:before {
     outline: none;
     -webkit-appearance: none;
     appearance: none;
+    /* Let a vertical swipe scroll the page instead of being captured as a
+       drag. Without this, scrolling past the picture controls on a phone
+       grabs whichever slider the finger landed on and commits the new value
+       on release -- which is how brightness silently became 0.10 and then
+       persisted across every restart. Horizontal drags still adjust. */
+    touch-action: pan-y;
 }
 
 .color-slider::-webkit-slider-thumb {

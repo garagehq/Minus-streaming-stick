@@ -357,6 +357,10 @@ class TestFramegate(unittest.TestCase):
         b.ustreamer_port = 9090
         b.plane_id = 192
         b.connector_id = 231
+        b.pipeline = None
+        b.bus = None
+        import threading
+        b._build_lock = threading.RLock()
         with patch('ad_blocker.Gst') as mock_gst:
             b._init_pipeline()
             launch = mock_gst.parse_launch.call_args[0][0]

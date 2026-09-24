@@ -83,6 +83,8 @@ class DRMAdBlocker:
         self._last_error_time = 0
         self._pipeline_restarting = False
         self._restart_lock = threading.Lock()
+        # Serialises display-pipeline construction. See _init_pipeline.
+        self._build_lock = threading.RLock()
 
         # FPS tracking
         self._frame_count = 0
@@ -328,8 +330,53 @@ class DRMAdBlocker:
                 and abs(s.get('contrast', 1.0) - 1.0) < 1e-6
                 and abs(s.get('hue', 0.0)) < 1e-6)
 
+    def _teardown_pipeline(self):
+        """Stop and release the current display pipeline, if any.
+
+        Removes the bus signal watch before dropping the pipeline -- skipping
+        that leaks a file descriptor per rebuild (see the bus-watch FD leak).
+        """
+        pipeline, self.pipeline = self.pipeline, None
+        if pipeline is None:
+            return
+        try:
+            if self.bus:
+                self.bus.remove_signal_watch()
+                self.bus = None
+            pipeline.set_state(Gst.State.NULL)
+        except Exception as e:
+            logger.debug(f"[DRMAdBlocker] Error tearing down pipeline: {e}")
+
     def _init_pipeline(self):
-        """Initialize simple GStreamer display pipeline with queue element."""
+        """Build the display pipeline, replacing any that is already live.
+
+        There must only ever be ONE display pipeline. Two paths build one --
+        start() and _restart_pipeline() -- and nothing stopped them racing.
+        Observed live: the TV came on, the health monitor's reconnect restart
+        and the display retry loop both rebuilt at the same second, and the
+        loser was overwritten in self.pipeline while still PLAYING. Nothing
+        referenced it any more, so nothing ever stopped it.
+
+        It cost twice over. Both pipelines decoded 4K at 60fps, doubling VPU
+        and CPU load on a SoC already riding its thermal trip. And the thermal
+        frame gate keeps its token bucket on this object, not per pipeline, so
+        in degraded mode the two split the 30fps budget and the screen got ~15.
+
+        So the invariant is enforced here, where pipelines are born: take the
+        build lock, tear down whatever is live, then build.
+        """
+        with self._build_lock:
+            if self.pipeline is not None:
+                logger.warning("[DRMAdBlocker] Replacing a live display pipeline "
+                               "— tearing it down first so it cannot be orphaned")
+                self._teardown_pipeline()
+            # A fresh pipeline gets a fresh frame budget.
+            self._framegate_credit = 0.0
+            self._framegate_last_ts = None
+            return self._build_pipeline()
+
+    def _build_pipeline(self):
+        """Construct the display pipeline. Call only via _init_pipeline."""
         try:
             # Simple pipeline with small queue for low latency
             # - 3 buffer queue provides minimal latency while absorbing brief hiccups
@@ -528,6 +575,8 @@ class DRMAdBlocker:
         Returns:
             dict with success status and current values
         """
+        before = self.get_color_settings()
+
         if not self.pipeline:
             # No pipeline at all (e.g. mid signal-loss recovery). Persist the
             # values so _init_pipeline bakes them in at the next start —
@@ -584,6 +633,15 @@ class DRMAdBlocker:
                 colorbalance.set_property('hue', hue)
 
             current = self.get_color_settings()
+            # Log what CHANGED, not just where we landed. Tracing an
+            # unexplained picture change previously meant diffing two
+            # consecutive log lines and guessing which field moved.
+            deltas = [f"{k} {before.get(k, 0.0):.2f}->{current[k]:.2f}"
+                      for k in ('saturation', 'brightness', 'contrast', 'hue')
+                      if abs(before.get(k, 0.0) - current[k]) > 1e-6]
+            if deltas:
+                logger.warning("[DRMAdBlocker] Picture settings changed: "
+                               + ", ".join(deltas))
             logger.info(f"[DRMAdBlocker] Color settings updated: sat={current['saturation']:.2f} "
                        f"bright={current['brightness']:.2f} contrast={current['contrast']:.2f} "
                        f"hue={current['hue']:.2f}")
@@ -616,6 +674,25 @@ class DRMAdBlocker:
                 except Exception as e:
                     logger.debug(f"[DRMAdBlocker] Error during pipeline cleanup: {e}")
                 self.pipeline = None
+
+            # DRM is free right here -- the old pipeline is NULL and the new
+            # one does not exist yet -- which is the only window in this path
+            # where the HDMI transmitter can be re-initialised.
+            #
+            # It has to happen before audio opens its PCM. The rockchip HDMI-TX
+            # driver programs its audio infoframe and clock regeneration at PCM
+            # prepare time, and if the link was not freshly trained the lane
+            # comes up dead: the PCM runs, hw_ptr advances, ALSA reports
+            # RUNNING, jack and ELD read fine, and the sink plays nothing. No
+            # watchdog can see it, and reopening the PCM does NOT fix it --
+            # measured directly, hw_ptr reset and advanced with the sink still
+            # silent. Only this DPMS cycle brings the lane back.
+            #
+            # The reconnect and no-signal paths already did this; normal
+            # start-up did not, so a boot with the display already attached
+            # produced silent HDMI-TX audio that survived every restart.
+            self._force_hdmi_reinit_if_connected()
+
             # Reinitialize the normal pipeline
             self._init_pipeline()
 
@@ -675,6 +752,27 @@ class DRMAdBlocker:
         if self._watchdog_thread:
             self._watchdog_thread.join(timeout=2.0)
             self._watchdog_thread = None
+
+    def _force_hdmi_reinit_if_connected(self):
+        """DPMS-cycle the transmitter, but only when something is attached.
+
+        With no display present there is no link to train, and cycling DPMS
+        would only fight the no-signal path that owns the output in that state.
+        Failure is never fatal: the video pipeline is what matters here, and it
+        comes up regardless.
+        """
+        try:
+            from pathlib import Path
+            attached = any(
+                (c / 'status').read_text().strip() == 'connected'
+                for c in Path('/sys/class/drm').glob('card0-HDMI-A-*')
+                if (c / 'status').exists())
+            if not attached:
+                logger.debug("[DRMAdBlocker] No HDMI output attached — skipping TX re-init")
+                return
+            self._force_hdmi_reinit()
+        except Exception as e:
+            logger.warning(f"[DRMAdBlocker] HDMI TX re-init skipped: {e}")
 
     def _force_hdmi_reinit(self):
         """Force HDMI PHY reinitialization via DPMS cycle.

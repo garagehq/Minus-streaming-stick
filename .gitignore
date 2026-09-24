@@ -9,3 +9,10 @@ night-mode-logs.md
 night-shift-logs.md
 night-shift-monitor.sh
 test-output/
+
+# ADB keypairs generated per streaming device (named by IP). Private keys —
+# never commit.
+/[0-9]*.[0-9]*.[0-9]*.[0-9]*
+/[0-9]*.[0-9]*.[0-9]*.[0-9]*.pub
+adbkey
+adbkey.pub

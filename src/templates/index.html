@@ -268,8 +268,10 @@
                     <span id="ocr-status" class="system-badge">OCR: --</span>
                     <span id="vlm-status" class="system-badge">VLM: --</span>
                     <span id="asr-status" class="system-badge">ASR: --</span>
+                    <span id="cpu-status" class="system-badge" title="CPU usage, all cores">CPU: --</span>
                     <span id="memory-status" class="system-badge">Mem: --</span>
                     <span id="temp-status" class="system-badge">Temp: --</span>
+                    <span id="disk-status" class="system-badge" title="Disk usage">Disk: --</span>
                     <span id="hdmi-status" class="system-badge">HDMI: --</span>
                 </div>
             </section>
@@ -1436,6 +1438,20 @@
                     else { ocrBadge.textContent = 'loading'; ocrBadge.className = 'connection-badge-sm disconnected'; }
                 }
 
+                const cpuStatus = document.getElementById('cpu-status');
+                if (status.cpu_percent != null && status.cpu_percent > 0) {
+                    const cpu = Math.round(status.cpu_percent);
+                    cpuStatus.textContent = `CPU: ${cpu}%`;
+                    // Averaged over all 8 cores, so sustained high numbers mean
+                    // real contention -- and on this SoC, heat.
+                    cpuStatus.className = cpu >= 90 ? 'system-badge error'
+                                        : cpu >= 70 ? 'system-badge warning'
+                                        : 'system-badge ok';
+                } else {
+                    cpuStatus.textContent = 'CPU: --';
+                    cpuStatus.className = 'system-badge';
+                }
+
                 const memStatus = document.getElementById('memory-status');
                 const memPercent = Math.round(status.memory_percent || 0);
                 memStatus.textContent = `Mem: ${memPercent}%`;
@@ -1453,6 +1469,27 @@
                 } else {
                     tempStatus.textContent = 'Temp: --';
                     tempStatus.className = 'system-badge';
+                }
+
+                const diskStatus = document.getElementById('disk-status');
+                if (status.disk_used_percent != null && status.disk_used_percent > 0) {
+                    const used = Math.round(status.disk_used_percent);
+                    const freeMb = status.disk_free_mb || 0;
+                    const free = freeMb >= 1024
+                        ? `${(freeMb / 1024).toFixed(1)} GB`
+                        : `${Math.round(freeMb)} MB`;
+                    diskStatus.textContent = `Disk: ${used}%`;
+                    diskStatus.title = `${free} free`;
+                    // Screenshots accumulate here, so a full disk is a real
+                    // failure mode rather than a curiosity. The health monitor
+                    // warns below 500 MB free, so flag before that bites.
+                    diskStatus.className = (freeMb < 500 || used >= 95) ? 'system-badge error'
+                                         : (freeMb < 2048 || used >= 85) ? 'system-badge warning'
+                                         : 'system-badge ok';
+                } else {
+                    diskStatus.textContent = 'Disk: --';
+                    diskStatus.title = 'Disk usage';
+                    diskStatus.className = 'system-badge';
                 }
 
                 const hdmiStatus = document.getElementById('hdmi-status');
