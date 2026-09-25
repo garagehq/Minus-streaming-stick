@@ -9,7 +9,7 @@ Minus is an HDMI passthrough device that detects and blocks advertisements in re
 ### Ad Detection
 
 **Dual-NPU ML Pipeline:**
-- **PaddleOCR** on RK3588 NPU (~400ms per frame) — detects text-based ad indicators
+- **PaddleOCR PP-OCRv6** on RK3588 NPU (~180ms p50 / ~275ms p90 per frame) — detects text-based ad indicators, and reads an ad's own countdown to know how long to hold the block
 - **[minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1)** (fine-tuned LFM2.5-VL-450M) on Axera LLM 8850 NPU (~0.37s per frame, prefill-only on 16 fused decoder layers, no decode loop) — visual content analysis
 - Both workers run in dedicated **subprocesses** (`src/ocr_worker.py`, `src/vlm_worker.py`) with hard timeouts so a stuck NPU inference can never freeze the detection loop. The worker processes ship with warmup inferences, keepalive pings, and soft/hard timeout escalation.
 
@@ -46,7 +46,6 @@ For 90 seconds after the TV reconnects (detected by the health monitor), ad bloc
 The blocking overlay rolls a single *replacement mode* at the start of each ad break and sticks with it for the whole break (plus a 30-second cooldown so back-to-back ads reuse the same style). Available kinds:
 - **Vocabulary** — Spanish words with 1-2 example sentences (default)
 - **Did You Know?** — short trivia cards (`src/facts.py`)
-- **Haikus** — classical + modern short poems (`src/haiku.py`)
 - **Photo Screensaver** — cycles user-uploaded photos as the blocking background every 5 seconds. Photos are uploaded via the web UI Settings → Replace tab, stored under `~/.minus_media/photos/` (re-encoded to 1920px max, JPEG quality 85, capped at 200 photos / 200 MB).
 
 The overlay also gets:

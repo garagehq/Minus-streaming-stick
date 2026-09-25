@@ -29,7 +29,7 @@ Minus is a 4K@60fps HDMI passthrough. Your Roku, Fire TV, or Google TV plugs int
      │  PaddleOCR     │ │  minus-v0.1  │ │  Moonshine   │
      │  RK3588 NPU    │ │  (VLM)       │ │  ASR (CPU)   │
      │  reads ad UI   │ │  Axera NPU   │ │  hears ad    │
-     │  text ~400ms   │ │  ~370ms      │ │  language    │
+     │  text ~200ms   │ │  ~370ms      │ │  language    │
      └────────────────┘ └──────────────┘ └──────────────┘
               └───────────────┼────────────────┘
                               ▼
@@ -37,11 +37,11 @@ Minus is a 4K@60fps HDMI passthrough. Your Roku, Fire TV, or Google TV plugs int
               (mute + overlay, typically < 2s to react)
 ```
 
-- OCR (PaddleOCR on the RK3588's NPU) reads on-screen ad UI like "Skip in 5", "Ad 2 of 3", and countdown timers, including the character misreads OCR makes on real TVs.
+- OCR (PaddleOCR PP-OCRv6 on the RK3588's NPU, ~200ms a frame) reads on-screen ad UI like "Skip in 5", "Ad 2 of 3", and countdown timers, including the character misreads OCR makes on real TVs. When an ad shows its own countdown, Minus reads the number and counts it down in real time, so it knows the ad is still running even while OCR briefly loses the text. That clock only ever helps hold a block that the detectors already started. On its own it never starts one.
 - [minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1), a 450M-parameter vision-language model fine-tuned for this exact job, looks at the raw frame and answers "is this an advertisement?" in about 370ms on an Axera AX8850 NPU. It needs no text on screen to work.
 - ASR (Moonshine tiny-en on CPU) transcribes the audio and listens for marketing language as a confirmation signal.
 
-When the votes say "ad", audio mutes immediately and the screen switches to an overlay rendered at 60fps inside the hardware JPEG encoder (no desktop stack, no X11). When the ad ends, usually within a second, the show comes back.
+When the votes say "ad", audio mutes immediately and the screen switches to an overlay rendered at 60fps inside the hardware JPEG encoder (no desktop stack, no X11). When the ad ends the show comes back after a few seconds, about 5 in practice. Minus waits for several clean frames and a short floor before it lets go, because OCR routinely loses an ad's text for a few seconds mid-ad, and releasing on the first gap would flash the ad back on screen.
 
 ## The model
 
@@ -65,20 +65,22 @@ The two models are distributed differently, which trips people up when setting u
 
 | Model | Runs on | Where it comes from |
 |---|---|---|
-| PaddleOCR PP-OCRv3 detection + recognition | RK3588 NPU | **In this repository**, [`models/paddleocr/`](models/paddleocr/). ~11 MB, nothing to download. |
+| PaddleOCR PP-OCRv6 detection + recognition (default), plus PP-OCRv3 as a rollback | RK3588 NPU | **In this repository**, [`models/paddleocr/`](models/paddleocr/). ~17 MB for both generations, nothing to download. |
 | minus-v0.1 (450M VLM) | Axera AX-M1 | [Hugging Face](https://huggingface.co/TheGarageDev/Minus-v0.1), ~300 MB, into `/home/radxa/axera_models/minus-v0.1/` |
 
-OCR needs three files, all present in the repo: a detection model that finds text regions, a recognition model that reads each region, and the character dictionary the output is decoded through. A fourth model, the rotated-text classifier, is included for completeness but Minus doesn't load it, since TV overlay text is never upside down. [`models/paddleocr/README.md`](models/paddleocr/README.md) has the details and checksums.
+OCR needs three files per generation, all present in the repo: a detection model that finds text regions, a recognition model that reads each region, and the character dictionary the output is decoded through. Each generation has its own dictionary, and the two are not interchangeable. `MINUS_OCR_MODEL_VERSION` picks one: `v6` (the default) or `v3`. The loader keeps each model paired with its own dictionary and thresholds, so they can't be mixed up. v6 was chosen on latency: 183ms p50 and 274ms p90 in production, and a tighter tail that keeps text-heavy ad frames under the hard timeout. A rotated-text classifier is also included, but Minus doesn't load it, since TV overlay text is never upside down. [`models/paddleocr/README.md`](models/paddleocr/README.md) has the details and checksums.
 
 ## Features
 
 - Real-time ad blocking via OCR + VLM + ASR triangulation. The decision engine handles the ugly cases: flicker between ads, paused screens that look like ads, black transition frames, frozen streams.
-- Ads get replaced, not just blacked out. Choose Spanish vocabulary cards (750+ entries), trivia, haikus, or a photo screensaver of your own pictures.
+- Reads an ad's own countdown ("Skip in 12", "Ad 0:15") and counts it down to know how much of the ad is left. It's an extra signal on top of the detectors, never a trigger by itself. It lets go if the countdown freezes or the audio goes silent, which is what a paused video looks like.
+- Ads get replaced, not just blacked out. Choose Spanish vocabulary cards (750+ entries), trivia facts, or a photo screensaver of your own pictures.
 - 4K@60fps passthrough with a zero-copy VPU/RGA pipeline in a [patched ustreamer](https://github.com/garagehq/ustreamer), around 5% CPU.
-- Audio mutes the instant a block starts, with watchdogs that recover the pipeline if anything wedges.
+- Audio mutes the instant a block starts, with watchdogs that recover the pipeline if anything wedges, including re-initialising the HDMI output when the TV comes back so sound isn't left silent.
+- Thermal-adaptive: if the SoC holds at 83 °C, Minus caps the display at a steady 30fps and makes blocking stickier until it cools below 75 °C, rather than letting the frame rate collapse under throttling.
 - Web UI with the live feed, pause controls, detection history, screenshot review, and settings, usable from any device on your network.
 - Remote control integration for Fire TV (ADB), Roku (ECP), and Google TV (ADB), including pressing "Skip Ad" for you.
-- Autonomous mode keeps YouTube playing unattended on a schedule to collect training data, using the VLM to navigate.
+- Autonomous mode keeps YouTube playing unattended to collect training data, midnight to 9am by default, using the VLM to navigate. It stands down the moment the TV is turned on so it never fights you for the remote, and if the streaming stick has put itself to sleep it presses Home to wake it. A music-video mode steers toward music, which carries far more ads per hour.
 - Odds and ends: IR blaster for HDMI switches, WS2812B status LED strip, WiFi captive portal for first-time setup, HDCP 1.4 capture support.
 
 ## Web UI
@@ -87,7 +89,7 @@ OCR needs three files, all present in the repo: a detection model that finds tex
 |---|---|
 | ![Minus web UI on desktop](docs/images/webui-home.png) | ![Minus web UI on mobile](docs/images/webui-mobile.png) |
 
-The web UI is served by the device itself (Flask). Live feed, block/pause controls, per-detection history, a swipe-based screenshot review flow for cleaning up training data, device remotes, and every setting. No app to install.
+The web UI is served by the device itself (Flask). Live feed, block/pause controls, per-detection history, a swipe-based screenshot review flow for cleaning up training data, device remotes, and every setting. A status row shows OCR, VLM and ASR state alongside CPU, memory, temperature, disk and HDMI signal, and turns amber or red as things get tight. No app to install.
 
 ## Hardware
 
@@ -97,7 +99,7 @@ Roughly **$350-$450** in parts. Full bill of materials, part links, and sizing n
 |---|---|
 | [Radxa ROCK 5B+](https://radxa.com/products/rock5/5bp/) or [ROCK 5B](https://radxa.com/products/rock5/5b/), 8 GB RAM recommended (4 GB minimum) | RK3588 SoC. The 4K@60 HDMI **input** is the part that matters: boards without one can't do passthrough. Also provides the NPU for OCR and the VPU for 4K60 JPEG encoding. |
 | [Radxa AICore AX-M1](https://radxa.com/products/aicore/ax-m1/) (Axera AX8850, M.2 2280 M-key, 24 TOPS, 8 GB) | Runs minus-v0.1 at ~370ms per inference |
-| Heatsink + fan, and a 30 W USB-C PD supply | Both required. 4K60 passthrough sits at 80-85 °C with the fan running, and an underpowered supply causes random pipeline restarts. |
+| Heatsink + fan, and a 30 W USB-C PD supply | Both required. 4K60 passthrough runs around 80 °C with the fan going; past 83 °C Minus drops to 30fps until it cools. An underpowered supply causes random pipeline restarts. |
 | 64 GB+ eMMC or microSD, 2x High Speed HDMI cables | Source → Minus → TV |
 | *Optional:* IR LED on GPIO | Controls an HDMI switch for multi-device setups |
 | *Optional:* WS2812B 8-LED strip | Status indicator (idle / blocking / error / ...) |
@@ -142,7 +144,7 @@ a driver the pipeline was validated against — update those deliberately with
 history is in `/var/log/unattended-upgrades/`. If the web UI says the
 package is missing: `sudo apt-get install unattended-upgrades`.
 
-The full dependency list and deployment walkthrough are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Model paths and detection thresholds are set with environment variables (`MINUS_VLM_MODEL_DIR`, `MINUS_OCR_MODEL_DIR`, etc.); [CLAUDE.md](CLAUDE.md) documents all of them.
+The full dependency list and deployment walkthrough are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Model paths, the OCR generation and detection thresholds are set with environment variables (`MINUS_VLM_MODEL_DIR`, `MINUS_OCR_MODEL_DIR`, `MINUS_OCR_MODEL_VERSION`, etc.); [CLAUDE.md](CLAUDE.md) documents all of them.
 
 Minus auto-detects the connected HDMI output, resolution, DRM plane, and audio device at startup, and works with both 4K and 1080p displays.
 

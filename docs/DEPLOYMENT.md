@@ -82,7 +82,8 @@ cp ustreamer /home/radxa/ustreamer-patched
 
 ### 5. OCR Models (nothing to do)
 
-The PaddleOCR PP-OCRv3 models that read on-screen ad text run on the RK3588's
+The PaddleOCR models that read on-screen ad text (PP-OCRv6 by default, with
+PP-OCRv3 kept as a rollback via `MINUS_OCR_MODEL_VERSION=v3`) run on the RK3588's
 own NPU and **ship inside this repository** at `models/paddleocr/`, so a fresh
 clone already has them. `src/config.py` points `OCR_MODEL_DIR` there
 automatically, falling back to the legacy `rknn-llm/.../paddleocr` path only if
