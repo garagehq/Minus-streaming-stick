@@ -1114,24 +1114,22 @@ class Minus:
                 self.system_notification = None
 
     def _find_model_paths(self):
-        """Find PaddleOCR model paths.
-        Search order: local models dir, then configurable OCR_MODEL_DIR (env MINUS_OCR_MODEL_DIR).
+        """Find the PaddleOCR models the OCR worker will load.
+
+        This gates whether OCR starts at all, so it must ask exactly the
+        question the worker asks. It used to run its own search -- a
+        different folder list, and ppocrv3_* filenames only -- so a checkout
+        carrying just the default v6 models reported "OCR model files not
+        found" and ran with OCR disabled, while the worker would have loaded
+        them fine. resolve_ocr_models() is now the single source of truth for
+        both, and it honours MINUS_OCR_MODEL_VERSION the same way.
         """
-        search_paths = [
-            Path(__file__).parent / 'models' / 'paddleocr',
-            Path(OCR_MODEL_DIR),
-        ]
-
-        for base_path in search_paths:
-            det_model = list(base_path.glob('ppocrv3_det_*.rknn'))
-            rec_model = list(base_path.glob('ppocrv3_rec_*.rknn'))
-            dict_path = base_path / 'ppocr_keys_v1.txt'
-
-            if det_model and rec_model and dict_path.exists():
-                logger.info(f"Found OCR models at: {base_path}")
-                return str(det_model[0]), str(rec_model[0]), str(dict_path)
-
-        return None, None, None
+        from config import resolve_ocr_models
+        models = resolve_ocr_models()
+        if not models:
+            return None, None, None
+        logger.info(f"Found OCR models ({models['version']}) at: {models['base_dir']}")
+        return models['det'], models['rec'], models['dict']
 
     # ===== Health Recovery Methods =====
 

@@ -31,10 +31,12 @@ dictionary against v6 weights decodes to the wrong characters entirely.
 
 ## How Minus finds them
 
-`src/config.py` sets `OCR_MODEL_DIR` to this directory whenever it contains the
-shipped models (it checks for a `ppocrv3_det_*.rknn`), and otherwise falls back
-to the legacy `rknn-llm/.../models/paddleocr` path. Override with
-`MINUS_OCR_MODEL_DIR=/some/dir`.
+`src/config.py` sets `OCR_MODEL_DIR` to this directory whenever it holds a
+complete model set for either generation, and otherwise falls back to the
+legacy `rknn-llm/.../models/paddleocr` path. Override with
+`MINUS_OCR_MODEL_DIR=/some/dir`. The startup check that decides whether OCR
+runs at all uses the same resolver as the OCR worker, so the two cannot
+disagree about whether models are present.
 
 `MINUS_OCR_MODEL_VERSION` picks the generation: `v6` (default), `v3`, or
 `auto` (v6 when present, else v3). `resolve_ocr_models()` binds each

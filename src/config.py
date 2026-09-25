@@ -121,10 +121,6 @@ VLM_MODEL_DIR = _get_env_path('MINUS_VLM_MODEL_DIR', '/home/radxa/axera_models/m
 # Override with MINUS_OCR_MODEL_DIR.
 _REPO_OCR_MODEL_DIR = Path(__file__).resolve().parent.parent / 'models' / 'paddleocr'
 _LEGACY_OCR_MODEL_DIR = '/home/radxa/rknn-llm/examples/multimodal_model_demo/deploy/install/demo_Linux_aarch64/models/paddleocr'
-OCR_MODEL_DIR = _get_env_path(
-    'MINUS_OCR_MODEL_DIR',
-    str(_REPO_OCR_MODEL_DIR) if any(_REPO_OCR_MODEL_DIR.glob('ppocrv3_det_*.rknn')) else _LEGACY_OCR_MODEL_DIR,
-)
 
 # Which PP-OCR generation to load. Both sets of weights ship side by side in
 # models/paddleocr/ and are selected here rather than by renaming files.
@@ -157,6 +153,34 @@ OCR_MODEL_GENERATIONS = {
         'db_params': {'thresh': 0.2, 'box_thresh': 0.4, 'unclip_ratio': 1.4},
     },
 }
+
+
+def _has_ocr_models(base_dir) -> bool:
+    """True when base_dir holds a complete model set for ANY generation.
+
+    Deciding by one generation's filename is how the repo copy used to be
+    found: this checked for ppocrv3_det_*.rknn only, so a checkout carrying
+    just the v6 models -- the default -- was treated as having no models and
+    fell back to the legacy path.
+    """
+    base = Path(base_dir)
+    for gen in OCR_MODEL_GENERATIONS.values():
+        try:
+            if (any(base.glob(gen['det_glob'])) and any(base.glob(gen['rec_glob']))
+                    and (base / gen['dict_name']).exists()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _default_ocr_model_dir(repo_dir=_REPO_OCR_MODEL_DIR,
+                           legacy_dir=_LEGACY_OCR_MODEL_DIR) -> str:
+    """The in-repo models when they are usable, else the legacy install."""
+    return str(repo_dir) if _has_ocr_models(repo_dir) else str(legacy_dir)
+
+
+OCR_MODEL_DIR = _get_env_path('MINUS_OCR_MODEL_DIR', _default_ocr_model_dir())
 
 
 def resolve_ocr_models(base_dir=None, version=None):
