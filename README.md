@@ -99,10 +99,12 @@ Roughly **$350-$450** in parts. Full bill of materials, part links, and sizing n
 |---|---|
 | [Radxa ROCK 5B+](https://radxa.com/products/rock5/5bp/) or [ROCK 5B](https://radxa.com/products/rock5/5b/), 8 GB RAM recommended (4 GB minimum) | RK3588 SoC. The 4K@60 HDMI **input** is the part that matters: boards without one can't do passthrough. Also provides the NPU for OCR and the VPU for 4K60 JPEG encoding. |
 | [Radxa AICore AX-M1](https://radxa.com/products/aicore/ax-m1/) (Axera AX8850, M.2 2280 M-key, 24 TOPS, 8 GB) | Runs minus-v0.1 at ~370ms per inference |
-| Heatsink + fan, and a 30 W USB-C PD supply | Both required. 4K60 passthrough runs around 80 °C with the fan going; past 83 °C Minus drops to 30fps until it cools. An underpowered supply causes random pipeline restarts. |
-| 64 GB+ eMMC or microSD, 2x High Speed HDMI cables | Source → Minus → TV |
-| *Optional:* IR LED on GPIO | Controls an HDMI switch for multi-device setups |
-| *Optional:* WS2812B 8-LED strip | Status indicator (idle / blocking / error / ...) |
+| [Radxa Heatsink 6240B](https://radxa.com/products/accessories/heatsink-6240b/), heatsink **and** fan ([docs](https://docs.radxa.com/en/accessories/heatsink-case/heatsink-6240b)) | Required. This is Radxa's cooler for the ROCK 5B / 5B+ / 5T. For the 5B+, get **V2.0**: V1.0 has fins that hit the 5B+. 4K60 passthrough runs around 80 °C with the fan going; past 83 °C Minus drops to 30fps until it cools. Passive cooling alone will throttle. |
+| [Radxa Power PD 30W](https://radxa.com/products/accessories/power-pd-30w/), or any [30 W+ USB-C PD supply](https://www.amazon.com/s?k=30W+USB-C+PD+power+adapter) | Required. Radxa's own supply is the one they test the ROCK 5B against. An underpowered supply (a 5 V/2 A phone charger, say) causes random pipeline restarts. |
+| 2x [certified High Speed HDMI cables](https://www.amazon.com/s?k=certified+high+speed+HDMI+cable+18Gbps+4K60), 18 Gbps | Source → Minus → TV. Keep them short; marginal cables show up as "No Signal" at 4K60. |
+| *Optional:* [64 GB+ microSD card](https://www.amazon.com/s?k=64GB+A2+microSD+card) (A2-rated) | Holds the OS if your board has no onboard eMMC. The ROCK 5B+ can be ordered with eMMC built in; the ROCK 5B boots from microSD or an eMMC module. |
+| *Optional:* [IR LED](https://www.amazon.com/s?k=940nm+IR+LED+5mm) (940 nm) on GPIO | Controls an HDMI switch for multi-device setups, see [docs/IR_TRANSMITTER.md](docs/IR_TRANSMITTER.md) |
+| *Optional:* [WS2812B 8-LED strip](https://www.amazon.com/s?k=WS2812B+8+LED+stick) | Status indicator (idle / blocking / error / ...), see [docs/STATUS_LEDS.md](docs/STATUS_LEDS.md) |
 | *Optional:* HDCP 1.4 sink key | For capturing HDCP-protected sources, see [hdcp/](hdcp/README.md) |
 
 **Operating system: Debian 12 (bookworm) on Radxa's BSP 6.1 kernel**, which is what their official ROCK 5B/5B+ images ship. This is not interchangeable with a mainline kernel: the HDMI receiver (`rk_hdmirx`), the Rockchip MPP encoder, RGA, and the RKNN NPU runtime all live in Rockchip's 6.1 tree. On a mainline kernel the board boots fine and `/dev/video0` simply never appears. Either the KDE or the CLI image works; there is no display server or desktop environment involved at runtime, since Minus talks straight to DRM/KMS and the hardware encoders.
