@@ -1591,7 +1591,8 @@ class Minus:
 
     # ===== Device Setup Methods =====
 
-    def _start_device_setup_delayed(self, delay_seconds: float = 15.0):
+    def _start_device_setup_delayed(self, delay_seconds: float = 15.0,
+                                    known_only: bool = False):
         """Start device setup after a delay (to let display stabilize first).
 
         This is device-aware - checks the configured device type and starts
@@ -1599,7 +1600,32 @@ class Minus:
         - Fire TV / Google TV: Start FireTVSetupManager with ADB flow
         - Roku: Auto-connect using saved IP (no setup overlay needed)
         - Other: Skip setup entirely
+
+        known_only: connect only to a device that has already been set up
+        (saved IP, setup_complete). Used when Minus starts with no picture on
+        the input. First-time pairing is left for later because it needs the
+        screen -- the Fire TV "Allow ADB" dialog is found by OCR -- but
+        reconnecting to a known device does not, and it is the only way to
+        reach a streaming stick that has put itself to sleep.
+
+        Runs at most once per process; a second call is a no-op.
         """
+        if getattr(self, '_device_setup_started', False):
+            return
+        if known_only:
+            try:
+                from src.device_config import get_device_config_manager
+                cfg = get_device_config_manager().get_config()
+                if not (cfg.get('setup_complete') and cfg.get('device_ip')
+                        and cfg.get('device_type') in ('fire_tv', 'google_tv', 'roku')):
+                    logger.info("[DeviceSetup] No paired device yet - "
+                                "waiting for a picture before setup")
+                    return
+            except Exception as e:
+                logger.warning(f"[DeviceSetup] Could not read device config: {e}")
+                return
+        self._device_setup_started = True
+
         def delayed_start():
             logger.info(f"[DeviceSetup] Waiting {delay_seconds}s before starting device setup...")
             time.sleep(delay_seconds)
@@ -4970,6 +4996,18 @@ class Minus:
 
             # Poll for HDMI signal every 2 seconds (even if no-signal display failed)
             self.running = True
+
+            # Reconnect the remote NOW rather than after the picture appears.
+            #
+            # A streaming stick that has put itself to sleep sends no picture,
+            # and waking it takes a keypress -- which needs the remote. Device
+            # setup used to run only after this loop saw a signal, so starting
+            # with the stick asleep left no way to reach it: seen live, the
+            # Fire TV's ADB answered in one second once Minus finally tried,
+            # but Minus did not try for 5.5 minutes because it was waiting for
+            # the picture only a keypress could bring back. It also left
+            # autonomous mode's source wake with no controller to press Home on.
+            self._start_device_setup_delayed(delay_seconds=5.0, known_only=True)
             try:
                 poll_count = 0
                 while self.running:
