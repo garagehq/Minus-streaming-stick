@@ -19,7 +19,7 @@
      │  ┌───────────┐  │           │  ┌───────────────┐  │
      │  │ PaddleOCR │  │           │  │  LFM2.5-VL    │  │
      │  │ RK3588 NPU│  │           │  │ Axera LLM 8850│  │
-     │  │ ~400ms    │  │           │  │ ~0.37s        │  │
+     │  │ ~200ms    │  │           │  │ ~0.37s        │  │
      │  └───────────┘  │           │  └───────────────┘  │
      └────────┬────────┘           └──────────┬──────────┘
               │                               │
@@ -332,10 +332,10 @@ sudo ./uninstall.sh # Remove service
 
 | Metric | Target | Actual |
 |--------|--------|--------|
-| Video FPS | 30fps | 30fps |
+| Video FPS | 60fps | ~50-60fps (30fps capped in thermal-degraded mode) |
 | Blocking FPS | 60fps | 60fps |
-| OCR latency | <500ms | 300-400ms |
-| VLM latency | <1.5s | ~0.9s |
+| OCR latency | <500ms | ~180ms p50, ~275ms p90 (PP-OCRv6) |
+| VLM latency | <1.5s | ~0.37s |
 | Blocking start | <500ms | ~300ms |
 | Blocking end | <300ms | ~250ms |
 | Memory usage | <2GB | ~1.5GB |

@@ -1,8 +1,10 @@
-# PP-OCRv6 (tiny) RKNN models — staged for evaluation
+# PP-OCRv6 (tiny) RKNN models
 
-These are **not loaded by Minus**. `src/config.py` globs `ppocrv3_det_*.rknn`, so
-these `ppocrv6_*` files sit inert next to the v3 models and production keeps
-running PP-OCRv3 until you deliberately switch (see *How to try them* below).
+**These are the default OCR models** (since Sep 2026). `src/config.py` selects
+them through `MINUS_OCR_MODEL_VERSION` (default `v6`); the PP-OCRv3 set next to
+them is kept as a one-variable rollback. Why v6 was chosen, and the production
+numbers behind it, are in [README.md](README.md#pp-ocrv6-is-the-default-sep-2026).
+This file keeps the conversion and evaluation notes from when v6 was staged.
 
 Converted 2026-09-09 from the official PaddlePaddle ONNX exports with
 `rknn-toolkit2` 2.3.2 for `rk3588` (device runtime is `rknpu2` 2.3.0).
@@ -41,12 +43,14 @@ Everything the runtime cares about is unchanged:
 
 Three things *do* differ and matter:
 
-1. **Dictionary.** 6904 entries vs v3's 6624. You must pass `ppocrv6_keys.txt`;
-   using `ppocr_keys_v1.txt` will decode to wrong characters.
+1. **Dictionary.** 6904 entries vs v3's 6624. `ppocrv6_keys.txt` is required;
+   `ppocr_keys_v1.txt` decodes to wrong characters. `resolve_ocr_models()` now
+   binds the right dictionary to each generation, so this can't be mixed up.
 2. **DB post-process params.** PP-OCRv6's `inference.yml` specifies
-   `thresh=0.2, box_thresh=0.4, unclip_ratio=1.4`. `src/ocr.py` constructs
-   `DBPostProcessor()` with its defaults (`0.3 / 0.5 / 1.5`). The v6 values were
-   used in the verification below and found more text regions.
+   `thresh=0.2, box_thresh=0.4, unclip_ratio=1.4`, vs v3's `0.3 / 0.5 / 1.5`.
+   `PaddleOCR` takes `db_params` and the loader passes each generation its own
+   values. The v6 values were used in the verification below and found more
+   text regions.
 3. **Rec normalization.** This build uses PaddleOCR's rec convention
    `(x/255 - 0.5)/0.5` (mean=std=127.5). The v3 build applied ImageNet mean/std
    to the rec model as well, which does not match PaddleOCR's `RecResizeImg` —
@@ -77,31 +81,23 @@ on at least one string (`$307,400` vs v6's `8307,400`). Neither is clean on
 low-resolution overlay text — this is a real A/B worth running against the
 keyword matcher, not a slam dunk.
 
-## How to try them
+## Switching generations
 
-The loader hardcodes the `ppocrv3_*` prefix, so pick one:
+No file renaming is needed — the loader picks a generation and binds its
+detection model, recognition model, dictionary and DB thresholds together:
 
 ```bash
-# A) Separate dir + env override (no repo edits, fully reversible)
-mkdir -p ~/ocr-v6 && cd ~/ocr-v6
-cp ~/Minus/models/paddleocr/ppocrv6_det_*.rknn ppocrv3_det_v6.rknn
-cp ~/Minus/models/paddleocr/ppocrv6_rec_*.rknn ppocrv3_rec_v6.rknn
-cp ~/Minus/models/paddleocr/ppocrv6_keys.txt ppocr_keys_v1.txt
-sudo systemctl stop minus
-MINUS_OCR_MODEL_DIR=~/ocr-v6 python3 ~/Minus/minus.py    # or export it for the service
+MINUS_OCR_MODEL_VERSION=v6    # default
+MINUS_OCR_MODEL_VERSION=v3    # roll back to PP-OCRv3
+MINUS_OCR_MODEL_VERSION=auto  # v6 when present, else v3
 ```
 
-(The filenames are a lie in that directory, but it needs zero code changes and
-you can delete the whole folder to revert.)
+For the service, set it in a systemd drop-in and restart; the startup log
+confirms which set loaded (`Loading models (v6) from ...`). Check a frame with:
 
 ```bash
-# B) Point src/config.py + the dict path at the v6 files, then:
 curl -s -X POST http://localhost/api/ocr/test | python3 -m json.tool
 ```
-
-Either way, also try the v6 DB thresholds (`DBPostProcessor(thresh=0.2,
-box_thresh=0.4, unclip_ratio=1.4)`) — a chunk of the extra regions above came
-from those, not from the model alone.
 
 ## Re-converting / other tiers
 

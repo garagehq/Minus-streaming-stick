@@ -129,10 +129,10 @@ Minus uses two models, and they are distributed differently.
 
 | Model | Where it runs | Where it comes from |
 |---|---|---|
-| **PaddleOCR PP-OCRv3** (detection + recognition) | RK3588 NPU | **In this repository**, at [`models/paddleocr/`](../models/paddleocr/). Nothing to download. |
+| **PaddleOCR PP-OCRv6** (detection + recognition; PP-OCRv3 also ships as a rollback) | RK3588 NPU | **In this repository**, at [`models/paddleocr/`](../models/paddleocr/). Nothing to download. |
 | **minus-v0.1** (450M vision-language ad classifier) | Axera AX-M1 | [Hugging Face: TheGarageDev/Minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1) → `/home/radxa/axera_models/minus-v0.1/` |
 
-The OCR models are ~11 MB and ship with the code, so a fresh clone can read ad
+The OCR models are ~17 MB for both generations and ship with the code, so a fresh clone can read ad
 UI text immediately. See [`models/paddleocr/README.md`](../models/paddleocr/README.md)
 for what each file does, checksums, and how to re-convert them. The VLM is
 ~300 MB and is downloaded separately.

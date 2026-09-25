@@ -3,7 +3,7 @@
 ## Overview
 
 HDMI passthrough with real-time ML-based ad detection and blocking using dual NPUs + CPU ASR:
-- **PaddleOCR** on RK3588 NPU (~400ms per frame, 1.0s timeout)
+- **PaddleOCR PP-OCRv6** on RK3588 NPU (~180ms p50 / ~275ms p90 per frame, 1.5s hard timeout). PP-OCRv3 ships alongside as a rollback (`MINUS_OCR_MODEL_VERSION=v3`); each generation is bound to its own dictionary and DB thresholds in `src/config.py`.
 - **LFM2.5-VL-450M (ft-v2-fused-v2)** on Axera LLM 8850 NPU — **prefill-only on 16 fused decoder layers, ~0.37s per frame deterministic** (1.5s soft / 2s hard timeout). Replaced FastVLM-0.5B iter4 (May 2026): 97.0% holdout accuracy / 99.2% non-ad-recall vs iter4's 94.75% / 95.25%, structurally simpler (no KV cache, no autoregressive decode for `detect_ad` OR autonomous-mode `query_image`, no ml_dtypes bfloat16 ceremony). Both inference paths share one model — no FastVLM dependency anymore. See *FastVLM iter4 → LFM2.5-VL Migration* under Known Issues.
 - **Moonshine tiny-en (ONNX) ASR** on 3 pinned CPU cores (~1.6s per **2s** audio window, max <2s even on dense continuous speech). Runs in a multiprocessing worker subprocess (mirrors OCR/VLM worker pattern) for hard-timeout safety. **CONFIRM-ONLY** audio signal on top of OCR+VLM: decorates the block label (`+asr`) and does a gated mid-block rescue, but **never suppresses a block at start** (the old VETO was removed in 2026-05 — it was killing real ads VLM was sure about). Never fires blocking alone. Engine-selectable via `MINUS_ASR_ENGINE` (faster-whisper fallback for cool/idle hosts; on the thermally-throttled production box faster-whisper's fixed 30s encoder is ~3.3-5s/window — too slow, hence Moonshine which processes audio proportionally). Was whisper.cpp → faster-whisper → Moonshine. See [docs/ASR.md](docs/ASR.md) and *Moonshine ASR migration + decision-engine retune* under Known Issues.
 - **Spanish vocabulary practice** during ad blocks!
@@ -52,7 +52,7 @@ See **[docs/AESTHETICS.md](docs/AESTHETICS.md)** for the complete visual design 
      │  ┌───────────┐  │           │  ┌───────────────┐  │
      │  │ PaddleOCR │  │           │  │  LFM2.5-VL    │  │
      │  │ RK3588 NPU│  │           │  │ Axera LLM 8850│  │
-     │  │ ~400ms    │  │           │  │ ~0.37s        │  │
+     │  │ ~200ms    │  │           │  │ ~0.37s        │  │
      │  └───────────┘  │           │  └───────────────┘  │
      └────────┬────────┘           └──────────┬──────────┘
               │                               │
@@ -120,7 +120,7 @@ See **[docs/AESTHETICS.md](docs/AESTHETICS.md)** for the complete visual design 
 | `tests/test_ocr_ad_detection.py` | OCR ad pattern detection tests (143+ cases) |
 | `src/templates/index.html` | Web UI single-page app |
 | `src/static/style.css` | Web UI dark theme styles |
-| `models/paddleocr/` | PaddleOCR PP-OCRv3 det/rec RKNN models + character dict, shipped in-repo (see its README) |
+| `models/paddleocr/` | PaddleOCR RKNN det/rec models + dictionaries for PP-OCRv6 (default) and PP-OCRv3 (rollback), shipped in-repo (see its README) |
 | `docs/HARDWARE.md` | Bill of materials, OS/kernel requirements |
 | `install.sh` | Install as systemd service |
 | `uninstall.sh` | Remove systemd service |
@@ -215,7 +215,7 @@ MINUS_VLM_ALONE_THRESHOLD=5      # Consecutive VLM detections needed to trigger 
 | Blocking composite | **~0.5ms** per frame overhead |
 | Audio mute/unmute | **INSTANT** (volume element mute property) |
 | ustreamer MJPEG stream | **~60fps** (MPP hardware encoding at 4K) |
-| OCR latency | **100-200ms** capture + **250-400ms** inference |
+| OCR latency | **100-200ms** capture + **~180ms p50 / ~275ms p90** inference (PP-OCRv6) |
 | VLM latency | **~0.37s per frame deterministic** (LFM2.5-VL fused-prefill; vision ~185ms + 16 fused layers ~185ms; no decode) |
 | VLM model load | **~9-11s** (17 axengine sessions + 256MB embeds mmap + 4 warmup inferences + keepalive thread) |
 | Snapshot capture | **~150ms** (4K JPEG download) |
