@@ -345,6 +345,9 @@ class Minus:
         self.blocking_active = False
         self._hdmi_recovery_in_progress = False  # Prevent main loop interference during HDMI recovery
         self._hdmi_signal_lost = False  # Pause detection workers when HDMI signal is lost
+        # False until run() finishes starting up. The health monitor uses it to
+        # tell "ustreamer not started yet" apart from "no HDMI signal".
+        self._startup_complete = False
 
         # ML processing
         self.ocr = None
@@ -3304,6 +3307,10 @@ class Minus:
         display_ok = self.ad_blocker.start()
         if display_ok:
             logger.info("Display pipeline started - 30 FPS with instant ad blocking")
+        elif not self._any_hdmi_output_connected():
+            # No TV attached: expected, and the retry loop starts the
+            # pipeline when one is connected. Not an error.
+            logger.warning("Display pipeline not started - no display attached")
         else:
             logger.error("Display pipeline failed to start")
 
@@ -5008,6 +5015,17 @@ class Minus:
             # the picture only a keypress could bring back. It also left
             # autonomous mode's source wake with no controller to press Home on.
             self._start_device_setup_delayed(delay_seconds=5.0, known_only=True)
+
+            # Autonomous mode too. It owns the "no signal -> press Home" wake,
+            # and it used to start only after this wait loop saw a picture --
+            # so with the remote connected but autonomous not yet running,
+            # nothing would ever press the button. Its screen checks need the
+            # VLM and frame capture, which do not exist yet; those degrade to
+            # "screen unknown" until the full startup below attaches them and
+            # calls start_if_enabled() again, which is a no-op once running.
+            if self.autonomous_mode:
+                self.autonomous_mode.set_ad_blocker(self)
+                self.autonomous_mode.start_if_enabled()
             try:
                 poll_count = 0
                 while self.running:
@@ -5134,6 +5152,7 @@ class Minus:
             self.autonomous_mode.set_status_callback(_on_autonomous_status)
             self.autonomous_mode.start_if_enabled()
 
+        self._startup_complete = True
         logger.info("Minus running - press Ctrl+C to stop")
 
         # Monitor ustreamer

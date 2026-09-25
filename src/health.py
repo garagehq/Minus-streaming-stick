@@ -581,8 +581,41 @@ class HealthMonitor:
                         logger.debug(f"[HealthMonitor] FPS 0 for {now - self._hdmi_fps_zero_since:.1f}s - signal lost")
                         return False, ""
 
-        except Exception:
+        except Exception as e:
+            reason = getattr(e, 'reason', e)
+            # Only while Minus is still starting up. That is the one window
+            # where ustreamer is legitimately absent with a picture present.
+            # Once running, an unreachable ustreamer keeps meaning what it
+            # always has here, so its crash handling is unchanged.
+            if (isinstance(reason, ConnectionRefusedError)
+                    and not getattr(self.minus, '_startup_complete', True)):
+                return self._check_hdmi_signal_direct()
             return False, ""
+
+    def _check_hdmi_signal_direct(self) -> tuple[bool, str]:
+        """Ask the HDMI receiver itself, for when ustreamer is not running.
+
+        ustreamer is the preferred source because querying the receiver can
+        disturb an ACTIVE capture stream. But with ustreamer not running there
+        is no stream to disturb -- and "ustreamer unreachable" does not mean
+        "no signal". Minus starts ustreamer only after it has seen a picture,
+        so for a few seconds after a source wakes up the picture is back and
+        ustreamer is not. Reading that as signal loss forced the NO SIGNAL
+        screen over a startup that was succeeding: seen live, the picture
+        returned at 19:22:55 and this monitor declared it lost at 19:22:58,
+        five seconds before ustreamer came up.
+        """
+        try:
+            check = getattr(self.minus, 'check_hdmi_signal', None)
+            if not check:
+                return False, ""
+            info = check()
+            if info:
+                width, height = info[0], info[1]
+                return True, f"{width}x{height}"
+        except Exception as e:
+            logger.debug(f"[HealthMonitor] direct signal check failed: {e}")
+        return False, ""
 
     def _check_ustreamer_alive(self) -> bool:
         """Check if ustreamer process is running."""

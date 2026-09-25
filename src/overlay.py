@@ -235,12 +235,28 @@ class NotificationOverlay:
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=2.0) as response:
                 if response.status == 200:
+                    if getattr(self, '_ustreamer_down', False):
+                        self._ustreamer_down = False
+                        logger.info("[Overlay] ustreamer is back - overlays active again")
                     return True
                 else:
                     logger.warning(f"[Overlay] API returned status {response.status}")
                     return False
 
         except urllib.error.URLError as e:
+            # ustreamer only runs while there is a picture on the HDMI input,
+            # so "connection refused" is the normal state when the source is
+            # asleep or unplugged. Every overlay attempt in that window used to
+            # log an ERROR -- eight on one startup -- which buried the errors
+            # that matter. Say it once, then stay quiet until it comes back.
+            if isinstance(getattr(e, 'reason', None), ConnectionRefusedError):
+                if not getattr(self, '_ustreamer_down', False):
+                    self._ustreamer_down = True
+                    logger.warning("[Overlay] ustreamer not running (no HDMI input) - "
+                                   "skipping overlays until it starts")
+                else:
+                    logger.debug(f"[Overlay] skipped, ustreamer down: {params.get('text', '')[:40]}")
+                return False
             logger.error(f"[Overlay] API connection error: {e}")
             return False
         except Exception as e:

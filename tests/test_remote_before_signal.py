@@ -94,5 +94,50 @@ class TestWiredIntoStartup(unittest.TestCase):
         self.assertLess(early, loop, 'must start before the blocking wait loop')
 
 
+class TestAutonomousStartsBeforeSignal(unittest.TestCase):
+    """The remote alone wakes nothing: autonomous mode is what presses Home.
+
+    With only the remote moved ahead of the wait, a boot with the stick asleep
+    would sit with a connected controller and nobody to use it, because
+    autonomous mode still started after the picture appeared.
+    """
+
+    def test_autonomous_starts_before_the_wait_loop(self):
+        src = (ROOT / 'minus.py').read_text()
+        wait = src.index('# Poll for HDMI signal every 2 seconds')
+        loop = src.index('while self.running:', wait)
+        block = src[wait:loop]
+        self.assertIn('self.autonomous_mode.start_if_enabled()', block)
+        self.assertIn('self.autonomous_mode.set_ad_blocker(self)', block)
+
+    def test_normal_start_still_attaches_vlm_and_capture(self):
+        src = (ROOT / 'minus.py').read_text()
+        tail = src[src.index('# Start night mode if it was enabled'):]
+        tail = tail[:tail.index('Minus running - press Ctrl+C')]
+        for needed in ('set_vlm(self.vlm)', 'set_frame_capture(self.frame_capture)',
+                       'start_if_enabled()'):
+            self.assertIn(needed, tail)
+
+    def test_second_start_is_a_no_op(self):
+        from autonomous_mode import AutonomousMode
+        am = AutonomousMode()
+        am._enabled = True
+        started = []
+        with patch('autonomous_mode.threading.Thread') as T:
+            t = MagicMock(); t.is_alive.return_value = True
+            T.return_value = t
+            am.start_if_enabled()
+            am.start_if_enabled()
+            started = T.call_count
+        self.assertEqual(started, 1, 'a second start must not spawn a second loop')
+
+    def test_screen_query_survives_missing_vlm(self):
+        from autonomous_mode import AutonomousMode
+        am = AutonomousMode()
+        am._vlm = None
+        am._frame_capture = None
+        self.assertIsNone(am._query_screen())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

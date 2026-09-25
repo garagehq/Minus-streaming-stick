@@ -697,7 +697,11 @@ class DRMAdBlocker:
             self._init_pipeline()
 
         if not self.pipeline:
-            logger.error("[DRMAdBlocker] No pipeline to start")
+            if not self._hdmi_output_attached():
+                logger.warning("[DRMAdBlocker] No display attached — the display "
+                               "pipeline will start when one is connected")
+            else:
+                logger.error("[DRMAdBlocker] No pipeline to start")
             return False
 
         try:
@@ -753,6 +757,22 @@ class DRMAdBlocker:
             self._watchdog_thread.join(timeout=2.0)
             self._watchdog_thread = None
 
+    @staticmethod
+    def _hdmi_output_attached() -> bool:
+        """Is any HDMI output (the TV) connected, per sysfs? Fails OPEN.
+
+        Fails open so a sysfs read error never stops a display from being
+        brought up; the worst case is one pipeline attempt that fails.
+        """
+        try:
+            from pathlib import Path
+            return any(
+                (c / 'status').read_text().strip() == 'connected'
+                for c in Path('/sys/class/drm').glob('card0-HDMI-A-*')
+                if (c / 'status').exists())
+        except Exception:
+            return True
+
     def _force_hdmi_reinit_if_connected(self):
         """DPMS-cycle the transmitter, but only when something is attached.
 
@@ -762,11 +782,7 @@ class DRMAdBlocker:
         comes up regardless.
         """
         try:
-            from pathlib import Path
-            attached = any(
-                (c / 'status').read_text().strip() == 'connected'
-                for c in Path('/sys/class/drm').glob('card0-HDMI-A-*')
-                if (c / 'status').exists())
+            attached = self._hdmi_output_attached()
             if not attached:
                 logger.debug("[DRMAdBlocker] No HDMI output attached — skipping TX re-init")
                 return
@@ -1324,6 +1340,13 @@ class DRMAdBlocker:
                     logger.info(f"[DRMAdBlocker] Updating DRM output: connector {self.connector_id} -> {drm_info['connector_id']}")
                     self.connector_id = drm_info['connector_id']
                     self.plane_id = drm_info.get('plane_id', self.plane_id)
+            else:
+                # Same early return as start_no_signal_mode: with no display
+                # attached kmssink is guaranteed to fail, and every attempt
+                # logged an ERROR and churned GStreamer objects. The display
+                # retry loop brings the real pipeline up once a TV appears.
+                logger.warning("[DRMAdBlocker] No connected HDMI output found for loading display — skipping pipeline creation")
+                return False
 
             # Create a standalone pipeline for loading display
             # Uses videotestsrc with named textoverlay for animation
