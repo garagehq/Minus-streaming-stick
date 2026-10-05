@@ -8,6 +8,47 @@ HDMI passthrough with real-time ML-based ad detection and blocking using dual NP
 - **Moonshine tiny-en (ONNX) ASR** on 3 pinned CPU cores (~1.6s per **2s** audio window, max <2s even on dense continuous speech). Runs in a multiprocessing worker subprocess (mirrors OCR/VLM worker pattern) for hard-timeout safety. **CONFIRM-ONLY** audio signal on top of OCR+VLM: decorates the block label (`+asr`) and does a gated mid-block rescue, but **never suppresses a block at start** (the old VETO was removed in 2026-05 — it was killing real ads VLM was sure about). Never fires blocking alone. Engine-selectable via `MINUS_ASR_ENGINE` (faster-whisper fallback for cool/idle hosts; on the thermally-throttled production box faster-whisper's fixed 30s encoder is ~3.3-5s/window — too slow, hence Moonshine which processes audio proportionally). Was whisper.cpp → faster-whisper → Moonshine. See [docs/ASR.md](docs/ASR.md) and *Moonshine ASR migration + decision-engine retune* under Known Issues.
 - **Spanish vocabulary practice** during ad blocks!
 
+## Branch `asr-first`: name muter (no ad blocking)
+
+On this branch Minus does not block ads. It briefly cuts the TV audio
+whenever "LeBron James" is spoken or captioned (`src/name_mute.py`).
+
+- **Detectors.** ASR (Moonshine `MEDIUM_STREAMING`, word timestamps) on
+  the audio tap, and OCR on every frame's caption text. Both feed
+  `NameMuteController`, which de-duplicates repeats (overlapping ASR
+  windows, caption lines that stay on screen and grow word by word).
+  Matches "LeBron", "LeBron's", "Le Bron", "the Bron James", "Lebrun",
+  "King James"; not "the Bronx", and not a bare "James" unless
+  `name_mute_surname` is on.
+- **A/V delay line (`MINUS_AV_DELAY_S`, default 4s).** The audio sync
+  queue and a video `queue name=avdelay` (after the frame gate, needs
+  `souphttpsrc do-timestamp=true`) both hold 4s, so the detectors see each
+  word ~4s before the TV plays it and the mute lands on the word. The
+  audio sink is `async=false` (a live sink otherwise waits for its first
+  buffer, i.e. the whole delay, to reach PLAYING), and the stall watchdog
+  threshold is 6s + delay.
+- **Scheduler.** Detections are converted to capture times (the audio tap
+  stamps its newest sample with `time.monotonic()`), then muted over
+  `[start + delay - 0.6s, end + delay + 0.35s]` via
+  `AudioPassthrough.set_name_mute()`, independent of the ad mute.
+- **ASR cadence.** 2.5s windows back to back (min 0.6s between starts:
+  Moonshine returns empty in 0.03s on non-speech, which otherwise spun
+  the loop and burned through the 500-inference leak-restart budget).
+- **Measured** on 5.5 min of NBC LeBron commentary vs YouTube's caption
+  track (`tests/name_mute_replay.py`, real-time, production ASR worker):
+  see the commit log for the latest numbers. Offline name recall by model
+  on 2.5s windows: tiny 42%, base 58%, small 81%, medium 88%.
+- **Settings.** `ad_blocking` (default False), `name_mute` (True),
+  `name_mute_surname` (False). API: `GET /api/name-mute`,
+  `POST /api/name-mute/settings`, `POST /api/name-mute/test {"text"}`.
+- **Stream.** ustreamer runs at `--desired-fps=30 --encode-scale=2k`
+  (`MINUS_STREAM_FPS`, `MINUS_ENCODE_SCALE`); the garagehq/ustreamer
+  `asr-first` branch fixes the FPS cap (it delivered 20fps for 30) and
+  resizes with RGA instead of the CPU.
+- **Roku.** `tools/roku_lebron.py` finds the Roku and deep-links YouTube
+  to a list of LeBron commentary videos. Turn captions on in the YouTube
+  player (or Roku Settings > Accessibility > Captions) for the OCR path.
+
 ## Documentation
 
 | Document | Description |
