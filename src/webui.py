@@ -847,7 +847,7 @@ class WebUI:
 
                 if hasattr(self.minus, 'fire_tv_setup') and self.minus.fire_tv_setup:
                     controller = self.minus.fire_tv_setup.get_controller()
-                    if controller and controller.is_connected:
+                    if controller and controller.is_connected():
                         controller.send_command(command)
                         return jsonify({'success': True, 'command': command})
                     return jsonify({'error': 'Fire TV not connected'}), 503
@@ -869,12 +869,15 @@ class WebUI:
                 if hasattr(self.minus, 'fire_tv_setup') and self.minus.fire_tv_setup:
                     controller = self.minus.fire_tv_setup.get_controller()
                     if controller:
+                        # is_connected is a method: used bare it was always
+                        # truthy and not JSON serializable.
+                        connected = bool(controller.is_connected())
                         return jsonify({
-                            'connected': controller.is_connected,
+                            'connected': connected,
                             'device_info': {
                                 'ip': controller._ip_address,
                                 'device_type': 'google_tv',
-                            } if controller.is_connected else None
+                            } if connected else None
                         })
                 return jsonify({'connected': False, 'device_info': None})
             except Exception as e:
@@ -937,7 +940,7 @@ class WebUI:
                 # Google TV uses the same ADB controller as Fire TV
                 if hasattr(self.minus, 'fire_tv_setup') and self.minus.fire_tv_setup:
                     controller = self.minus.fire_tv_setup.get_controller()
-                    if controller and controller.is_connected:
+                    if controller and controller.is_connected():
                         controller.send_command(command)
                         return jsonify({'success': True, 'command': command})
                     return jsonify({'error': 'Google TV not connected'}), 503
@@ -3329,7 +3332,7 @@ class WebUI:
 
                 if hasattr(self.minus, 'fire_tv_setup') and self.minus.fire_tv_setup:
                     controller = self.minus.fire_tv_setup.get_controller()
-                    if controller and controller.is_connected and hasattr(controller, '_device') and controller._device:
+                    if controller and controller.is_connected() and hasattr(controller, '_device') and controller._device:
                         # Use monkey to launch the app
                         controller._device.adb_shell(f'monkey -p {package} -c android.intent.category.LAUNCHER 1')
                         logger.info(f"[WebUI] Launched {app} on Fire TV")

@@ -1346,7 +1346,7 @@ class TestWebUI:
         mock_minus = MagicMock()
         mock_setup = MagicMock()
         mock_controller = MagicMock()
-        mock_controller.is_connected = True
+        mock_controller.is_connected.return_value = True
         mock_controller.send_command.return_value = True
         mock_setup.get_controller.return_value = mock_controller
         mock_minus.fire_tv_setup = mock_setup
