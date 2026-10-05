@@ -5116,8 +5116,10 @@ class Minus:
                 logger.info("Loading VLM model after HDMI detected (vlm_preload=False)...")
                 vlm_preloaded = self._load_vlm_model()
 
-            # Start VLM worker thread if model is loaded (check vlm.is_ready)
-            if self.vlm.is_ready:
+            # Start VLM worker thread if model is loaded (check vlm.is_ready).
+            # Re-check self.vlm: a failed preload sets it to None while we
+            # were waiting on the join above.
+            if self.vlm and self.vlm.is_ready:
                 self.vlm_thread = threading.Thread(target=self.vlm_worker, daemon=True)
                 self.vlm_thread.start()
                 logger.info("VLM worker started (process-based with hard 2s timeout)")
