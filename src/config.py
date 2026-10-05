@@ -108,6 +108,20 @@ class MinusConfig:
 
 # External paths (configurable via environment variables)
 USTREAMER_PATH = _get_env_path('MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-patched')
+
+# Audio/video delay line (seconds). Both the audio sync queue and the video
+# display pipeline hold this much extra, so detectors that tap the signal
+# before playback (ASR on the audio tap, OCR on ustreamer snapshots) see each
+# word this far before the TV plays it. The name muter needs a head start of
+# ~1.1-1.5s ASR inference + one 2.5s window + padding, hence 4s. 0 disables.
+AV_DELAY_S = max(0.0, _get_env_float('MINUS_AV_DELAY_S', 4.0))
+
+# Stream format: 30fps and at most 2K (2560x1440) is plenty for the name
+# muter (OCR reads captions at ~2fps) and halves encode/decode load vs 60fps.
+# ustreamer drops frames in its encoder pool to hit STREAM_FPS (0 = source
+# rate) and RGA-downscales larger sources to ENCODE_SCALE (never upscales).
+STREAM_FPS = _get_env_int('MINUS_STREAM_FPS', 30)
+ENCODE_SCALE = os.environ.get('MINUS_ENCODE_SCALE', '2k')
 # minus-v0.1 ad-classifier — fine-tuned LFM2.5-VL-450M (iter28) compiled for
 # fused-layer NPU3 prefill with logit-argmax decisions.
 # Published at https://huggingface.co/TheGarageDev/Minus-v0.1

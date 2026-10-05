@@ -406,10 +406,26 @@ class DRMAdBlocker:
                 f"hue={cs.get('hue', 0.0):.4f} name=colorbalance ! "
                 if self._pipeline_has_colorbalance else ""
             )
+            # A/V delay line (config.AV_DELAY_S): hold compressed JPEGs for the
+            # same time the audio sync queue holds audio, so picture and sound
+            # stay in step. Needs arrival timestamps (do-timestamp) — without
+            # them the queue's time level never rises and it would stall.
+            # Sits after the frame gate so dropped frames never fill it.
+            from config import AV_DELAY_S
+            delay_ns = int(AV_DELAY_S * 1e9)
+            if delay_ns > 0:
+                delay_part = (
+                    f"queue name=avdelay min-threshold-time={delay_ns} "
+                    f"max-size-time={delay_ns + 2_000_000_000} "
+                    f"max-size-buffers=0 max-size-bytes=0 ! ")
+            else:
+                delay_part = ""
             pipeline_str = (
                 f"souphttpsrc location=http://localhost:{self.ustreamer_port}/stream "
-                f"is-live=true blocksize=524288 timeout=10 retries=-1 keep-alive=true ! "
-                f"multipartdemux ! jpegparse ! identity name=framegate ! mppjpegdec ! video/x-raw,format=NV12 ! "
+                f"is-live=true do-timestamp=true blocksize=524288 timeout=10 retries=-1 keep-alive=true ! "
+                f"multipartdemux ! jpegparse ! identity name=framegate ! "
+                f"{delay_part}"
+                f"mppjpegdec ! video/x-raw,format=NV12 ! "
                 f"{colorbalance_part}"
                 f"queue max-size-buffers=3 leaky=downstream name=videoqueue ! "
                 f"identity name=fpsprobe ! "

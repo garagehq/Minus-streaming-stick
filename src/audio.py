@@ -208,8 +208,18 @@ class AudioPassthrough:
         # dropout — and we prefer to do it while muted (ad block) or while
         # the source is silent, so it's inaudible. A hard cap forces it
         # regardless once lag is clearly perceptible.
-        self.SYNC_BASELINE_MS = 300.0   # == syncqueue min-threshold-time
-        self.SYNC_MAX_MS = 500.0        # == syncqueue max-size-time
+        # The A/V delay line (config.AV_DELAY_S) rides on top of the 300ms
+        # baseline; drift detection measures against the combined level.
+        from config import AV_DELAY_S
+        self.av_delay_ms = AV_DELAY_S * 1000.0
+        self.SYNC_BASELINE_MS = 300.0 + self.av_delay_ms   # == syncqueue min-threshold-time
+        self.SYNC_MAX_MS = self.SYNC_BASELINE_MS + 200.0   # == syncqueue max-size-time
+        # The stall probe sits after the delay line, so the first buffer
+        # (and every buffer after a restart) arrives AV_DELAY_S late.
+        self._stall_threshold = 6.0 + AV_DELAY_S
+        # Name-mute flag, independent of the ad mute (is_muted). The volume
+        # element is muted while either is set.
+        self._name_muted = False
         # NOTE the reachable drift range is 0..(SYNC_MAX - baseline) = 0..200ms:
         # the queue cannot hold more than max-size-time, so at drift ~200ms it
         # saturates and alsasrc starts overrunning. Thresholds must sit inside
@@ -352,14 +362,15 @@ class AudioPassthrough:
             # recovery loop rebuilds with alsasink when HDMI-TX returns.
             self._playback_fakesink = not self._hdmi_tx_connected()
             if self._playback_fakesink:
-                sink = "fakesink sync=false"
+                sink = "fakesink sync=false async=false"
                 logger.warning("[AudioPassthrough] HDMI-TX not connected — "
                                "playback via fakesink; HDMI-RX capture + ASR tap stay live")
             else:
                 sink = (f"alsasink device={self.playback_device} "
-                        f"buffer-time=50000 latency-time=10000 sync=false")
+                        f"buffer-time=50000 latency-time=10000 sync=false async=false")
             playback_chain = (
-                f"queue name=syncqueue min-threshold-time=300000000 max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! "
+                f"queue name=syncqueue min-threshold-time={int(self.SYNC_BASELINE_MS * 1e6)} "
+                f"max-size-time={int(self.SYNC_MAX_MS * 1e6)} max-size-buffers=0 max-size-bytes=0 ! "
                 f"queue max-size-buffers=10 max-size-time=100000000 leaky=downstream name=audioqueue ! "
                 f"audioconvert ! "
                 f"volume name=vol volume=1.0 mute=false ! "
@@ -735,7 +746,7 @@ class AudioPassthrough:
                         self._last_buffer_time = time.time()
                         self._last_restart_time = time.time()
                         self._last_sync_reset = time.time()  # Reset A/V sync timer
-                        if self.is_muted and self.volume:
+                        if (self.is_muted or self._name_muted) and self.volume:
                             self.volume.set_property('mute', True)
                     else:
                         logger.error(f"[AudioPassthrough] Failed to reach PLAYING state: ret={ret2}, state={state.value_nick if state else 'None'}")
@@ -745,7 +756,7 @@ class AudioPassthrough:
                     self._last_restart_time = time.time()
                     self._last_sync_reset = time.time()  # Reset A/V sync timer
                     # Restore mute state
-                    if self.is_muted and self.volume:
+                    if (self.is_muted or self._name_muted) and self.volume:
                         self.volume.set_property('mute', True)
             finally:
                 self._lock.release()
@@ -979,9 +990,31 @@ class AudioPassthrough:
         """Unmute audio (after ad ends)."""
         with self._lock:
             if self.volume and self.is_muted:
-                self.volume.set_property('mute', False)
+                # Stay silent if a name mute is in progress.
+                self.volume.set_property('mute', self._name_muted)
                 self.is_muted = False
                 logger.info("[AudioPassthrough] Audio UNMUTED")
+
+    def set_name_mute(self, muted: bool):
+        """Mute/unmute for the name muter, independent of the ad mute."""
+        with self._lock:
+            self._name_muted = bool(muted)
+            if self.volume:
+                self.volume.set_property('mute', self._name_muted or self.is_muted)
+
+    def playback_delay_s(self) -> float:
+        """Capture-to-speaker delay: the sync queue's live fill (falls back
+        to its configured baseline) plus the ~60ms ALSA buffers."""
+        level_ms = None
+        try:
+            q = self.pipeline.get_by_name('syncqueue') if self.pipeline else None
+            if q is not None:
+                level_ms = q.get_property('current-level-time') / 1e6
+        except Exception:
+            level_ms = None
+        if not level_ms:
+            level_ms = self.SYNC_BASELINE_MS
+        return level_ms / 1000.0 + 0.06
 
     def set_volume(self, level):
         """
@@ -1145,7 +1178,7 @@ class AudioPassthrough:
                             logger.info("[AudioPassthrough] Pipeline resumed successfully (async)")
                             self._last_buffer_time = time.time()
                             self._last_sync_reset = time.time()  # Reset A/V sync timer
-                            if self.is_muted and self.volume:
+                            if (self.is_muted or self._name_muted) and self.volume:
                                 self.volume.set_property('mute', True)
                         else:
                             logger.error(f"[AudioPassthrough] Failed to resume: ret={ret2}, state={state.value_nick if state else 'None'}")
@@ -1153,7 +1186,7 @@ class AudioPassthrough:
                         logger.info("[AudioPassthrough] Pipeline resumed successfully")
                         self._last_buffer_time = time.time()
                         self._last_sync_reset = time.time()  # Reset A/V sync timer
-                        if self.is_muted and self.volume:
+                        if (self.is_muted or self._name_muted) and self.volume:
                             self.volume.set_property('mute', True)
                 else:
                     logger.error("[AudioPassthrough] Failed to create pipeline during resume")
@@ -1509,6 +1542,11 @@ class AudioASRTap:
         self._samples_written = 0  # Total samples ever received
         self._lock = threading.Lock()
         self._last_buffer_time = 0.0
+        # Monotonic time the newest ring-buffer sample arrived, and the value
+        # it had when the last snapshot was taken. The name muter maps
+        # transcript word times to capture times from this.
+        self._last_write_mono = 0.0
+        self.last_snapshot_end_mono = 0.0
         self._attach_count = 0   # Bumped on each attach_to (track restarts)
 
     def attach_to(self, appsink):
@@ -1546,6 +1584,7 @@ class AudioASRTap:
                 self._write_pos = end % self._buffer_samples
                 self._samples_written += n
                 self._last_buffer_time = time.time()
+                self._last_write_mono = time.monotonic()
         finally:
             buf.unmap(mapinfo)
         return Gst.FlowReturn.OK
@@ -1561,6 +1600,7 @@ class AudioASRTap:
         with self._lock:
             if self._samples_written < n_samples:
                 return False
+            snapshot_end = self._last_write_mono
             start = (self._write_pos - n_samples) % self._buffer_samples
             if start + n_samples <= self._buffer_samples:
                 data = self._ring[start:start + n_samples].copy()
@@ -1580,6 +1620,7 @@ class AudioASRTap:
             wf.setframerate(self.SAMPLE_RATE)
             wf.writeframes(data.tobytes())
         os.replace(tmp, self.wav_path)
+        self.last_snapshot_end_mono = snapshot_end
         return True
 
     @property
