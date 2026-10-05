@@ -964,8 +964,9 @@ class DRMAdBlocker:
                 logger.warning(f"[DRMAdBlocker] {self._consecutive_failures} consecutive failures - restarting ustreamer to reset MPP")
                 try:
                     import subprocess
-                    subprocess.run(['pkill', '-9', 'ustreamer'], capture_output=True, timeout=5)
-                    time.sleep(2)
+                    from ustreamer_proc import kill_ustreamer
+                    kill_ustreamer(self.ustreamer_port)
+                    time.sleep(1)
                 except Exception as e:
                     logger.debug(f"[DRMAdBlocker] Error killing ustreamer: {e}")
 

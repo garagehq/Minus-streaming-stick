@@ -41,6 +41,10 @@ if _os.path.exists(_FALLBACK_MARKER):
         print("[EARLY INIT] Killing any stuck DRM processes...")
         for _attempt in range(5):
             _subprocess.run(['pkill', '-9', 'modetest'], capture_output=True, timeout=2)
+            # By path: ustreamer's process name is "main", not "ustreamer".
+            _subprocess.run(['pkill', '-9', '-f', '^' + _os.environ.get(
+                'MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-patched') + '( |$)'],
+                capture_output=True, timeout=2)
             _subprocess.run(['pkill', '-9', 'ustreamer'], capture_output=True, timeout=2)
             _time.sleep(0.5)
 
@@ -202,6 +206,7 @@ os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 from drm import probe_drm_output
 from v4l2 import probe_v4l2_device
 from name_mute import NameMatcher, NameMuteScheduler, NameMuteController
+from ustreamer_proc import kill_ustreamer
 from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR, STREAM_FPS, ENCODE_SCALE
 from capture import UstreamerCapture
 from screenshots import ScreenshotManager
@@ -1417,12 +1422,7 @@ class Minus:
                 except:
                     self.ustreamer_process.kill()
 
-            subprocess.run(['pkill', '-9', 'ustreamer'],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # Also kill anything on the port
-            subprocess.run(['fuser', '-k', f'{self.config.ustreamer_port}/tcp'],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1)
+            kill_ustreamer(self.config.ustreamer_port)
 
             # Initialize V4L2 device with proper DV timings for the new source
             # This ensures proper format negotiation when switching between devices
@@ -3249,9 +3249,8 @@ class Minus:
         This keeps the web preview and ML detection working even if
         the display output (HDMI-TX) is disconnected.
         """
-        # Kill any existing ustreamer
-        subprocess.run(['pkill', '-9', 'ustreamer'], capture_output=True)
-        time.sleep(0.5)
+        # Kill any existing ustreamer (by path and port: see ustreamer_proc)
+        kill_ustreamer(self.config.ustreamer_port)
 
         port = self.config.ustreamer_port
 
