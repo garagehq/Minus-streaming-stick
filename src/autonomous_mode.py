@@ -804,6 +804,17 @@ class AutonomousMode:
             return False
         if not self._device_controller or not self._device_controller.is_connected():
             return False
+        # No HDMI signal does not mean the source is asleep: a Google TV
+        # switches HDMI modes (frame-rate matching) when a video starts, and
+        # the receiver can drop lock while the device is wide awake. Home then
+        # kicked the user out of whatever was playing. Ask the device first.
+        is_awake = getattr(self._device_controller, 'is_awake', None)
+        awake = is_awake() if callable(is_awake) else None
+        if awake:
+            self._last_source_wake = now
+            logger.info("[AutonomousMode] No HDMI signal, but the source reports "
+                        "it is awake — not sending Home")
+            return False
         self._last_source_wake = now
         logger.warning("[AutonomousMode] No HDMI signal — source is asleep; "
                        "sending Home to wake it")
