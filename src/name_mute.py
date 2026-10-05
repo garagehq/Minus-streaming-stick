@@ -129,6 +129,7 @@ class NameMuteScheduler:
         self.events = []            # recent (wall_time, source, label, on_time)
         self.mute_count = 0
         self.late_count = 0
+        self.duplicate_count = 0
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -150,6 +151,14 @@ class NameMuteScheduler:
         start = capture_start + delay - self.PAD_BEFORE_S
         end = capture_end + delay + self.PAD_AFTER_S
         now = time.monotonic()
+        with self._lock:
+            covered = any(w[0] <= start and end <= w[1] for w in self._windows)
+        if covered:
+            # Already muting this stretch (e.g. ASR confirming a caption hit,
+            # or two OCR misreads of the same caption line).
+            self.duplicate_count += 1
+            logger.debug(f"[NameMute] {source}: '{label}' already covered")
+            return
         on_time = start >= now
         if not on_time:
             self.late_count += 1
@@ -193,6 +202,7 @@ class NameMuteScheduler:
             'pending_windows': pending,
             'mute_count': self.mute_count,
             'late_count': self.late_count,
+            'duplicate_count': self.duplicate_count,
             'delay_s': round(float(self._delay_fn() or 0.0), 3),
             'recent': recent,
         }

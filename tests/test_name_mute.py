@@ -71,6 +71,16 @@ class TestScheduler(unittest.TestCase):
         self.assertAlmostEqual(off[0] - now, 0.2 + 1.0 + sch.PAD_AFTER_S, delta=0.06)
         self.assertEqual(sch.late_count, 0)
 
+    def test_covered_detection_is_not_rescheduled(self):
+        sch = NameMuteScheduler(FakeAudio(), lambda: 5.0)
+        now = time.monotonic()
+        sch.schedule(now, now + 1.0, 'caption', 'LeBron')       # wide window
+        sch.schedule(now + 0.2, now + 0.5, 'asr', 'LeBron')     # inside it
+        self.assertEqual(sch.mute_count, 1)
+        self.assertEqual(sch.duplicate_count, 1)
+        sch.schedule(now + 3.0, now + 3.4, 'asr', 'LeBron')     # new mention
+        self.assertEqual(sch.mute_count, 2)
+
     def test_late_detection_still_mutes(self):
         audio = FakeAudio()
         sch = NameMuteScheduler(audio, lambda: 0.0)

@@ -20,10 +20,10 @@ whenever "LeBron James" is spoken or captioned (`src/name_mute.py`).
   Matches "LeBron", "LeBron's", "Le Bron", "the Bron James", "Lebrun",
   "King James"; not "the Bronx", and not a bare "James" unless
   `name_mute_surname` is on.
-- **A/V delay line (`MINUS_AV_DELAY_S`, default 4s).** The audio sync
+- **A/V delay line (`MINUS_AV_DELAY_S`, default 5s).** The audio sync
   queue and a video `queue name=avdelay` (after the frame gate, needs
-  `souphttpsrc do-timestamp=true`) both hold 4s, so the detectors see each
-  word ~4s before the TV plays it and the mute lands on the word. The
+  `souphttpsrc do-timestamp=true`) both hold 5s, so the detectors see each
+  word ~5s before the TV plays it and the mute lands on the word. The
   audio sink is `async=false` (a live sink otherwise waits for its first
   buffer, i.e. the whole delay, to reach PLAYING), and the stall watchdog
   threshold is 6s + delay.
