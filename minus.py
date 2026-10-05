@@ -2321,21 +2321,32 @@ class Minus:
             except Exception:
                 pass
 
-        # Get FPS from ustreamer (capture)
+        # From ustreamer: capture = the HDMI input rate (set by the source,
+        # e.g. 60), stream = what Minus puts out after ustreamer's
+        # --desired-fps cap (30 by default).
         fps_capture = 0
+        fps_stream = 0
         try:
             import urllib.request
             import json
             url = "http://localhost:9090/state"
             with urllib.request.urlopen(url, timeout=1.0) as response:
-                data = json.loads(response.read().decode('utf-8'))
-                fps_capture = data.get('result', {}).get('source', {}).get('captured_fps', 0)
+                result = json.loads(response.read().decode('utf-8')).get('result', {})
+            source = result.get('source', {})
+            fps_capture = source.get('captured_fps', 0)
+            clients = (result.get('stream', {}) or {}).get('clients_stat', {}) or {}
+            if clients:
+                fps_stream = max(c.get('fps', 0) for c in clients.values())
+            else:
+                # Nobody is streaming: report the rate the stream would run at.
+                cap = source.get('desired_fps') or STREAM_FPS
+                fps_stream = min(fps_capture, cap) if cap else fps_capture
         except Exception:
             pass
 
-        # For backwards compatibility, fps = display fps if available, else capture
-        fps = fps_display if fps_display > 0 else fps_capture
-        fps_source = 'display' if fps_display > 0 else 'capture'
+        # fps = display fps if a TV is attached, else the stream output rate
+        fps = fps_display if fps_display > 0 else fps_stream
+        fps_source = 'display' if fps_display > 0 else 'stream'
 
         uptime = int(time.time() - self.start_time)
 
@@ -2376,6 +2387,7 @@ class Minus:
             # System status
             'fps': fps,
             'fps_capture': fps_capture,
+            'fps_stream': fps_stream,
             'fps_display': fps_display,
             'fps_source': fps_source,  # 'display' or 'capture' (for backwards compat)
             'uptime': uptime,

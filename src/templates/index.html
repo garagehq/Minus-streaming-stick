@@ -126,7 +126,7 @@
                         <div class="fps-dual">
                             <div class="fps-col fps-capture">
                                 <span id="fps-capture-value" class="fps-num">--</span>
-                                <span class="fps-label">capture</span>
+                                <span class="fps-label">stream</span>
                             </div>
                             <span class="fps-divider">|</span>
                             <div class="fps-col fps-display">
@@ -1295,7 +1295,11 @@
                 // Stats - dual FPS display (capture | display)
                 const fpsCaptureEl = document.getElementById('fps-capture-value');
                 const fpsDisplayEl = document.getElementById('fps-display-value');
-                fpsCaptureEl.textContent = status.fps_capture > 0 ? Math.round(status.fps_capture) : '--';
+                // Stream output rate (after the 30fps cap); the raw HDMI
+                // input rate stays available as status.fps_capture.
+                const fpsStream = status.fps_stream > 0 ? status.fps_stream : status.fps_capture;
+                fpsCaptureEl.textContent = fpsStream > 0 ? Math.round(fpsStream) : '--';
+                fpsCaptureEl.title = status.fps_capture > 0 ? `HDMI input: ${Math.round(status.fps_capture)} fps` : '';
                 fpsDisplayEl.textContent = status.fps_display > 0 ? Math.round(status.fps_display) : '--';
                 document.getElementById('uptime-value').textContent = status.uptime_str || '--';
 
