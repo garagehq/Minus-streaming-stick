@@ -112,15 +112,32 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
         import numpy as np
 
         if engine == 'moonshine':
-            log.info(f"[ASRWorker] Loading moonshine (tiny-en, ONNX)...")
             import re as _re
             import wave as _wave
             import moonshine_voice as _mv
             from moonshine_voice import download as _mv_dl
-            _arch = _mv.ModelArch.TINY
+            # Model size. Measured on LeBron commentary (2.5s windows, name
+            # recall vs YouTube captions): TINY 42% @0.45s p50, BASE 58%
+            # @0.53s, SMALL_STREAMING 81% @0.79s, MEDIUM_STREAMING 88% @1.10s
+            # (p95 1.50s). Name muting needs recall, so MEDIUM is the default.
+            _arch_name = os.environ.get('MINUS_ASR_MOONSHINE_ARCH',
+                                        'MEDIUM_STREAMING').upper()
+            _arch = getattr(_mv.ModelArch, _arch_name, _mv.ModelArch.MEDIUM_STREAMING)
+            log.info(f"[ASRWorker] Loading moonshine ({_arch.name}, ONNX)...")
             _mpath, _ = _mv_dl.download_model_from_info(
                 _mv_dl.find_model_info(language='en', model_arch=_arch))
-            _ms = _mv.Transcriber(model_path=_mpath, model_arch=_arch)
+            # word_timestamps: per-word (start, end) so the name muter can cut
+            # just the name instead of the whole window.
+            # vad_threshold: Moonshine gates audio through a Silero VAD that
+            # is global (shared by every Transcriber) and stateful. On crowd-
+            # heavy sports commentary it latches "no speech" and returns empty
+            # transcripts in ~0.03s for whole minutes of play-by-play (50/64
+            # windows empty at the default; 0.1-0.3 barely help). 0 hands
+            # every window to the model: 9/64 empty, 16x the name hits.
+            _ms = _mv.Transcriber(model_path=_mpath, model_arch=_arch, options={
+                'word_timestamps': 'true',
+                'vad_threshold': os.environ.get('MINUS_ASR_VAD_THRESHOLD', '0.0'),
+            })
             _ts_re = _re.compile(r'\[[\d.]+s\]')  # moonshine inserts [1.23s] segment marks
 
             def _infer(wav_path):
@@ -134,7 +151,11 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
                 # transcript (with inline [1.23s] segment marks); str() works
                 # whether raw is already a plain string or the result object.
                 txt = _ts_re.sub(' ', str(raw)).replace('\n', ' ').strip()
-                return txt
+                words = []
+                for line in getattr(raw, 'lines', None) or []:
+                    for w in getattr(line, 'words', None) or []:
+                        words.append((w.word, float(w.start), float(w.end)))
+                return txt, words
 
             warmup = lambda: _ms.transcribe_without_streaming(
                 np.zeros(16000, dtype=np.float32), sample_rate=16000)
@@ -149,7 +170,7 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
                 segments, _info = _fw.transcribe(
                     wav_path, beam_size=1, language='en',
                     condition_on_previous_text=False, vad_filter=False)
-                return ' '.join(s.text for s in segments).strip()
+                return ' '.join(s.text for s in segments).strip(), []
 
             warmup = lambda: list(_fw.transcribe(
                 np.zeros(16000, dtype=np.float32), beam_size=1, language='en')[0])
@@ -180,8 +201,8 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
             wav_path = request
             start = time.time()
             try:
-                text = _infer(wav_path)
-                response_queue.put(('ok', text, time.time() - start))
+                text, words = _infer(wav_path)
+                response_queue.put(('ok', text, time.time() - start, words))
             except FileNotFoundError as e:
                 response_queue.put(('error', f'wav not found: {e}', time.time() - start))
             except Exception as e:
@@ -274,6 +295,8 @@ class ASRProcess:
         # Counter for the periodic-restart leak workaround — see
         # RESTART_AFTER_INFERENCES.
         self._inferences_since_restart = 0
+        # Per-word (word, start_s, end_s) timings from the last ok response.
+        self.last_words = []
         # RLock (not Lock): transcribe() holds this lock and, on the hard-timeout
         # escalation path, calls restart() -> stop()/start(), which re-acquire it.
         # A plain Lock self-deadlocks there (the worker freezes mid-restart under
@@ -445,7 +468,9 @@ class ASRProcess:
             self._consecutive_timeouts = 0
             self._pending_response = False
 
-            status, payload, latency = result
+            status, payload, latency = result[:3]
+            # Worker 'ok' responses carry per-word timings as a 4th element.
+            self.last_words = result[3] if len(result) > 3 else []
             if status == 'ok':
                 self._recent_latencies.append(latency)
                 self._inferences_since_restart += 1

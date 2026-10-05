@@ -110,7 +110,15 @@ class ASRManager:
     # How often to invoke whisper. Overlapping windows catch short bursts
     # of marketing copy that a non-overlapping grid might split. Env-
     # overridable (MINUS_ASR_INTERVAL).
-    INFERENCE_INTERVAL_S = float(os.environ.get('MINUS_ASR_INTERVAL', '1.5'))
+    # Name muting needs every word heard, so the default is back-to-back
+    # inference (no pause): with a 2.5s window and ~1.1s inference the
+    # windows overlap by more than a word, so nothing falls between them.
+    INFERENCE_INTERVAL_S = float(os.environ.get('MINUS_ASR_INTERVAL', '0.0'))
+    # Minimum time between inference starts. Moonshine returns an empty
+    # transcript in ~0.03s for windows with no speech; without a floor the
+    # loop spins ~30x/s through silence, burning CPU and racing through the
+    # worker's periodic leak-restart budget (each restart is ~2s deaf).
+    MIN_CYCLE_S = float(os.environ.get('MINUS_ASR_MIN_CYCLE', '0.6'))
 
     # Audio window length per inference. Moonshine latency scales with how
     # much SPEECH is in the window — on dense continuous speech a 5s window
@@ -120,14 +128,25 @@ class ASRManager:
     # transcripts are low-cost: a CTA split across two windows still lands in
     # the 8s rolling history, and a missed confirm only changes the source
     # LABEL, never whether a block fires. Env-overridable (MINUS_ASR_WINDOW).
-    WINDOW_SECONDS = float(os.environ.get('MINUS_ASR_WINDOW', '2.0'))
+    WINDOW_SECONDS = float(os.environ.get('MINUS_ASR_WINDOW', '2.5'))
 
     def __init__(self, audio_tap, *, model_name: str = None, cpu_threads: int = 3):
         """audio_tap must be an AudioASRTap (see src/audio.py).
         It exposes `snapshot_to_wav(seconds)` returning True on success.
         """
         self._tap = audio_tap
+        # Optional callback(transcript, words, window_start_mono) after each
+        # successful inference. words: [(word, start_s, end_s)] relative to
+        # the window start. Used by the name muter.
+        self.on_words = None
         self._model_name = model_name or ASR_MODEL
+        # What the worker actually loads (for logs/status): the Moonshine
+        # arch, or the faster-whisper model name.
+        if os.environ.get('MINUS_ASR_ENGINE', 'moonshine').lower() == 'moonshine':
+            self.model_label = 'moonshine-' + os.environ.get(
+                'MINUS_ASR_MOONSHINE_ARCH', 'MEDIUM_STREAMING').lower()
+        else:
+            self.model_label = self._model_name
         self._cpu_threads = cpu_threads
 
         # Worker process (hard-timeout via process kill — see asr_worker.py)
@@ -170,7 +189,7 @@ class ASRManager:
         self.is_running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name='ASR')
         self._thread.start()
-        logger.info(f"[ASR] started (model={self._model_name}, "
+        logger.info(f"[ASR] started (model={self.model_label}, "
                     f"window={self.WINDOW_SECONDS}s, interval={self.INFERENCE_INTERVAL_S}s, "
                     f"threads={self._cpu_threads})")
 
@@ -200,6 +219,7 @@ class ASRManager:
             pass
 
         while not self._stop_event.is_set():
+            cycle_start = time.monotonic()
             try:
                 if not self.enabled:
                     self._stop_event.wait(self.INFERENCE_INTERVAL_S)
@@ -210,14 +230,26 @@ class ASRManager:
                     self._stop_event.wait(self.INFERENCE_INTERVAL_S)
                     continue
 
+                # Capture time of the first sample in this window.
+                window_start = (self._tap.last_snapshot_end_mono
+                                - self.WINDOW_SECONDS)
                 status, transcript, latency = self._process.transcribe(
                     self._tap.wav_path)
                 self._record_result(status, transcript, latency)
+                if status == 'ok' and self.on_words is not None:
+                    try:
+                        self.on_words(transcript,
+                                      list(getattr(self._process, 'last_words', []) or []),
+                                      window_start)
+                    except Exception as e:
+                        logger.error(f"[ASR] on_words callback failed: {e}")
             except Exception as e:
                 logger.error(f"[ASR] loop iteration failed: {e}")
                 self.failure_count += 1
 
-            self._stop_event.wait(self.INFERENCE_INTERVAL_S)
+            self._stop_event.wait(max(
+                self.INFERENCE_INTERVAL_S,
+                self.MIN_CYCLE_S - (time.monotonic() - cycle_start)))
 
     def _record_result(self, status: str, transcript: str, latency: float):
         hits = count_marker_hits(transcript) if status == 'ok' else 0
@@ -325,7 +357,7 @@ class ASRManager:
             'enabled': self.enabled,
             'running': self.is_running,
             'engine': os.environ.get('MINUS_ASR_ENGINE', 'moonshine'),
-            'model': self._model_name,
+            'model': self.model_label,
             'inference_count': self.inference_count,
             'timeout_count': self.timeout_count,
             'killed_count': self.killed_count,

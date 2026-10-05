@@ -201,7 +201,8 @@ os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 # Import extracted modules
 from drm import probe_drm_output
 from v4l2 import probe_v4l2_device
-from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR
+from name_mute import NameMatcher, NameMuteScheduler, NameMuteController
+from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR, STREAM_FPS, ENCODE_SCALE
 from capture import UstreamerCapture
 from screenshots import ScreenshotManager
 from skip_detection import check_skip_opportunity, extract_ad_seconds_remaining
@@ -1052,8 +1053,7 @@ class Minus:
                 # ASRManager.get_status() exposes the engine + model name,
                 # but it isn't ready yet at construction; read from the
                 # manager attrs for the boot log line instead.
-                logger.info(f"ASR initialized (faster-whisper "
-                            f"{self.asr._model_name} + audio tap, "
+                logger.info(f"ASR initialized ({self.asr.model_label} + audio tap, "
                             f"enabled={self.asr.enabled})")
             except Exception as e:
                 logger.warning(f"ASR init failed: {e} — running without ASR")
@@ -1078,6 +1078,27 @@ class Minus:
             except Exception as e:
                 logger.warning(f"Audio init failed: {e}")
                 self.audio = None
+
+        # Name muter: ASR words + caption OCR -> brief scheduled mutes.
+        self.name_mute = None
+        if self.audio is not None:
+            try:
+                scheduler = NameMuteScheduler(self.audio, self.audio.playback_delay_s)
+                self.name_mute = NameMuteController(
+                    scheduler,
+                    NameMatcher(include_surname=bool(
+                        self._system_settings.get('name_mute_surname', False))))
+                self.name_mute.enabled = bool(self._system_settings.get('name_mute', True))
+                scheduler.start()
+                if self.asr is not None:
+                    self.name_mute.window_s = self.asr.WINDOW_SECONDS
+                    self.asr.on_words = self.name_mute.on_asr_words
+                logger.info(f"Name mute initialized (enabled={self.name_mute.enabled}, "
+                            f"asr={'yes' if self.asr else 'no'}, "
+                            f"A/V delay {self.audio.av_delay_ms / 1000:.1f}s)")
+            except Exception as e:
+                logger.warning(f"Name mute init failed: {e}")
+                self.name_mute = None
 
         # Initialize Health Monitor
         if HAS_HEALTH:
@@ -1434,7 +1455,8 @@ class Minus:
                 f'--port={port}',
                 '--host=0.0.0.0',          # Bind to all interfaces for remote access
                 '--encoder=mpp-jpeg',
-                '--encode-scale=passthrough',  # No scaling, use source resolution directly
+                f'--encode-scale={ENCODE_SCALE}',  # Cap at 2K by default (RGA downscale, never upscales)
+                f'--desired-fps={STREAM_FPS}',
                 '--quality=80',
                 '--workers=4',              # 4 parallel MPP encoders
                 '--buffers=5',
@@ -2711,6 +2733,28 @@ class Minus:
     # System Settings
     # =========================================================================
 
+    def set_name_mute_settings(self, enabled=None, surname=None, ad_blocking=None) -> dict:
+        """Update and persist name-mute / ad-blocking settings (None = keep)."""
+        if enabled is not None:
+            self._system_settings['name_mute'] = bool(enabled)
+            if self.name_mute is not None:
+                self.name_mute.enabled = bool(enabled)
+        if surname is not None:
+            self._system_settings['name_mute_surname'] = bool(surname)
+            if self.name_mute is not None:
+                self.name_mute.matcher.include_surname = bool(surname)
+        if ad_blocking is not None:
+            self._system_settings['ad_blocking'] = bool(ad_blocking)
+        self._save_system_settings()
+        return {'success': True,
+                'name_mute': self._system_settings.get('name_mute'),
+                'name_mute_surname': self._system_settings.get('name_mute_surname'),
+                'ad_blocking': self._system_settings.get('ad_blocking')}
+
+    @property
+    def ad_blocking_enabled(self) -> bool:
+        return bool(self._system_settings.get('ad_blocking', False))
+
     def _load_system_settings(self) -> dict:
         """Load system settings from disk."""
         defaults = {
@@ -2729,6 +2773,13 @@ class Minus:
             # list rather than a dict so the web UI can just toggle checkboxes.
             # Valid kinds: 'vocab', 'fact', 'photos'.
             'replacement_modes': ['vocab', 'fact'],
+            # Ad blocking (OCR/VLM ad detection -> blocking overlay). Off on
+            # this branch: Minus is used as a name muter instead.
+            'ad_blocking': False,
+            # Name muter (src/name_mute.py): briefly cut the audio whenever
+            # the target name is spoken (ASR) or captioned (OCR).
+            'name_mute': True,
+            'name_mute_surname': False,   # also match a bare "James"
         }
         try:
             if SYSTEM_SETTINGS_FILE.exists():
@@ -3236,7 +3287,8 @@ class Minus:
             f'--port={port}',
             '--host=0.0.0.0',          # Bind to all interfaces for remote access
             '--encoder=mpp-jpeg',       # Use RK3588 VPU hardware encoding
-            '--encode-scale=passthrough',  # No scaling, use source resolution directly
+            f'--encode-scale={ENCODE_SCALE}',  # Cap at 2K by default (RGA downscale, never upscales)
+            f'--desired-fps={STREAM_FPS}',
             '--quality=80',
             '--workers=4',              # 4 parallel MPP encoders
             '--buffers=5',
@@ -4056,6 +4108,7 @@ class Minus:
                     continue
 
                 start_time = time.time()
+                capture_mono = time.monotonic()
                 frame = self.frame_capture.capture()
                 capture_time = (time.time() - start_time) * 1000
 
@@ -4275,6 +4328,18 @@ class Minus:
                         self.autonomous_mode.observe_ocr_text(all_texts)
                     except Exception as e:
                         logger.debug(f"observe_ocr_text failed: {e}")
+
+                # Name muter reads captions from every OCR'd frame.
+                if self.name_mute is not None:
+                    try:
+                        self.name_mute.on_caption_texts(all_texts, capture_mono)
+                    except Exception as e:
+                        logger.debug(f"name mute caption check failed: {e}")
+
+                # With ad blocking off, OCR only feeds the name muter (and
+                # autonomous mode above): skip all ad-detection logic.
+                if not self.ad_blocking_enabled:
+                    continue
 
                 # Periodic non-ad screenshot sampler. Captures the current
                 # frame as training data when content is unambiguously not
@@ -5119,7 +5184,7 @@ class Minus:
             # Start VLM worker thread if model is loaded (check vlm.is_ready).
             # Re-check self.vlm: a failed preload sets it to None while we
             # were waiting on the join above.
-            if self.vlm and self.vlm.is_ready:
+            if self.vlm and self.vlm.is_ready and self.ad_blocking_enabled:
                 self.vlm_thread = threading.Thread(target=self.vlm_worker, daemon=True)
                 self.vlm_thread.start()
                 logger.info("VLM worker started (process-based with hard 2s timeout)")

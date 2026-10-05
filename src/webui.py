@@ -2673,6 +2673,44 @@ class WebUI:
                 return jsonify({'available': False, 'enabled': False,
                                 'running': False, 'error': str(e)}), 500
 
+        @self.app.route('/api/name-mute', methods=['GET'])
+        def api_name_mute_status():
+            """Name muter status: hits, recent mutes, A/V delay."""
+            nm = getattr(self.minus, 'name_mute', None)
+            if nm is None:
+                return jsonify({'available': False})
+            st = nm.get_status()
+            st['available'] = True
+            st['ad_blocking'] = self.minus.ad_blocking_enabled
+            return jsonify(st)
+
+        @self.app.route('/api/name-mute/settings', methods=['POST'])
+        def api_name_mute_settings():
+            """Body (all optional): {"enabled", "surname", "ad_blocking"}.
+            Persisted to system settings; applied live."""
+            nm = getattr(self.minus, 'name_mute', None)
+            data = request.get_json(silent=True) or {}
+            try:
+                result = self.minus.set_name_mute_settings(
+                    enabled=data.get('enabled'), surname=data.get('surname'),
+                    ad_blocking=data.get('ad_blocking'))
+                return jsonify(result)
+            except Exception as e:
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/name-mute/test', methods=['POST'])
+        def api_name_mute_test():
+            """Inject a caption line as if OCR had read it now.
+            Body: {"text": "Here's LeBron James"}."""
+            nm = getattr(self.minus, 'name_mute', None)
+            if nm is None:
+                return jsonify({'success': False, 'error': 'name mute unavailable'}), 503
+            text = (request.get_json(silent=True) or {}).get('text', '')
+            before = nm.caption_hits
+            nm.on_caption_texts([text], time.monotonic())
+            return jsonify({'success': True, 'matched': nm.caption_hits > before,
+                            'status': nm.get_status()})
+
         @self.app.route('/api/asr/enable', methods=['POST'])
         def api_asr_enable():
             """Enable ASR (faster-whisper confirm/veto) and start the worker."""
