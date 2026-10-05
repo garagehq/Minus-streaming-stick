@@ -1343,8 +1343,14 @@ class Minus:
                     "Display output not available. Check HDMI-TX connection to TV/monitor."
                 )
                 self._start_display_retry_loop()
-                # Audio stays muted/paused; resume_watchdog will fire when the
-                # retry loop succeeds (start_display_pipeline → main resume path).
+                # Bring audio back anyway. It used to stay paused until a TV
+                # appeared, but the HDMI-RX capture (and the ASR tap on it)
+                # works without one: the pipeline plays into fakesink. Headless
+                # boxes otherwise lost audio, and the name muter its ASR, after
+                # the first signal drop.
+                if self.audio:
+                    self.audio.resume_watchdog()
+                    self.audio.unmute()
                 # LED state stays at no_signal — the display gate keeps the
                 # strip dark while the retry loop runs.
         finally:
