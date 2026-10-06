@@ -19,6 +19,8 @@ the live fill of the audio sync queue. The scheduler mutes
 [c_start + delay - pad_before, c_end + delay + pad_after].
 """
 
+import collections
+import difflib
 import logging
 import os
 import re
@@ -42,6 +44,13 @@ _FIRST_NAME_RE = re.compile(r"\b(?:le ?bron+|lebrun|la ?bron)(?:'?s)?\b")
 _FULL_NAME_RE = re.compile(
     r"\b(?:(?:le|the|la) ?bron(?:x)?|bron|lebrun) james(?:'?s)?\b")
 _KING_JAMES_RE = re.compile(r"\bking james\b")
+_RAW_NAME_RE = re.compile(r"le ?bron+|lebrun", re.I)
+
+
+def _is_graphic_name(line: str) -> bool:
+    """Captions write "LeBron"/"lebron"; a name with 4+ capitals in a row
+    ("LEBRON 2011 Finals", "LeBRON JAMES") is an on-screen graphic."""
+    return any(re.search(r"[A-Z]{4}", m.group(0)) for m in _RAW_NAME_RE.finditer(line))
 _SURNAME_RE = re.compile(r"\bjames(?:'?s)?\b")
 
 # Word-level forms (single token as Moonshine emits it).
@@ -109,8 +118,10 @@ class NameMuteScheduler:
     capture-to-speaker delay in seconds.
     """
 
-    # Moonshine word starts land a median 0.37s (up to ~0.6s) after the
-    # caption-track word times on NBA commentary, so lead in generously.
+    # Default pads (used for ASR word spans), from live Google TV runs scored
+    # against YouTube caption tracks (tests/name_mute_live_analyze.py).
+    # Moonshine word starts land after the caption word by a median of
+    # 0.22-0.40s depending on the broadcast (p90 0.38-0.64s).
     PAD_BEFORE_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_BEFORE', '0.6'))
     PAD_AFTER_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_AFTER', '0.35'))
     # A detection that arrives too late to cover the word still mutes this
@@ -130,6 +141,10 @@ class NameMuteScheduler:
         self.mute_count = 0
         self.late_count = 0
         self.duplicate_count = 0
+        # Every detection, for offline timing analysis (GET /api/name-mute/log).
+        # Times are time.monotonic(): capture_* is when the audio/frame entered
+        # the pipeline, play_* the scheduled mute (None if skipped).
+        self.detection_log = collections.deque(maxlen=5000)
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -145,14 +160,34 @@ class NameMuteScheduler:
         self._set(False)
 
     def schedule(self, capture_start: float, capture_end: float,
-                 source: str, label: str):
-        """Mute the playback of audio captured in [capture_start, capture_end]."""
+                 source: str, label: str, meta: dict = None,
+                 pad_before: float = None, pad_after: float = None,
+                 replace_sources=()):
+        """Mute the playback of audio captured in [capture_start, capture_end].
+
+        replace_sources: pending (not yet started) windows from these sources
+        that overlap this one are dropped first, so a precise detection
+        replaces a coarse one for the same mention instead of widening it.
+        """
         delay = max(0.0, float(self._delay_fn() or 0.0))
-        start = capture_start + delay - self.PAD_BEFORE_S
-        end = capture_end + delay + self.PAD_AFTER_S
+        pb = self.PAD_BEFORE_S if pad_before is None else pad_before
+        pa = self.PAD_AFTER_S if pad_after is None else pad_after
+        start = capture_start + delay - pb
+        end = capture_end + delay + pa
         now = time.monotonic()
+        if replace_sources:
+            with self._lock:
+                self._windows = [
+                    w for w in self._windows
+                    if not (w[2] in replace_sources and w[0] > now
+                            and w[0] < end + 0.8 and w[1] > start - 0.8)]
         with self._lock:
             covered = any(w[0] <= start and end <= w[1] for w in self._windows)
+        entry = {'source': source, 'label': label, 'detected': now,
+                 'capture_start': capture_start, 'capture_end': capture_end,
+                 'delay': delay, 'play_start': None, 'play_end': None,
+                 'duplicate': covered, 'meta': meta or {}}
+        self.detection_log.append(entry)
         if covered:
             # Already muting this stretch (e.g. ASR confirming a caption hit,
             # or two OCR misreads of the same caption line).
@@ -164,6 +199,7 @@ class NameMuteScheduler:
             self.late_count += 1
             start = now
             end = max(end, now + self.MIN_LATE_MUTE_S)
+        entry['play_start'], entry['play_end'] = start, end
         with self._lock:
             self._windows.append((start, end, source, label))
             self.mute_count += 1
@@ -218,16 +254,24 @@ class NameMuteController:
 
     # Two ASR hits whose capture times are this close are the same mention.
     ASR_DEDUP_S = 0.6
+    # Word timings shorter than this are Moonshine repetition hallucinations
+    # ("LeBron. LeBron. LeBron." with zero-length words).
+    ASR_MIN_WORD_S = 0.08
     TRUNCATED_WORD_EXTRA_S = 0.4
     # ASR window length; set from ASRManager.WINDOW_SECONDS by the owner.
     window_s = 2.5
     # A caption mention is remembered this long (lines scroll up and stay
     # visible for several seconds).
     CAPTION_MEMORY_S = 10.0
-    # Caption text appears roughly as the word is spoken; mute this much
-    # around the frame that first shows it (capture time).
+    # Caption text appears a median 0.66s after the word starts (live, Google
+    # TV YouTube auto-captions); mute this much around the frame that first
+    # shows it (capture time). Tuned with tests/name_mute_live_sim.py.
     CAPTION_BEFORE_S = 0.7
-    CAPTION_AFTER_S = 0.6
+    CAPTION_AFTER_S = 0.7
+    # OCR misreads one caption line differently frame to frame ("they oking
+    # for LeBron" / "they loking for LeBron"); text before the name this
+    # similar to a recent one is the same mention.
+    CAPTION_FUZZY_RATIO = 0.6
 
     def __init__(self, scheduler: NameMuteScheduler, matcher: NameMatcher = None):
         self.scheduler = scheduler
@@ -255,6 +299,8 @@ class NameMuteController:
         now = time.monotonic()
         self._recent_asr = [c for c in self._recent_asr if now - c < 15.0]
         for s, e in spans:
+            if e - s < self.ASR_MIN_WORD_S:
+                continue
             if e >= self.window_s - 0.05:
                 # Word runs past the end of this window; its true end is
                 # unknown. Later windows that see it whole are de-duplicated
@@ -266,34 +312,75 @@ class NameMuteController:
                 continue
             self._recent_asr.append(center)
             self.asr_hits += 1
-            self.scheduler.schedule(c0, c1, 'asr', transcript.strip()[:80])
+            self.scheduler.schedule(c0, c1, 'asr', transcript.strip()[:80],
+                                    {'word_start': round(s, 3), 'word_end': round(e, 3)},
+                                    replace_sources=('caption',))
+
+    def on_caption_results(self, results, capture_time: float, frame_shape=None):
+        """OCR results (dicts with 'text' and 'box') for one frame."""
+        if not results:
+            return
+        h, w = (frame_shape[0], frame_shape[1]) if frame_shape is not None else (None, None)
+        lines = []
+        for r in results:
+            meta = {}
+            box = r.get('box') if isinstance(r, dict) else None
+            if box and h and w:
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                meta = {'x': round(sum(xs) / len(xs) / w, 3),
+                        'y': round(sum(ys) / len(ys) / h, 3),
+                        'h': round((max(ys) - min(ys)) / h, 3)}
+            lines.append((r.get('text', '') if isinstance(r, dict) else str(r), meta))
+        self._on_caption_lines(lines, capture_time)
 
     def on_caption_texts(self, texts, capture_time: float):
-        if not (self.enabled and self.use_captions) or not texts:
+        self._on_caption_lines([(t, {}) for t in (texts or [])], capture_time)
+
+    def _on_caption_lines(self, lines, capture_time: float):
+        if not (self.enabled and self.use_captions) or not lines:
             return
         now = time.monotonic()
-        self._recent_captions = {k: t for k, t in self._recent_captions.items()
-                                 if now - t < self.CAPTION_MEMORY_S}
-        for line in texts:
+        self._recent_captions = {k: v for k, v in self._recent_captions.items()
+                                 if now - v[0] < self.CAPTION_MEMORY_S}
+        for line, meta in lines:
             norm = _norm(line)
             if not norm:
                 continue
+            if line.upper() == line and any(c.isalpha() for c in line):
+                continue   # all-caps: an on-screen graphic, not a caption
             for m in (_FULL_NAME_RE, _FIRST_NAME_RE, _KING_JAMES_RE):
                 for hit in m.finditer(norm):
+                    if _is_graphic_name(line):
+                        continue
                     # Key: the text before this mention plus its first word.
                     # Stable while the caption grows to the right or scrolls
                     # up, and the same whether the full-name or first-name
                     # pattern matched it.
                     key = (norm[:hit.start()] + hit.group(0).split(' ')[0])[-40:]
-                    if key in self._recent_captions:
-                        self._recent_captions[key] = now
+                    ctx = norm[:hit.start()].strip()[-20:]
+                    if self._seen_caption(key, ctx, now):
                         continue
-                    self._recent_captions[key] = now
                     self.caption_hits += 1
                     self.last_caption_text = line
-                    self.scheduler.schedule(capture_time - self.CAPTION_BEFORE_S,
-                                            capture_time + self.CAPTION_AFTER_S,
-                                            'caption', line.strip()[:80])
+                    self.scheduler.schedule(capture_time, capture_time,
+                                            'caption', line.strip()[:80], meta,
+                                            pad_before=self.CAPTION_BEFORE_S,
+                                            pad_after=self.CAPTION_AFTER_S)
+
+    def _seen_caption(self, key: str, ctx: str, now: float) -> bool:
+        """Has this caption mention been seen recently? Records it either way.
+
+        Exact key, or (when there is enough text before the name to compare)
+        a fuzzy match on that text, which absorbs OCR misreads of one line.
+        """
+        seen = key in self._recent_captions
+        if not seen and len(ctx) >= 4:
+            seen = any(len(c) >= 4 and difflib.SequenceMatcher(None, ctx, c).ratio()
+                       >= self.CAPTION_FUZZY_RATIO
+                       for _, c in self._recent_captions.values())
+        self._recent_captions[key] = (now, ctx)
+        return seen
 
     def get_status(self) -> dict:
         st = self.scheduler.get_status()

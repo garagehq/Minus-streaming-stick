@@ -2687,6 +2687,17 @@ class WebUI:
             st['ad_blocking'] = self.minus.ad_blocking_enabled
             return jsonify(st)
 
+        @self.app.route('/api/name-mute/log', methods=['GET'])
+        def api_name_mute_log():
+            """Every detection with capture/playback times (time.monotonic()).
+            ?since=<monotonic seconds> limits to newer detections."""
+            nm = getattr(self.minus, 'name_mute', None)
+            if nm is None:
+                return jsonify({'available': False}), 503
+            since = float(request.args.get('since', 0) or 0)
+            log = [e for e in list(nm.scheduler.detection_log) if e['detected'] >= since]
+            return jsonify({'now': time.monotonic(), 'detections': log})
+
         @self.app.route('/api/name-mute/settings', methods=['POST'])
         def api_name_mute_settings():
             """Body (all optional): {"enabled", "surname", "ad_blocking"}.

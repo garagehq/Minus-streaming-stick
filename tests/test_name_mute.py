@@ -134,6 +134,56 @@ class TestController(unittest.TestCase):
         ctl.on_caption_texts(["LeBron again on the break"], t + 2.0)
         self.assertEqual(ctl.caption_hits, 2)
 
+    def test_caption_ocr_misread_is_same_mention(self):
+        ctl, _ = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["they looking for LeBron down inside"], t)
+        ctl.on_caption_texts(["they oking for LeBron dow inside"], t + 0.5)
+        self.assertEqual(ctl.caption_hits, 1)
+
+    def test_caption_line_starting_with_name(self):
+        # No text before the name: a growing line ("LeBron" -> "LeBron
+        # drives ...") must stay one mention, so it is keyed on the name alone
+        # for CAPTION_MEMORY_S; a new one after that counts again.
+        ctl, _ = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["LeBron"], t)
+        ctl.on_caption_texts(["LeBron drives to the rim"], t + 1.0)
+        self.assertEqual(ctl.caption_hits, 1)
+        ctl._recent_captions = {k: (v[0] - ctl.CAPTION_MEMORY_S - 1, v[1])
+                                for k, v in ctl._recent_captions.items()}
+        ctl.on_caption_texts(["LeBron for three"], t + 12.0)
+        self.assertEqual(ctl.caption_hits, 2)
+
+    def test_allcaps_graphic_ignored(self):
+        ctl, _ = self._ctl()
+        ctl.on_caption_texts(["LEBRON JAMES"], time.monotonic())
+        self.assertEqual(ctl.caption_hits, 0)
+
+    def test_graphic_name_ignored(self):
+        ctl, _ = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["LEBRON 2011 Finals"], t)
+        ctl.on_caption_texts(["LeBRON JAMES"], t)
+        self.assertEqual(ctl.caption_hits, 0)
+        ctl.on_caption_texts(["and lebron drives"], t)
+        ctl.on_caption_texts(["here comes LeBron"], t)
+        self.assertEqual(ctl.caption_hits, 2)
+
+    def test_zero_length_asr_word_ignored(self):
+        ctl, _ = self._ctl()
+        ctl.on_asr_words("LeBron. LeBron.", [("LeBron.", 0.07, 0.07)], time.monotonic())
+        self.assertEqual(ctl.asr_hits, 0)
+
+    def test_asr_replaces_pending_caption_window(self):
+        ctl, sch = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["and here comes LeBron"], t)
+        self.assertEqual([w[2] for w in sch._windows], ['caption'])
+        ctl.on_asr_words("here comes LeBron", [("here", 0.5, 0.7), ("comes", 0.7, 1.0),
+                                               ("LeBron", 1.0, 1.4)], t - 1.5)
+        self.assertEqual([w[2] for w in sch._windows], ['asr'])
+
     def test_disabled(self):
         ctl, _ = self._ctl()
         ctl.enabled = False

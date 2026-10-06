@@ -4349,7 +4349,8 @@ class Minus:
                 # Name muter reads captions from every OCR'd frame.
                 if self.name_mute is not None:
                     try:
-                        self.name_mute.on_caption_texts(all_texts, capture_mono)
+                        self.name_mute.on_caption_results(
+                            ocr_results, capture_mono, getattr(frame, 'shape', None))
                     except Exception as e:
                         logger.debug(f"name mute caption check failed: {e}")
 
