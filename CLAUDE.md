@@ -34,10 +34,23 @@ whenever "LeBron James" is spoken or captioned (`src/name_mute.py`).
 - **ASR cadence.** 2.5s windows back to back (min 0.6s between starts:
   Moonshine returns empty in 0.03s on non-speech, which otherwise spun
   the loop and burned through the 500-inference leak-restart budget).
-- **Measured** on 5.5 min of NBC LeBron commentary vs YouTube's caption
-  track (`tests/name_mute_replay.py`, real-time, production ASR worker):
-  see the commit log for the latest numbers. Offline name recall by model
-  on 2.5s windows: tiny 42%, base 58%, small 81%, medium 88%.
+- **Measured live** on a Google TV (no TV attached) with
+  `tests/name_mute_live_measure.py` (mute log via `GET /api/name-mute/log`,
+  video position via ADB) and `tests/name_mute_live_analyze.py` (scored
+  against the YouTube caption track). Three videos not used for tuning:
+  108 of 110 "LeBron" mentions fully muted (2 partly, 0 missed); total mute
+  2.6-3.3x the spoken name; mutes start a median 0.27-0.60s before the word
+  and end 0.64-1.04s after. Bare "James" is not targeted by default
+  (`name_mute_surname`) and is common: 11-70 per video. Offline name recall
+  by model on 2.5s windows: tiny 42%, base 58%, small 81%, medium 88%.
+- **Window rules.** ASR pads -0.6/+0.35s around Moonshine's word span
+  (its word starts land 0.22-0.40s after the caption word); captions
+  -0.7/+0.7s around the frame that first shows the name (captions appear
+  0.3-1.0s after the word). Caption mentions are de-duplicated on a fuzzy
+  match of the text before the name (OCR misreads); a later ASR hit
+  replaces a not-yet-playing caption window for the same mention;
+  on-screen graphics (all caps, or 4+ capitals in the name) and
+  zero-length ASR words are ignored.
 - **Settings.** `ad_blocking` (default False), `name_mute` (True),
   `name_mute_surname` (False). API: `GET /api/name-mute`,
   `POST /api/name-mute/settings`, `POST /api/name-mute/test {"text"}`.
