@@ -11,15 +11,16 @@ HDMI passthrough with real-time ML-based ad detection and blocking using dual NP
 ## Branch `asr-first`: name muter (no ad blocking)
 
 On this branch Minus does not block ads. It briefly cuts the TV audio
-whenever "LeBron James" is spoken or captioned (`src/name_mute.py`).
+whenever "LeBron James", "LeBron" or "King" is spoken or captioned
+(`src/name_mute.py`).
 
 - **Detectors.** ASR (Moonshine `MEDIUM_STREAMING`, word timestamps) on
   the audio tap, and OCR on every frame's caption text. Both feed
   `NameMuteController`, which de-duplicates repeats (overlapping ASR
   windows, caption lines that stay on screen and grow word by word).
   Matches "LeBron", "LeBron's", "Le Bron", "the Bron James", "Lebrun",
-  "King James"; not "the Bronx", and not a bare "James" unless
-  `name_mute_surname` is on.
+  "King", "King James"; not "the Bronx", not "Kings" (Sacramento), and
+  not a bare "James" unless `name_mute_surname` is on.
 - **A/V delay line (`MINUS_AV_DELAY_S`, default 5s).** The audio sync
   queue and a video `queue name=avdelay` (after the frame gate, needs
   `souphttpsrc do-timestamp=true`) both hold 5s, so the detectors see each

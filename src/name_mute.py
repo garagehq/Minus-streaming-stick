@@ -43,7 +43,9 @@ def _norm(text: str) -> str:
 _FIRST_NAME_RE = re.compile(r"\b(?:le ?bron+|lebrun|la ?bron)(?:'?s)?\b")
 _FULL_NAME_RE = re.compile(
     r"\b(?:(?:le|the|la) ?bron(?:x)?|bron|lebrun) james(?:'?s)?\b")
-_KING_JAMES_RE = re.compile(r"\bking james\b")
+# "King" on its own counts (user request), and so does "King James"; the
+# plural "Kings" (Sacramento) does not.
+_KING_JAMES_RE = re.compile(r"\bking(?: james)?\b(?!s)")
 _RAW_NAME_RE = re.compile(r"le ?bron+|lebrun", re.I)
 
 
@@ -57,6 +59,7 @@ _SURNAME_RE = re.compile(r"\bjames(?:'?s)?\b")
 _WORD_FIRST_RE = re.compile(r"^(?:le ?bron+|lebrun|la ?bron)(?:'?s)?$")
 _WORD_BRON_RE = re.compile(r"^(?:bron|bronx)$")
 _WORD_JAMES_RE = re.compile(r"^james(?:'?s)?$")
+_WORD_KING_RE = re.compile(r"^king(?:'s)?$")
 
 
 class NameMatcher:
@@ -101,10 +104,12 @@ class NameMatcher:
                     i += 2
                     continue
                 spans.append((s, e))
-            elif w == 'king' and nxt_is_james:
-                spans.append((s, nxt[2]))
-                i += 2
-                continue
+            elif _WORD_KING_RE.match(w):
+                if nxt_is_james:
+                    spans.append((s, nxt[2]))
+                    i += 2
+                    continue
+                spans.append((s, e))
             elif self.include_surname and _WORD_JAMES_RE.match(w):
                 spans.append((s, e))
             i += 1

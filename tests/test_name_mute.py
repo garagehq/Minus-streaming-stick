@@ -27,9 +27,20 @@ class TestNameMatcher(unittest.TestCase):
                   "KING JAMES!", "pass to LEBRON"]:
             self.assertTrue(self.m.find(t), t)
 
+    def test_king(self):
+        for t in ["the King with the dunk", "KING JAMES!", "long live the king"]:
+            self.assertTrue(self.m.find(t), t)
+        for t in ["Sacramento Kings", "the Kings win", "kingdom"]:
+            self.assertFalse(self.m.find(t), t)
+        self.assertEqual(self.m.find_word_spans(
+            [("the", 0, .1), ("King", .1, .4), ("scores", .4, .8)]), [(.1, .4)])
+        self.assertEqual(self.m.find_word_spans(
+            [("King", 0, .3), ("James", .3, .7)]), [(0, .7)])
+        self.assertEqual(self.m.find_word_spans([("Kings", 0, .3)]), [])
+
     def test_text_non_matches(self):
         for t in ["The Bronx team", "James Harden for three", "lebanon",
-                  "brontosaurus", ""]:
+                  "brontosaurus", "", "James Jones"]:
             self.assertFalse(self.m.find(t), t)
 
     def test_surname_toggle(self):

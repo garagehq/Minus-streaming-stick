@@ -12,7 +12,7 @@ import re
 import statistics
 import sys
 
-NAME_RE = re.compile(r"\b(le ?bron|lebrun)", re.I)
+NAME_RE = re.compile(r"\b(le ?bron|lebrun|king\b(?!s))", re.I)
 
 
 def load_mentions(path, lo, hi):
