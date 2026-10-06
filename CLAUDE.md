@@ -29,12 +29,34 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   live 2s runs captions alone fully covered 10/23 and 14/16 mentions, ASR
   alone 16/23 and 11/16. Captions only help when they are turned on in the
   YouTube player.
-- **Experiments queued (2026-10-06).** (1) ASR on two NPU cores: either
-  one inference split across cores (`NPU_CORE_*` multi-core masks) or two
-  workers on alternating windows to halve the 0.5s cycle, aiming for a
-  delay under 2s. (2) NVIDIA Parakeet (TDT/CTC via sherpa-onnx, CPU) for
-  completeness against SenseVoice. Results go in this section and
-  docs/GPU_SETUP.md *Results*.
+- **Two NPU cores for ASR: no gain (2026-10-06).** Splitting one
+  SenseVoice inference across cores is slower (one core 365ms, cores 0+1
+  509ms, all three 747ms; the model is compiled single-core). Two workers
+  on cores 1+2 taking alternate windows (`MINUS_ASR_NPU_CORES=1,2
+  MINUS_ASR_MIN_CYCLE=0.25`, a window every 0.24s) did not detect names
+  sooner live: median 0.46s after the word end vs 0.41s with one worker,
+  14/16 vs 15/16 fully muted on the same video. The muter already matches
+  a name cut off at the end of a window, so the gap between windows was
+  never the bottleneck; the ~0.30s NPU inference is (CPU feature
+  extraction is 8ms). Per-inference time also rose to 0.40s because both
+  workers share the three pinned CPU cores. The option stays in the code
+  (default one worker on core 1).
+- **NVIDIA Parakeet: tried, not adopted (2026-10-06).** sherpa-onnx int8 on
+  the 3 pinned CPU cores, 3s windows, NBA commentary clip:
+  TDT 0.6B v2 96% name recall (25/26 caption mentions, plus a real
+  "block by LeBron James" the auto-captions wrote as "[Applause]"), word
+  starts +0.02s vs captions, 0.66s per window; CTC 110M 81%, 0.14s. The
+  unified 0.6B *streaming* export is "buffered streaming" (re-runs the
+  encoder over ~5.6s of context every 80ms): ~16x slower than real time on
+  one thread and empty output on sherpa-onnx 1.13.8, so unusable here.
+  Live as the ASR engine (`MINUS_ASR_ENGINE=parakeet`, model dir
+  `MINUS_PARAKEET_DIR`), same video and 2s delay as SenseVoice: 14/16
+  fully muted (SenseVoice 15/16 and 14/16 on two runs), ASR alone 12/16
+  (SenseVoice 11-12), detection p90 1.66s after the word start (SenseVoice
+  1.29s, so less margin inside the 2s delay), 0.62s p50 / 0.86s p95 per
+  window, SoC ~10°C warmer. Better offline recall did not show live because
+  captions + SenseVoice already cover nearly every mention, and it puts
+  the load back on the throttled CPU. Kept as an opt-in engine.
 - **A/V delay line (`MINUS_AV_DELAY_S`, default 2s; was 5s with Moonshine).** The audio sync
   queue and a video `queue name=avdelay` (after the frame gate, needs
   `souphttpsrc do-timestamp=true`) both hold the delay, so the detectors see each

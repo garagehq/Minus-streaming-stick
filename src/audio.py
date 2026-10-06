@@ -1596,10 +1596,20 @@ class AudioASRTap:
         Returns False if the ring buffer doesn't yet have `seconds` of
         audio (cold start) — the ASR worker waits and retries.
         """
+        end = self.snapshot_window(seconds, self.wav_path)
+        if end is None:
+            return False
+        self.last_snapshot_end_mono = end
+        return True
+
+    def snapshot_window(self, seconds: float, path: str):
+        """Like snapshot_to_wav, but to `path`, returning the capture time
+        (time.monotonic()) of the newest sample, or None if not enough audio
+        yet. Safe for several ASR workers at once, each with its own path."""
         n_samples = min(int(seconds * self.SAMPLE_RATE), self._buffer_samples)
         with self._lock:
             if self._samples_written < n_samples:
-                return False
+                return None
             snapshot_end = self._last_write_mono
             start = (self._write_pos - n_samples) % self._buffer_samples
             if start + n_samples <= self._buffer_samples:
@@ -1613,15 +1623,14 @@ class AudioASRTap:
 
         # Atomic write — whisper-cli may open the file while we're
         # writing if we don't go through tmp+rename.
-        tmp = self.wav_path + '.tmp'
+        tmp = path + '.tmp'
         with wave.open(tmp, 'wb') as wf:
             wf.setnchannels(self.CHANNELS)
             wf.setsampwidth(self.SAMPLE_WIDTH_BYTES)
             wf.setframerate(self.SAMPLE_RATE)
             wf.writeframes(data.tobytes())
-        os.replace(tmp, self.wav_path)
-        self.last_snapshot_end_mono = snapshot_end
-        return True
+        os.replace(tmp, path)
+        return snapshot_end
 
     @property
     def last_buffer_age(self) -> float:

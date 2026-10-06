@@ -148,6 +148,8 @@ class ASRManager:
         self.engine = resolve_engine()
         if self.engine == 'sensevoice':
             self.model_label = 'sensevoice-small-npu'
+        elif self.engine == 'parakeet':
+            self.model_label = 'parakeet-tdt-0.6b-v2'
         elif self.engine == 'moonshine':
             self.model_label = 'moonshine-' + os.environ.get(
                 'MINUS_ASR_MOONSHINE_ARCH', 'MEDIUM_STREAMING').lower()
@@ -155,9 +157,18 @@ class ASRManager:
             self.model_label = self._model_name
         self._cpu_threads = cpu_threads
 
-        # Worker process (hard-timeout via process kill — see asr_worker.py)
-        self._process = ASRProcess(model_name=self._model_name,
-                                   cpu_threads=self._cpu_threads)
+        # Worker processes (hard-timeout via process kill — see asr_worker.py).
+        # SenseVoice can run one worker per NPU core (MINUS_ASR_NPU_CORES,
+        # e.g. "1,2"); the loops are staggered so a new window starts every
+        # MIN_CYCLE_S / n seconds. Other engines get one worker.
+        cores = [None]
+        if self.engine == 'sensevoice':
+            cores = [int(c) for c in os.environ.get('MINUS_ASR_NPU_CORES', '1').split(',')
+                     if c.strip()] or [1]
+        self._processes = [ASRProcess(model_name=self._model_name,
+                                      cpu_threads=self._cpu_threads, npu_core=c)
+                           for c in cores]
+        self._process = self._processes[0]
 
         # Runtime state
         self.is_running = False
@@ -177,6 +188,8 @@ class ASRManager:
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._threads = []
+        self._words_lock = threading.Lock()
 
     # ----- lifecycle -----
 
@@ -187,14 +200,21 @@ class ASRManager:
             logger.warning("[ASR] faster-whisper not installed — ASR disabled")
             return
 
-        if not self._process.start():
+        procs = [p for p in self._processes if p.start()]
+        if not procs:
             logger.warning("[ASR] worker process failed to start — ASR disabled")
             return
 
         self._stop_event.clear()
         self.is_running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True, name='ASR')
-        self._thread.start()
+        n = len(procs)
+        self._threads = []
+        for i, proc in enumerate(procs):
+            t = threading.Thread(target=self._loop, args=(proc, i, n), daemon=True,
+                                 name=f'ASR{i}' if n > 1 else 'ASR')
+            t.start()
+            self._threads.append(t)
+        self._thread = self._threads[0]
         logger.info(f"[ASR] started (model={self.model_label}, "
                     f"window={self.WINDOW_SECONDS}s, interval={self.INFERENCE_INTERVAL_S}s, "
                     f"threads={self._cpu_threads})")
@@ -203,59 +223,72 @@ class ASRManager:
         if not self.is_running:
             return
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=5)
+        for t in self._threads:
+            t.join(timeout=5)
         self.is_running = False
-        # Stop the worker process
-        try:
-            self._process.stop()
-        except Exception as e:
-            logger.debug(f"[ASR] worker stop error: {e}")
+        # Stop the worker processes
+        for proc in self._processes:
+            try:
+                proc.stop()
+            except Exception as e:
+                logger.debug(f"[ASR] worker stop error: {e}")
         logger.info(f"[ASR] stopped after {self.inference_count} inferences "
                     f"(timeouts={self.timeout_count}, killed={self.killed_count}, "
                     f"failures={self.failure_count})")
 
     # ----- main loop -----
 
-    def _loop(self):
+    def _loop(self, proc=None, index: int = 0, count: int = 1):
+        proc = proc or self._process
+        wav_path = (self._tap.wav_path if count == 1
+                    else f"{self._tap.wav_path[:-4]}_{index}.wav")
         # Give the audio tap a moment to fill the ring buffer with at
         # least one window's worth of data. Without this we'd start
-        # producing empty/short transcripts immediately on boot.
-        if not self._stop_event.wait(self.WINDOW_SECONDS + 0.5):
+        # producing empty/short transcripts immediately on boot. Extra
+        # workers start a fraction of a cycle later so windows interleave.
+        if not self._stop_event.wait(self.WINDOW_SECONDS + 0.5
+                                     + self.MIN_CYCLE_S * index / count):
             pass
 
         while not self._stop_event.is_set():
             cycle_start = time.monotonic()
             try:
                 if not self.enabled:
-                    self._stop_event.wait(self.INFERENCE_INTERVAL_S)
+                    self._stop_event.wait(max(self.INFERENCE_INTERVAL_S, 0.5))
                     continue
 
-                if not self._tap.snapshot_to_wav(self.WINDOW_SECONDS):
+                if hasattr(self._tap, 'snapshot_window'):
+                    end = self._tap.snapshot_window(self.WINDOW_SECONDS, wav_path)
+                elif self._tap.snapshot_to_wav(self.WINDOW_SECONDS):
+                    end = self._tap.last_snapshot_end_mono
+                else:
+                    end = None
+                if end is None:
                     # Tap not ready (not enough audio yet, or stalled).
-                    self._stop_event.wait(self.INFERENCE_INTERVAL_S)
+                    self._stop_event.wait(max(self.INFERENCE_INTERVAL_S, 0.1))
                     continue
 
                 # Capture time of the first sample in this window.
-                window_start = (self._tap.last_snapshot_end_mono
-                                - self.WINDOW_SECONDS)
-                status, transcript, latency = self._process.transcribe(
-                    self._tap.wav_path)
+                window_start = end - self.WINDOW_SECONDS
+                status, transcript, latency = proc.transcribe(wav_path)
                 self._record_result(status, transcript, latency)
                 if status == 'ok' and self.on_words is not None:
                     try:
-                        self.on_words(transcript,
-                                      list(getattr(self._process, 'last_words', []) or []),
-                                      window_start)
+                        with self._words_lock:   # workers may finish together
+                            self.on_words(transcript,
+                                          list(getattr(proc, 'last_words', []) or []),
+                                          window_start)
                     except Exception as e:
                         logger.error(f"[ASR] on_words callback failed: {e}")
             except Exception as e:
                 logger.error(f"[ASR] loop iteration failed: {e}")
                 self.failure_count += 1
 
+            # Each of `count` workers keeps a cycle of MIN_CYCLE_S * count,
+            # so together they start a window every MIN_CYCLE_S.
             self._stop_event.wait(max(
                 self.INFERENCE_INTERVAL_S,
-                self.MIN_CYCLE_S - (time.monotonic() - cycle_start)))
+                self.MIN_CYCLE_S * count - (time.monotonic() - cycle_start)))
 
     def _record_result(self, status: str, transcript: str, latency: float):
         hits = count_marker_hits(transcript) if status == 'ok' else 0

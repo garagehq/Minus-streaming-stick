@@ -143,6 +143,44 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
                 return ' '.join(x[0] for x in words), words
 
             warmup = lambda: _svn.words(np.zeros(16000, dtype=np.float32))
+        elif engine == 'parakeet':
+            # NVIDIA Parakeet TDT 0.6B v2 (sherpa-onnx int8) on the pinned CPU
+            # cores: ~0.66s per 3s window, best name recall measured (96%).
+            import wave as _wave
+            import sherpa_onnx as _so
+            _pdir = os.environ.get(
+                'MINUS_PARAKEET_DIR',
+                '/home/radxa/asr_models/parakeet/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8')
+            log.info(f"[ASRWorker] Loading Parakeet from {_pdir}...")
+            _pk = _so.OfflineRecognizer.from_transducer(
+                encoder=os.path.join(_pdir, 'encoder.int8.onnx'),
+                decoder=os.path.join(_pdir, 'decoder.int8.onnx'),
+                joiner=os.path.join(_pdir, 'joiner.int8.onnx'),
+                tokens=os.path.join(_pdir, 'tokens.txt'),
+                num_threads=cpu_threads, model_type='nemo_transducer')
+
+            def _pk_run(audio):
+                st = _pk.create_stream()
+                st.accept_waveform(16000, audio)
+                _pk.decode_stream(st)
+                return st.result
+
+            def _infer(wav_path):
+                w = _wave.open(wav_path, 'rb')
+                d = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+                w.close()
+                res = _pk_run(d.astype(np.float32) / 32768.0)
+                toks, ts = list(res.tokens), list(res.timestamps)
+                words = []
+                for i, (t, s) in enumerate(zip(toks, ts)):
+                    if t.startswith(' ') or not words:
+                        words.append([t.strip(), s, s])
+                    else:
+                        words[-1][0] += t
+                    words[-1][2] = ts[i + 1] if i + 1 < len(ts) else s + 0.3
+                return res.text.strip(), [(w, s, e) for w, s, e in words if w]
+
+            warmup = lambda: _pk_run(np.zeros(16000, dtype=np.float32))
         elif engine == 'moonshine':
             import re as _re
             import wave as _wave

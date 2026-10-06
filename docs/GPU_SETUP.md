@@ -193,6 +193,16 @@ What Minus uses instead, for name detection on the same audio:
 | **SenseVoice-small (RKNN)** | **NPU core 1** | **~0.38 s, fixed** | **85%** (3 s windows) | **+0.10 to +0.22 s** |
 | Moonshine medium-streaming | 3 CPU cores | ~1.1 s p50, 1.7 s p95 | 88% (2.5 s) | +0.22 to +0.40 s |
 | sherpa-onnx KWS (zipformer 3.3M) | CPU | RTF 0.07 | 27% | n/a |
+| Parakeet TDT 0.6B v2 (sherpa-onnx int8) | 3 CPU cores | 0.66 s | 96% (3 s) | +0.02 s |
+| Parakeet CTC 110M (sherpa-onnx int8) | 3 CPU cores | 0.14 s | 81% (3 s) | +0.06 s |
+| SenseVoice on NPU cores 1+2, alternate windows | 2 NPU cores | 0.40 s each | same live as one core | same |
+
+Parakeet 0.6B has the best offline recall but tied SenseVoice live (14/16
+vs 15/16 and 14/16 on the same video) while using three CPU cores and
+detecting names later; Parakeet's streaming export can't run in real time
+here. Splitting one SenseVoice inference across NPU cores is slower (one
+core 365 ms, two 509 ms, three 747 ms). Details are in CLAUDE.md, branch
+`asr-first` section.
 
 The NPU path freed three CPU cores and cut the A/V delay line from 5 s to
 2 s. See `tests/sensevoice_npu_eval.py`.
