@@ -22,6 +22,19 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   Matches "LeBron", "LeBron's", "Le Bron", "the Bron James", "Lebrun",
   "King", "King James"; not "the Bronx", not "Kings" (Sacramento), and
   not a bare "James" unless `name_mute_surname` is on.
+- **NPU cores.** RK3588 has three. Core 0: PaddleOCR (default core mask),
+  which on this branch reads captions only; OCR ad-keyword detection is off
+  (`ad_blocking` False). Core 1: SenseVoice ASR. Core 2: free. Both
+  detectors feed the muter; a mention caught by either is muted. In the
+  live 2s runs captions alone fully covered 10/23 and 14/16 mentions, ASR
+  alone 16/23 and 11/16. Captions only help when they are turned on in the
+  YouTube player.
+- **Experiments queued (2026-10-06).** (1) ASR on two NPU cores: either
+  one inference split across cores (`NPU_CORE_*` multi-core masks) or two
+  workers on alternating windows to halve the 0.5s cycle, aiming for a
+  delay under 2s. (2) NVIDIA Parakeet (TDT/CTC via sherpa-onnx, CPU) for
+  completeness against SenseVoice. Results go in this section and
+  docs/GPU_SETUP.md *Results*.
 - **A/V delay line (`MINUS_AV_DELAY_S`, default 2s; was 5s with Moonshine).** The audio sync
   queue and a video `queue name=avdelay` (after the frame gate, needs
   `souphttpsrc do-timestamp=true`) both hold the delay, so the detectors see each
