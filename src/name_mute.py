@@ -57,7 +57,12 @@ _SURNAME_RE = re.compile(r"\bjames(?:'?s)?\b")
 
 # Word-level forms (single token as Moonshine emits it).
 _WORD_FIRST_RE = re.compile(r"^(?:le ?bron+|lebrun|la ?bron)(?:'?s)?$")
-_WORD_BRON_RE = re.compile(r"^(?:bron|bronx)$")
+# Only counts when followed by "James". Besides "Bron"/"Bronx" this takes
+# the ASR's garbled first names ("amron james", "thebron james", "lebra
+# james"), but not real first names ending in -ron.
+_WORD_BRON_RE = re.compile(
+    r"^(?!(?:aaron|cameron|byron|myron|ron|baron|darron|kendron)$)"
+    r"\w{0,4}(?:bron|brun|bra|ron)x?$")
 _WORD_JAMES_RE = re.compile(r"^james(?:'?s)?$")
 _WORD_KING_RE = re.compile(r"^king(?:'s)?$")
 
@@ -127,7 +132,7 @@ class NameMuteScheduler:
     # against YouTube caption tracks (tests/name_mute_live_analyze.py).
     # Moonshine word starts land after the caption word by a median of
     # 0.22-0.40s depending on the broadcast (p90 0.38-0.64s).
-    PAD_BEFORE_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_BEFORE', '0.6'))
+    PAD_BEFORE_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_BEFORE', '0.4'))
     PAD_AFTER_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_AFTER', '0.35'))
     # A detection that arrives too late to cover the word still mutes this
     # long, so a missed head start still cuts the tail of the name.
@@ -273,6 +278,10 @@ class NameMuteController:
     # shows it (capture time). Tuned with tests/name_mute_live_sim.py.
     CAPTION_BEFORE_S = 0.7
     CAPTION_AFTER_S = 0.7
+    # A line that ends on the first name ("... and LeBron") usually continues
+    # with "James" on the next caption; the plain window ends before it
+    # (2 of 23 live mentions were cut short that way with ASR missing).
+    CAPTION_LINE_END_EXTRA_S = 0.6
     # OCR misreads one caption line differently frame to frame ("they oking
     # for LeBron" / "they loking for LeBron"); text before the name this
     # similar to a recent one is the same mention.
@@ -306,6 +315,9 @@ class NameMuteController:
         for s, e in spans:
             if e - s < self.ASR_MIN_WORD_S:
                 continue
+            if s <= 0.05:
+                # Word was already under way when this window began.
+                s -= self.TRUNCATED_WORD_EXTRA_S
             if e >= self.window_s - 0.05:
                 # Word runs past the end of this window; its true end is
                 # unknown. Later windows that see it whole are de-duplicated
@@ -368,10 +380,14 @@ class NameMuteController:
                         continue
                     self.caption_hits += 1
                     self.last_caption_text = line
+                    pad_after = self.CAPTION_AFTER_S
+                    if (hit.end() >= len(norm.rstrip())
+                            and 'james' not in hit.group(0)):
+                        pad_after += self.CAPTION_LINE_END_EXTRA_S
                     self.scheduler.schedule(capture_time, capture_time,
                                             'caption', line.strip()[:80], meta,
                                             pad_before=self.CAPTION_BEFORE_S,
-                                            pad_after=self.CAPTION_AFTER_S)
+                                            pad_after=pad_after)
 
     def _seen_caption(self, key: str, ctx: str, now: float) -> bool:
         """Has this caption mention been seen recently? Records it either way.

@@ -59,7 +59,7 @@ from collections import deque
 from typing import Optional
 
 from asr_keywords import count_marker_hits, explain_hits
-from asr_worker import ASRProcess
+from asr_worker import ASRProcess, resolve_engine
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,9 @@ class ASRManager:
     # transcript in ~0.03s for windows with no speech; without a floor the
     # loop spins ~30x/s through silence, burning CPU and racing through the
     # worker's periodic leak-restart budget (each restart is ~2s deaf).
-    MIN_CYCLE_S = float(os.environ.get('MINUS_ASR_MIN_CYCLE', '0.6'))
+    # SenseVoice (NPU) costs a fixed ~0.38s per window, so 0.5s is near
+    # back-to-back while still leaving the NPU core idle part of the time.
+    MIN_CYCLE_S = float(os.environ.get('MINUS_ASR_MIN_CYCLE', '0.5'))
 
     # Audio window length per inference. Moonshine latency scales with how
     # much SPEECH is in the window — on dense continuous speech a 5s window
@@ -128,7 +130,8 @@ class ASRManager:
     # transcripts are low-cost: a CTA split across two windows still lands in
     # the 8s rolling history, and a missed confirm only changes the source
     # LABEL, never whether a block fires. Env-overridable (MINUS_ASR_WINDOW).
-    WINDOW_SECONDS = float(os.environ.get('MINUS_ASR_WINDOW', '2.5'))
+    # SenseVoice: 3s windows (name recall 85% vs 77% at 2s, same cost).
+    WINDOW_SECONDS = float(os.environ.get('MINUS_ASR_WINDOW', '3.0'))
 
     def __init__(self, audio_tap, *, model_name: str = None, cpu_threads: int = 3):
         """audio_tap must be an AudioASRTap (see src/audio.py).
@@ -142,7 +145,10 @@ class ASRManager:
         self._model_name = model_name or ASR_MODEL
         # What the worker actually loads (for logs/status): the Moonshine
         # arch, or the faster-whisper model name.
-        if os.environ.get('MINUS_ASR_ENGINE', 'moonshine').lower() == 'moonshine':
+        self.engine = resolve_engine()
+        if self.engine == 'sensevoice':
+            self.model_label = 'sensevoice-small-npu'
+        elif self.engine == 'moonshine':
             self.model_label = 'moonshine-' + os.environ.get(
                 'MINUS_ASR_MOONSHINE_ARCH', 'MEDIUM_STREAMING').lower()
         else:
@@ -356,7 +362,7 @@ class ASRManager:
             'available': is_asr_available(),
             'enabled': self.enabled,
             'running': self.is_running,
-            'engine': os.environ.get('MINUS_ASR_ENGINE', 'moonshine'),
+            'engine': self.engine,
             'model': self.model_label,
             'inference_count': self.inference_count,
             'timeout_count': self.timeout_count,

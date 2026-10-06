@@ -128,6 +128,31 @@ class TestController(unittest.TestCase):
                                (2.5 + ctl.TRUNCATED_WORD_EXTRA_S - 2.1)
                                + sch.PAD_BEFORE_S + sch.PAD_AFTER_S, delta=0.01)
 
+    def test_garbled_first_name_before_james(self):
+        m = NameMatcher()
+        w = lambda t: [(x, i * 0.3, i * 0.3 + 0.3) for i, x in enumerate(t.split())]
+        for t in ("amron james has", "thebron james with", "lebra james"):
+            self.assertEqual(len(m.find_word_spans(w(t))), 1, t)
+        for t in ("aaron james", "cameron james", "the bronx", "ron james"):
+            self.assertEqual(m.find_word_spans(w(t)), [], t)
+
+    def test_word_cut_at_window_start_extended_back(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        ctl.on_asr_words("thebron james with", [("thebron", 0.0, 0.4), ("james", 0.4, 0.8),
+                                                ("with", 0.8, 1.0)], t0)
+        start, _ = sch._windows[0][:2]
+        self.assertAlmostEqual(start, t0 + 4.0 - ctl.TRUNCATED_WORD_EXTRA_S - sch.PAD_BEFORE_S,
+                               delta=0.01)
+
+    def test_caption_line_ending_on_first_name_runs_longer(self):
+        ctl, sch = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["left-handed in and LeBron"], t)
+        ctl.on_caption_texts(["here's LeBron James and"], t + 5)
+        (s1, e1), (s2, e2) = [w[:2] for w in sch._windows[:2]]
+        self.assertAlmostEqual((e1 - s1) - (e2 - s2), ctl.CAPTION_LINE_END_EXTRA_S, delta=0.01)
+
     def test_asr_two_mentions(self):
         ctl, _ = self._ctl()
         t0 = time.monotonic()

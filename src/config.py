@@ -112,11 +112,11 @@ USTREAMER_PATH = _get_env_path('MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-pa
 # Audio/video delay line (seconds). Both the audio sync queue and the video
 # display pipeline hold this much extra, so detectors that tap the signal
 # before playback (ASR on the audio tap, OCR on ustreamer snapshots) see each
-# word this far before the TV plays it. The name muter needs a head start of
-# one 2.5s window + ASR inference + padding. Inference is ~1.1s p50 but 1.7s
-# p95 live alongside 4K capture (vs 0.9s in isolation): at 4s, 2 of 12 live
-# ASR mutes started late; 5s leaves margin. 0 disables.
-AV_DELAY_S = max(0.0, _get_env_float('MINUS_AV_DELAY_S', 5.0))
+# word this far before the TV plays it. With SenseVoice on the NPU a word is
+# heard at most ~1.4s after it starts (0.5s cycle + word length + 0.38s
+# inference), plus the 0.4s pad before it, so 2s covers it. Moonshine on the
+# CPU needed 5s. 0 disables.
+AV_DELAY_S = max(0.0, _get_env_float('MINUS_AV_DELAY_S', 2.0))
 
 # Stream format: 30fps and at most 2K (2560x1440) is plenty for the name
 # muter (OCR reads captions at ~2fps) and halves encode/decode load vs 60fps.

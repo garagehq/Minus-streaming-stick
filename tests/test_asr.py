@@ -236,11 +236,11 @@ class TestASRManager(unittest.TestCase):
                     'last_transcript', 'last_marker_hits',
                     'p50_latency_s', 'p95_latency_s'):
             self.assertIn(key, s)
-        # engine label tells the UI which backend is in use. Moonshine is
+        # engine label tells the UI which backend is in use. SenseVoice (NPU) is
         # the default now; faster-whisper is selectable via MINUS_ASR_ENGINE.
-        expected_engine = os.environ.get('MINUS_ASR_ENGINE', 'moonshine').lower()
-        self.assertEqual(s['engine'], expected_engine)
-        self.assertIn(s['engine'], ('moonshine', 'faster-whisper'))
+        from asr_worker import resolve_engine
+        self.assertEqual(s['engine'], resolve_engine())
+        self.assertIn(s['engine'], ('sensevoice', 'moonshine', 'faster-whisper'))
 
     def test_record_result_timeouts_increment_counter(self):
         m = self._make()

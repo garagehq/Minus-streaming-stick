@@ -49,8 +49,21 @@ logger = logging.getLogger(__name__)
 # Worker process main loop
 # ---------------------------------------------------------------------------
 
+def resolve_engine() -> str:
+    """MINUS_ASR_ENGINE, default 'sensevoice' (RK3588 NPU). Falls back to
+    'moonshine' when the SenseVoice model or its runtime is missing."""
+    engine = os.environ.get('MINUS_ASR_ENGINE', 'sensevoice').lower()
+    if engine == 'sensevoice':
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from sensevoice_npu import is_available
+        if not is_available():
+            log.warning("[ASRWorker] SenseVoice model/runtime missing; using moonshine")
+            engine = 'moonshine'
+    return engine
+
+
 def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
-                     model_name, cpu_threads):
+                     model_name, cpu_threads, npu_core=None):
     """Worker process entrypoint.
 
     Args:
@@ -83,7 +96,7 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
     # streaming/smaller-chunks does NOT reduce — benchmarked). Moonshine is
     # the only engine that meets <2.5s here. Set MINUS_ASR_ENGINE=faster-whisper
     # on a cool/idle host to trade latency for the extra 2/10 corpus accuracy.
-    engine = os.environ.get('MINUS_ASR_ENGINE', 'moonshine').lower()
+    engine = resolve_engine()
 
     # Honour "N CPUs max" by pinning the whole worker (and thus the engine's
     # threads) to a fixed core set. onnxruntime/CTranslate2 otherwise grab
@@ -111,7 +124,26 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
         load_start = time.time()
         import numpy as np
 
-        if engine == 'moonshine':
+        if engine == 'sensevoice':
+            # SenseVoice-small on the RK3588 NPU (src/sensevoice_npu.py):
+            # ~0.38s per 3s window on one NPU core, near-zero CPU, per-word
+            # timings from CTC frames.
+            import wave as _wave
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from sensevoice_npu import SenseVoiceNPU
+            log.info(f"[ASRWorker] Loading SenseVoice on NPU core {npu_core}...")
+            _svn = SenseVoiceNPU(npu_core=npu_core if npu_core is not None
+                                 else int(os.environ.get('MINUS_ASR_NPU_CORE', '1')))
+
+            def _infer(wav_path):
+                w = _wave.open(wav_path, 'rb')
+                d = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+                w.close()
+                words = _svn.words(d.astype(np.float32) / 32768.0)
+                return ' '.join(x[0] for x in words), words
+
+            warmup = lambda: _svn.words(np.zeros(16000, dtype=np.float32))
+        elif engine == 'moonshine':
             import re as _re
             import wave as _wave
             import moonshine_voice as _mv
@@ -276,9 +308,10 @@ class ASRProcess:
     RESTART_AFTER_INFERENCES = int(
         os.environ.get('MINUS_ASR_RESTART_AFTER_INFERENCES', '500'))
 
-    def __init__(self, model_name='tiny.en', cpu_threads=3):
+    def __init__(self, model_name='tiny.en', cpu_threads=3, npu_core=None):
         self.model_name = model_name
         self.cpu_threads = cpu_threads
+        self.npu_core = npu_core
 
         # Worker process state
         self.process = None
@@ -324,7 +357,7 @@ class ASRProcess:
                 target=_asr_worker_main,
                 args=(self.request_queue, self.response_queue,
                       self.ready_event, self.shutdown_event,
-                      self.model_name, self.cpu_threads),
+                      self.model_name, self.cpu_threads, self.npu_core),
                 daemon=True,
                 name=f'ASRWorker-{self.model_name}'
             )
@@ -475,6 +508,7 @@ class ASRProcess:
                 self._recent_latencies.append(latency)
                 self._inferences_since_restart += 1
                 if (self.RESTART_AFTER_INFERENCES > 0 and
+                        resolve_engine() == 'moonshine' and
                         self._inferences_since_restart
                         >= self.RESTART_AFTER_INFERENCES):
                     # Periodic restart to bound the upstream moonshine_voice

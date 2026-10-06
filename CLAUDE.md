@@ -14,28 +14,44 @@ On this branch Minus does not block ads. It briefly cuts the TV audio
 whenever "LeBron James", "LeBron" or "King" is spoken or captioned
 (`src/name_mute.py`).
 
-- **Detectors.** ASR (Moonshine `MEDIUM_STREAMING`, word timestamps) on
-  the audio tap, and OCR on every frame's caption text. Both feed
+- **Detectors.** ASR (SenseVoice-small on **RK3588 NPU core 1**,
+  `src/sensevoice_npu.py`, word times from CTC frames) on the audio tap,
+  and OCR on every frame's caption text. Both feed
   `NameMuteController`, which de-duplicates repeats (overlapping ASR
   windows, caption lines that stay on screen and grow word by word).
   Matches "LeBron", "LeBron's", "Le Bron", "the Bron James", "Lebrun",
   "King", "King James"; not "the Bronx", not "Kings" (Sacramento), and
   not a bare "James" unless `name_mute_surname` is on.
-- **A/V delay line (`MINUS_AV_DELAY_S`, default 5s).** The audio sync
+- **A/V delay line (`MINUS_AV_DELAY_S`, default 2s; was 5s with Moonshine).** The audio sync
   queue and a video `queue name=avdelay` (after the frame gate, needs
-  `souphttpsrc do-timestamp=true`) both hold 5s, so the detectors see each
-  word ~5s before the TV plays it and the mute lands on the word. The
+  `souphttpsrc do-timestamp=true`) both hold the delay, so the detectors see each
+  word ~2s before the TV plays it and the mute lands on the word. The
   audio sink is `async=false` (a live sink otherwise waits for its first
   buffer, i.e. the whole delay, to reach PLAYING), and the stall watchdog
   threshold is 6s + delay.
 - **Scheduler.** Detections are converted to capture times (the audio tap
   stamps its newest sample with `time.monotonic()`), then muted over
-  `[start + delay - 0.6s, end + delay + 0.35s]` via
+  `[start + delay - 0.4s, end + delay + 0.35s]` via
   `AudioPassthrough.set_name_mute()`, independent of the ad mute.
-- **ASR cadence.** 2.5s windows back to back (min 0.6s between starts:
-  Moonshine returns empty in 0.03s on non-speech, which otherwise spun
-  the loop and burned through the 500-inference leak-restart budget).
-- **Measured live** on a Google TV (no TV attached) with
+- **ASR engine and cadence.** `MINUS_ASR_ENGINE=sensevoice` (default;
+  falls back to `moonshine` if the model in `MINUS_SENSEVOICE_DIR`,
+  `~/asr_models/sensevoice-rknn` from HF `happyme531/SenseVoiceSmall-RKNN2`,
+  or `rknnlite`/`kaldi_native_fbank` is missing; other units need
+  `pip3 install --user --break-system-packages kaldi_native_fbank
+  sentencepiece soundfile pyyaml` plus that model dir). 3s windows, a new one
+  every 0.5s. The NPU encoder costs a fixed ~0.35s per window, CPU ~25% of
+  one core (Moonshine medium used three cores at 1.1s p50 / 1.7s p95).
+  Offline name recall on NBA commentary: SenseVoice 88% (3s windows),
+  Moonshine medium 88% (2.5s); SenseVoice word starts are 0.1-0.3s after
+  the caption word vs 0.2-0.4s. Rejected: whisper.cpp on the Mali GPU
+  (slower than CPU, see docs/GPU_SETUP.md), Moonshine streaming (falls
+  behind real time), sherpa-onnx keyword spotting (27% recall).
+- **Measured live at 2s delay (SenseVoice)**, two held-out videos, 17-18
+  min each: 19/23 mentions fully muted (83%, before the caption line-end
+  and window-start fixes) and 15/16 (94%, after; the miss is at the
+  video start where the caption track is offset). Mutes start a median
+  0.5-0.6s before the word; total mute 2.5-2.8x the spoken name.
+- **Measured live at 5s delay (Moonshine)** on a Google TV (no TV attached) with
   `tests/name_mute_live_measure.py` (mute log via `GET /api/name-mute/log`,
   video position via ADB) and `tests/name_mute_live_analyze.py` (scored
   against the YouTube caption track). Three videos not used for tuning:
@@ -51,7 +67,11 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   match of the text before the name (OCR misreads); a later ASR hit
   replaces a not-yet-playing caption window for the same mention;
   on-screen graphics (all caps, or 4+ capitals in the name) and
-  zero-length ASR words are ignored.
+  zero-length ASR words are ignored. A caption line that ends on the
+  first name gets +0.6s (the "James" is on the next line); an ASR word at
+  the very start of a window is extended 0.4s back. Garbled first names
+  directly before "James" ("amron james", "thebron james") count, except
+  real names (Aaron, Cameron, Byron, Myron, Ron).
 - **Settings.** `ad_blocking` (default False), `name_mute` (True),
   `name_mute_surname` (False). API: `GET /api/name-mute`,
   `POST /api/name-mute/settings`, `POST /api/name-mute/test {"text"}`.
@@ -74,6 +94,7 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
 | [docs/DEBUG_GLITCHES.md](docs/DEBUG_GLITCHES.md) | Video glitch debugging notes |
 | [docs/FPS_DEBUGGING.md](docs/FPS_DEBUGGING.md) | FPS tracking and optimization |
 | [docs/AUDIO.md](docs/AUDIO.md) | Audio passthrough documentation |
+| [docs/GPU_SETUP.md](docs/GPU_SETUP.md) | Mali-G610 OpenCL/Vulkan bring-up on RK3588, traps to avoid on other units, GPU vs CPU vs NPU ASR results |
 | [docs/ASR.md](docs/ASR.md) | Moonshine (ONNX) ASR — audio-based ad CONFIRM signal on top of OCR+VLM (worker process, 2s window, veto removed 2026-05) |
 | [docs/VLM_NPU_DEGRADATION.md](docs/VLM_NPU_DEGRADATION.md) | Investigation of "NPU degradation" — root cause is per-image output-length variance; fix is `max_new_tokens` cap |
 | [docs/IR_TRANSMITTER.md](docs/IR_TRANSMITTER.md) | IR transmitter for the REI 8K HDMI switch (PWM3 on pin 38) — wiring, NEC codes, API, troubleshooting |
