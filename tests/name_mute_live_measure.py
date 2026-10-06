@@ -52,21 +52,24 @@ def sync_sample(dev):
             'updated': int(m.group(3)) / 1000.0}
 
 
-def sync(dev, n=25):
+def sync(dev, n=5):
     samples = [s for s in (sync_sample(dev) for _ in range(n)) if s]
     samples.sort(key=lambda s: s['rtt'])
-    return samples[:5]   # the fastest round trips bound the clock offset best
+    return samples[:2]   # the fastest round trips bound the clock offset best
 
 
 def main():
     ip, secs, out_path = sys.argv[1], float(sys.argv[2]), sys.argv[3]
     dev = connect(ip)
     start = time.monotonic()
-    syncs = [sync(dev)]
+    # Sync often: YouTube mid-roll ads stop the video clock, and the analyzer
+    # only scores stretches where consecutive syncs agree.
+    every = float(os.environ.get('SYNC_EVERY_S', '5'))
+    syncs = [sync(dev, n=25)]
     print(f"initial sync: rtt {syncs[0][0]['rtt']*1000:.0f}ms, "
           f"video at {syncs[0][0]['position']:.1f}s", flush=True)
     while time.monotonic() - start < secs:
-        time.sleep(60)
+        time.sleep(every)
         try:
             syncs.append(sync(dev))
         except Exception as e:
@@ -75,8 +78,9 @@ def main():
                 dev = connect(ip)
             except Exception:
                 pass
-        print(f"{time.monotonic() - start:6.0f}s synced (rtt "
-              f"{syncs[-1][0]['rtt']*1000:.0f}ms)", flush=True)
+        if len(syncs) % max(1, int(60 / every)) == 0 and syncs[-1]:
+            print(f"{time.monotonic() - start:6.0f}s synced (rtt "
+                  f"{syncs[-1][0]['rtt']*1000:.0f}ms)", flush=True)
     log = json.load(urllib.request.urlopen(
         f'http://localhost/api/name-mute/log?since={start}', timeout=10))
     json.dump({'start': start, 'end': time.monotonic(), 'syncs': syncs,

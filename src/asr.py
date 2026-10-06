@@ -149,7 +149,9 @@ class ASRManager:
         if self.engine == 'sensevoice':
             self.model_label = 'sensevoice-small-npu'
         elif self.engine == 'parakeet':
-            self.model_label = 'parakeet-tdt-0.6b-v2'
+            pdir = os.environ.get('MINUS_PARAKEET_DIR', '')
+            self.model_label = ('parakeet-ctc-110m' if '110m' in pdir
+                                else 'parakeet-tdt-0.6b-v2')
         elif self.engine == 'moonshine':
             self.model_label = 'moonshine-' + os.environ.get(
                 'MINUS_ASR_MOONSHINE_ARCH', 'MEDIUM_STREAMING').lower()

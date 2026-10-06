@@ -51,16 +51,35 @@ def main():
         off = s['device_uptime'] - s['board_mid']
         return s['position'] + (m + off - s['updated']) * s['speed'] - lat
 
+    # Trusted stretches: between two consecutive syncs that agree on the
+    # video clock. YouTube mid-roll ads (and seeks/stalls) stop the video
+    # clock, so any stretch containing one is dropped rather than mis-scored.
+    def implied(s, m):
+        return s['position'] + (m + s['device_uptime'] - s['board_mid'] - s['updated']) * s['speed']
+    trusted = []      # board-time intervals
+    for a, b in zip(syncs, syncs[1:]):
+        if abs(implied(b, b['board_mid']) - implied(a, b['board_mid'])) < 0.3:
+            if trusted and abs(trusted[-1][1] - a['board_mid']) < 1e-6:
+                trusted[-1][1] = b['board_mid']
+            else:
+                trusted.append([a['board_mid'], b['board_mid']])
+    in_trusted = lambda m: any(x <= m <= y for x, y in trusted)
+    vranges = [(vpos(x) + 2.0, vpos(y) - 2.0) for x, y in trusted if y - x > 5]
+    in_vrange = lambda a, b: any(x <= a and b <= y for x, y in vranges)
+
     dets = data['detections']
     mutes = []   # (start, end, source, label, meta) in video time
     for d in dets:
         if d['play_start'] is None:
             continue
-        mutes.append((vpos(d['play_start'] - d['delay']), vpos(d['play_end'] - d['delay']),
-                      d['source'], d['label'], d.get('meta', {})))
+        ps, pe = d['play_start'] - d['delay'], d['play_end'] - d['delay']
+        if not (in_trusted(ps) and in_trusted(pe)):
+            continue
+        mutes.append((vpos(ps), vpos(pe), d['source'], d['label'], d.get('meta', {})))
     mutes.sort()
     lo, hi = vpos(data['start'] + 8), vpos(data['end'] - 8)
-    mentions = load_mentions(sys.argv[2], lo, hi)
+    scored_s = sum(max(0.0, y - x) for x, y in vranges)
+    mentions = [m for m in load_mentions(sys.argv[2], -1e9, 1e9) if in_vrange(m[0], m[1])]
 
     def covered_by(a, b, srcs=None):
         # Against the union of windows: two overlapping mutes cover a mention
@@ -123,7 +142,8 @@ def main():
     q = lambda xs: (f"p10 {statistics.quantiles(xs, n=10)[0]:+.2f} / median "
                     f"{statistics.median(xs):+.2f} / p90 {statistics.quantiles(xs, n=10)[-1]:+.2f}s"
                     if len(xs) >= 3 else str([round(x, 2) for x in xs]))
-    print(f"video {lo:.0f}-{hi:.0f}s ({(hi - lo) / 60:.1f} min), hdmi latency {lat:+.2f}s")
+    print(f"scored {scored_s / 60:.1f} min of video in {len(vranges)} stretches where the "
+          f"video clock was steady (ads/stalls dropped), hdmi latency {lat:+.2f}s")
     print(f"mentions: {n}  fully muted {full} ({100 * full / max(1, n):.0f}%)  "
           f"partial {part}  missed {n - full - part}")
     print(f"  fully muted by asr alone {by_src['asr']}, by captions alone {by_src['caption']}")
@@ -153,6 +173,20 @@ def main():
             and not (i and NAME_RE.search(words[i - 1][1]))]
     bare_muted = sum(1 for t in bare if covered_by(t, t + 0.4))
     print(f"bare 'James' (not targeted by default): {len(bare)}, inside a mute anyway: {bare_muted}")
+    # Detection lag: how long after the name started (in capture time) each
+    # detector reported it. A mute is on time only if lag + its pad before
+    # the name fits inside the A/V delay.
+    pads = {'asr': float(data.get('pad_asr', 0.4)), 'caption': 0.7}
+    for src in ('asr', 'caption'):
+        lags = [d['detected'] - d['capture_start'] for d in dets
+                if d['source'] == src and not d.get('duplicate')]
+        if len(lags) >= 3:
+            q = statistics.quantiles(lags, n=10)
+            delay = dets[0]['delay']
+            late = sum(1 for x in lags if x + pads[src] > delay)
+            print(f"{src} detection after name start: p50 {statistics.median(lags):.2f} / "
+                  f"p90 {q[-1]:.2f} / max {max(lags):.2f}s; late at {delay:.2f}s delay: "
+                  f"{late}/{len(lags)}")
     print("missed/partial:", missed[:15])
     print("extra:", extra[:15])
 

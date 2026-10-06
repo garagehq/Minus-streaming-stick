@@ -151,13 +151,21 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
             _pdir = os.environ.get(
                 'MINUS_PARAKEET_DIR',
                 '/home/radxa/asr_models/parakeet/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8')
-            log.info(f"[ASRWorker] Loading Parakeet from {_pdir}...")
-            _pk = _so.OfflineRecognizer.from_transducer(
-                encoder=os.path.join(_pdir, 'encoder.int8.onnx'),
-                decoder=os.path.join(_pdir, 'decoder.int8.onnx'),
-                joiner=os.path.join(_pdir, 'joiner.int8.onnx'),
-                tokens=os.path.join(_pdir, 'tokens.txt'),
-                num_threads=cpu_threads, model_type='nemo_transducer')
+            # Threads: MINUS_ASR_THREADS (fewer = less heat; 110M CTC is fine on 1-2).
+            _pthreads = int(os.environ.get('MINUS_ASR_THREADS', cpu_threads))
+            log.info(f"[ASRWorker] Loading Parakeet from {_pdir} ({_pthreads} threads)...")
+            if os.path.isfile(os.path.join(_pdir, 'model.int8.onnx')):
+                # Parakeet TDT-CTC 110M exported as a single CTC model.
+                _pk = _so.OfflineRecognizer.from_nemo_ctc(
+                    model=os.path.join(_pdir, 'model.int8.onnx'),
+                    tokens=os.path.join(_pdir, 'tokens.txt'), num_threads=_pthreads)
+            else:
+                _pk = _so.OfflineRecognizer.from_transducer(
+                    encoder=os.path.join(_pdir, 'encoder.int8.onnx'),
+                    decoder=os.path.join(_pdir, 'decoder.int8.onnx'),
+                    joiner=os.path.join(_pdir, 'joiner.int8.onnx'),
+                    tokens=os.path.join(_pdir, 'tokens.txt'),
+                    num_threads=_pthreads, model_type='nemo_transducer')
 
             def _pk_run(audio):
                 st = _pk.create_stream()
