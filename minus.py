@@ -206,6 +206,7 @@ os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 from drm import probe_drm_output
 from v4l2 import probe_v4l2_device
 from name_mute import NameMatcher, NameMuteScheduler, NameMuteController
+from asr_clips import ASRClipCollector
 from ustreamer_proc import kill_ustreamer
 from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR, STREAM_FPS, ENCODE_SCALE
 from capture import UstreamerCapture
@@ -1092,7 +1093,8 @@ class Minus:
                 self.name_mute = NameMuteController(
                     scheduler,
                     NameMatcher(include_surname=bool(
-                        self._system_settings.get('name_mute_surname', False))))
+                        self._system_settings.get('name_mute_surname', False))),
+                    partial_names=getattr(self.asr, 'engine', '') == 'sensevoice')
                 self.name_mute.enabled = bool(self._system_settings.get('name_mute', True))
                 scheduler.start()
                 if self.asr is not None:
@@ -1104,6 +1106,29 @@ class Minus:
             except Exception as e:
                 logger.warning(f"Name mute init failed: {e}")
                 self.name_mute = None
+
+        # Training clips for fine-tuning the ASR (src/asr_clips.py): audio
+        # around every name detection plus random ordinary speech.
+        self.asr_clips = None
+        if self.name_mute is not None and self.asr is not None and self.asr_tap is not None:
+            try:
+                self.asr_clips = ASRClipCollector(
+                    self.asr_tap,
+                    Path(__file__).parent / 'screenshots' / 'asr_clips',
+                    engine=getattr(self.asr, 'model_label', ''),
+                    delay_fn=self.audio.playback_delay_s)
+                if self.asr_clips.enabled:
+                    self.name_mute.scheduler.on_detection = self.asr_clips.on_detection
+                    clips, mute_words = self.asr_clips, self.name_mute.on_asr_words
+
+                    def _on_words(transcript, words, window_start):
+                        clips.note_asr(transcript, words, window_start)
+                        mute_words(transcript, words, window_start)
+                    self.asr.on_words = _on_words
+                    self.asr_clips.start()
+            except Exception as e:
+                logger.warning(f"ASR clip collector init failed: {e}")
+                self.asr_clips = None
 
         # Initialize Health Monitor
         if HAS_HEALTH:
@@ -4345,6 +4370,9 @@ class Minus:
                         self.autonomous_mode.observe_ocr_text(all_texts)
                     except Exception as e:
                         logger.debug(f"observe_ocr_text failed: {e}")
+
+                if self.asr_clips is not None:
+                    self.asr_clips.note_ocr(all_texts, capture_mono)
 
                 # Name muter reads captions from every OCR'd frame.
                 if self.name_mute is not None:

@@ -2685,6 +2685,8 @@ class WebUI:
             st = nm.get_status()
             st['available'] = True
             st['ad_blocking'] = self.minus.ad_blocking_enabled
+            clips = getattr(self.minus, 'asr_clips', None)
+            st['training_clips'] = clips.get_status() if clips is not None else None
             return jsonify(st)
 
         @self.app.route('/api/name-mute/log', methods=['GET'])

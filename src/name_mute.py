@@ -65,6 +65,11 @@ _WORD_BRON_RE = re.compile(
     r"\w{0,4}(?:bron|brun|bra|ron)x?$")
 _WORD_JAMES_RE = re.compile(r"^james(?:'?s)?$")
 _WORD_KING_RE = re.compile(r"^king(?:'s)?$")
+# The start of "LeBron" cut off by the end of an ASR window: "le", "leb",
+# "lebr", "lebra…", "leron". Measured on 40 min of SenseVoice windows: 15
+# such fragments were the name and 3 were another word ("le…" of "left",
+# "let's"), which the next window corrects (see NameMuteController).
+_WORD_PARTIAL_RE = re.compile(r"^(?:le|leb|lebr|lebr[aou]\w*|lebo\w*|ler|lero|leron|lbr\w*)$")
 
 
 class NameMatcher:
@@ -155,6 +160,9 @@ class NameMuteScheduler:
         # Times are time.monotonic(): capture_* is when the audio/frame entered
         # the pipeline, play_* the scheduled mute (None if skipped).
         self.detection_log = collections.deque(maxlen=5000)
+        # Optional callback(entry) for every detection (training-clip
+        # collector, src/asr_clips.py). Runs on the detector's thread.
+        self.on_detection = None
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -198,6 +206,11 @@ class NameMuteScheduler:
                  'delay': delay, 'play_start': None, 'play_end': None,
                  'duplicate': covered, 'meta': meta or {}}
         self.detection_log.append(entry)
+        if self.on_detection is not None:
+            try:
+                self.on_detection(entry)
+            except Exception as e:
+                logger.debug(f"[NameMute] on_detection hook failed: {e}")
         if covered:
             # Already muting this stretch (e.g. ASR confirming a caption hit,
             # or two OCR misreads of the same caption line).
@@ -218,6 +231,28 @@ class NameMuteScheduler:
         logger.info(f"[NameMute] {source}: '{label}' -> mute in {start - now:+.2f}s "
                     f"for {end - start:.2f}s (delay {delay:.2f}s, "
                     f"{'on time' if on_time else 'LATE'})")
+
+    def cancel(self, source: str, capture_start: float, capture_end: float) -> int:
+        """End mutes from `source` whose audio lies inside the capture-time
+        stretch [capture_start, capture_end]: drop them if not yet playing,
+        cut them short if they are. Returns how many were changed."""
+        delay = max(0.0, float(self._delay_fn() or 0.0))
+        p0, p1 = capture_start + delay, capture_end + delay
+        now = time.monotonic()
+        changed = 0
+        with self._lock:
+            kept = []
+            for w in self._windows:
+                if w[2] == source and w[0] >= p0 - self.PAD_BEFORE_S - 0.05 and w[0] <= p1:
+                    changed += 1
+                    if w[0] > now:
+                        continue                 # not started: drop
+                    w = (w[0], min(w[1], now), w[2], w[3])
+                kept.append(w)
+            self._windows = kept
+        if changed:
+            logger.info(f"[NameMute] {source}: provisional mute cancelled ({changed})")
+        return changed
 
     def _run(self):
         while not self._stop.is_set():
@@ -287,11 +322,30 @@ class NameMuteController:
     # similar to a recent one is the same mention.
     CAPTION_FUZZY_RATIO = 0.6
 
-    def __init__(self, scheduler: NameMuteScheduler, matcher: NameMatcher = None):
+    # Partial names: a "le…"/"lebr…" fragment that is the last word of an
+    # ASR window and starts within PARTIAL_EDGE_S of its end mutes
+    # provisionally for PARTIAL_MUTE_S from the fragment start, one window
+    # before the full name is heard. A later window that hears that stretch
+    # whole without a name ends the mute early. Simulated on 40 min of two
+    # held-out videos (tests/partial_name_sim.py): SenseVoice fully muted
+    # 30/44 names at 1.2s delay instead of 19/44, and 20/44 instead of 7/44
+    # at 1.0s. Parakeet-110M gains nothing (its 0.25s windows already see
+    # the whole word a quarter-second later) and only gets false "le" hits,
+    # so it is on by default for SenseVoice only.
+    PARTIAL_EDGE_S = 0.5
+    PARTIAL_MUTE_S = 0.8
+
+    def __init__(self, scheduler: NameMuteScheduler, matcher: NameMatcher = None,
+                 partial_names: bool = False):
         self.scheduler = scheduler
         self.matcher = matcher or NameMatcher()
         self.enabled = True
         self.use_asr = True
+        env = os.environ.get('MINUS_NAME_MUTE_PARTIAL')
+        self.partial_names = partial_names if env is None else env != '0'
+        self._recent_partial = []    # capture starts of provisional mutes
+        self.partial_hits = 0
+        self.partial_cancels = 0
         # MINUS_NAME_MUTE_CAPTIONS=0 mutes from ASR only (OCR still runs).
         self.use_captions = os.environ.get('MINUS_NAME_MUTE_CAPTIONS', '1') != '0'
         self._recent_asr = []        # capture-time centers of recent ASR hits
@@ -308,6 +362,8 @@ class NameMuteController:
         if not spans and self.matcher.find(transcript):
             # No usable word timings: mute the whole window.
             spans = [(0.0, max((e for _, _, e in words), default=2.5))]
+        if self.partial_names and words:
+            self._check_partial(words, window_start, bool(spans))
         if not spans:
             return
         self.last_asr_text = transcript
@@ -333,6 +389,35 @@ class NameMuteController:
             self.scheduler.schedule(c0, c1, 'asr', transcript.strip()[:80],
                                     {'word_start': round(s, 3), 'word_end': round(e, 3)},
                                     replace_sources=('caption',))
+
+    def _check_partial(self, words, window_start: float, has_name: bool):
+        now = time.monotonic()
+        self._recent_partial = [c for c in self._recent_partial if now - c < 15.0]
+        if not has_name and len(words) >= 2:
+            # Words heard whole (clear of both window edges) with no name:
+            # a provisional mute over that stretch was another word.
+            inner = [(s, e) for _, s, e in words if s > 0.1 and e < self.window_s - 0.2]
+            if inner:
+                c0 = window_start + min(s for s, _ in inner)
+                c1 = window_start + max(e for _, e in inner)
+                if any(c0 <= c + 0.05 and c + 0.3 <= c1 for c in self._recent_partial):
+                    n = self.scheduler.cancel('asr_partial', c0, c1)
+                    if n:
+                        self.partial_cancels += n
+                        self._recent_partial = [c for c in self._recent_partial
+                                                if not (c0 <= c + 0.05 and c + 0.3 <= c1)]
+        if has_name:
+            return
+        w, s, _ = words[-1]
+        if s < self.window_s - self.PARTIAL_EDGE_S or not _WORD_PARTIAL_RE.match(_norm(w)):
+            return
+        c0 = window_start + s
+        if any(abs(c0 - c) < self.ASR_DEDUP_S for c in self._recent_partial):
+            return
+        self._recent_partial.append(c0)
+        self.partial_hits += 1
+        self.scheduler.schedule(c0, c0 + self.PARTIAL_MUTE_S, 'asr_partial', w,
+                                {'word_start': round(s, 3)})
 
     def on_caption_results(self, results, capture_time: float, frame_shape=None):
         """OCR results (dicts with 'text' and 'box') for one frame."""
@@ -412,6 +497,9 @@ class NameMuteController:
             'use_captions': self.use_captions,
             'include_surname': self.matcher.include_surname,
             'asr_hits': self.asr_hits,
+            'partial_names': self.partial_names,
+            'partial_hits': self.partial_hits,
+            'partial_cancels': self.partial_cancels,
             'caption_hits': self.caption_hits,
             'last_asr_text': self.last_asr_text[:200],
             'last_caption_text': self.last_caption_text[:200],

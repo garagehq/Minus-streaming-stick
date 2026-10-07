@@ -228,5 +228,97 @@ class TestController(unittest.TestCase):
         self.assertEqual(ctl.caption_hits + ctl.asr_hits, 0)
 
 
+class TestPartialNames(unittest.TestCase):
+    """A cut-off "le…"/"lebr…" at the end of a window mutes provisionally."""
+
+    def _ctl(self, delay=2.0, partial=True):
+        sch = NameMuteScheduler(FakeAudio(), lambda: delay)
+        ctl = NameMuteController(sch, partial_names=partial)
+        ctl.window_s = 3.0
+        return ctl, sch
+
+    def test_fragment_at_window_end_mutes(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        ctl.on_asr_words("what you know about leb",
+                         [("what", 1.0, 1.2), ("you", 1.2, 1.4), ("know", 1.4, 1.7),
+                          ("about", 1.7, 2.6), ("leb", 2.7, 3.0)], t0)
+        self.assertEqual(ctl.partial_hits, 1)
+        self.assertEqual(sch._windows[0][2], 'asr_partial')
+        start, end = sch._windows[0][:2]
+        self.assertAlmostEqual(start, t0 + 2.7 + 2.0 - sch.PAD_BEFORE_S, delta=0.01)
+        self.assertAlmostEqual(end - start, ctl.PARTIAL_MUTE_S + sch.PAD_BEFORE_S + sch.PAD_AFTER_S,
+                               delta=0.01)
+
+    def test_fragment_not_at_edge_ignored(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        ctl.on_asr_words("le", [("le", 1.0, 1.2)], t0)
+        ctl.on_asr_words("le monde said", [("le", 0.5, 0.7), ("monde", 0.7, 1.0), ("said", 1.0, 1.3)], t0 + 1)
+        self.assertEqual(ctl.partial_hits, 0)
+        self.assertEqual(sch._windows, [])
+
+    def test_other_words_ending_window_ignored(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        for frag in ("left", "let", "lead", "lebanon's", "l"):
+            ctl.on_asr_words(f"he went {frag}", [("he", 1.0, 1.5), ("went", 1.5, 2.6), (frag, 2.7, 3.0)], t0)
+        self.assertEqual(ctl.partial_hits, 0)
+
+    def test_next_window_cancels_wrong_guess(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        ctl.on_asr_words("he went le", [("he", 1.0, 1.5), ("went", 1.5, 2.6), ("le", 2.7, 3.0)], t0)
+        self.assertEqual(len(sch._windows), 1)
+        # Half a second later the same stretch is heard whole: "left".
+        ctl.on_asr_words("went left the court today",
+                         [("went", 1.0, 2.1), ("left", 2.2, 2.6), ("the", 2.6, 2.7),
+                          ("court", 2.7, 2.95), ("today", 2.95, 3.0)], t0 + 0.5)
+        self.assertEqual(sch._windows, [])
+        self.assertEqual(ctl.partial_cancels, 1)
+
+    def test_next_window_with_name_keeps_mute(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        ctl.on_asr_words("know about leb", [("know", 1.0, 1.5), ("about", 1.5, 2.6), ("leb", 2.7, 3.0)], t0)
+        ctl.on_asr_words("about lebron james", [("about", 1.0, 2.1), ("lebron", 2.2, 2.6),
+                                                ("james", 2.6, 2.95)], t0 + 0.5)
+        self.assertEqual(ctl.partial_cancels, 0)
+        self.assertIn('asr_partial', [w[2] for w in sch._windows])
+        self.assertEqual(ctl.asr_hits, 1)
+
+    def test_started_mute_is_cut_short_not_dropped(self):
+        ctl, sch = self._ctl(delay=0.0)
+        t0 = time.monotonic() - 3.0
+        ctl.on_asr_words("he went le", [("he", 1.0, 1.5), ("went", 1.5, 2.6), ("le", 2.7, 3.0)], t0)
+        ctl.on_asr_words("went left the court",
+                         [("went", 1.0, 2.1), ("left", 2.2, 2.6), ("the", 2.6, 2.7), ("court", 2.7, 3.0)],
+                         t0 + 0.5)
+        self.assertEqual(ctl.partial_cancels, 1)
+        for w in sch._windows:
+            self.assertLessEqual(w[1], time.monotonic() + 0.01)
+
+    def test_off_by_default_and_env_override(self):
+        sch = NameMuteScheduler(FakeAudio(), lambda: 2.0)
+        self.assertFalse(NameMuteController(sch).partial_names)
+        old = os.environ.get('MINUS_NAME_MUTE_PARTIAL')
+        try:
+            os.environ['MINUS_NAME_MUTE_PARTIAL'] = '0'
+            self.assertFalse(NameMuteController(sch, partial_names=True).partial_names)
+            os.environ['MINUS_NAME_MUTE_PARTIAL'] = '1'
+            self.assertTrue(NameMuteController(sch).partial_names)
+        finally:
+            if old is None:
+                os.environ.pop('MINUS_NAME_MUTE_PARTIAL', None)
+            else:
+                os.environ['MINUS_NAME_MUTE_PARTIAL'] = old
+
+    def test_disabled_does_nothing(self):
+        ctl, sch = self._ctl(partial=False)
+        t0 = time.monotonic()
+        ctl.on_asr_words("know about leb", [("know", 1.0, 1.5), ("about", 1.5, 2.6), ("leb", 2.7, 3.0)], t0)
+        self.assertEqual(sch._windows, [])
+
+
 if __name__ == '__main__':
     unittest.main()
