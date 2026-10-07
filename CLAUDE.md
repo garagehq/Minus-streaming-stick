@@ -41,6 +41,17 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   extraction is 8ms). Per-inference time also rose to 0.40s because both
   workers share the three pinned CPU cores. The option stays in the code
   (default one worker on core 1).
+- **Latency/heat benchmark: see [docs/ASR_BENCHMARKS.md](docs/ASR_BENCHMARKS.md).**
+  Effective delay = `MINUS_AV_DELAY_S` + 0.35s audio-queue floor. With
+  captions on, coverage holds down to 0.8s effective and collapses at
+  0.6s. ASR alone: SenseVoice needs ~1.6s; Parakeet-110M on one A76 core
+  (`MINUS_ASR_ENGINE=parakeet`, CTC model dir, `MINUS_ASR_THREADS=1
+  MINUS_ASR_CPU_AFFINITY=4 MINUS_ASR_MIN_CYCLE=0.25`) still mutes most names
+  on time at 1.2s. Heat over ASR-off: SenseVoice +3-5°C, Parakeet-110M
+  +6-8°C, Parakeet 0.6B +24°C, Moonshine medium +35°C (86% CPU). The live
+  analyzer now scores only stretches where the video clock was steady
+  (YouTube mid-roll ads stop it); earlier "missed at video start" results
+  were that artifact.
 - **NVIDIA Parakeet: tried, not adopted (2026-10-06).** sherpa-onnx int8 on
   the 3 pinned CPU cores, 3s windows, NBA commentary clip:
   TDT 0.6B v2 96% name recall (25/26 caption mentions, plus a real
@@ -129,6 +140,7 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
 | [docs/DEBUG_GLITCHES.md](docs/DEBUG_GLITCHES.md) | Video glitch debugging notes |
 | [docs/FPS_DEBUGGING.md](docs/FPS_DEBUGGING.md) | FPS tracking and optimization |
 | [docs/AUDIO.md](docs/AUDIO.md) | Audio passthrough documentation |
+| [docs/ASR_BENCHMARKS.md](docs/ASR_BENCHMARKS.md) | Every ASR engine tried for the name muter: offline recall/speed, live coverage vs A/V delay (0.6-2.35s), heat and CPU cost, recommendations |
 | [docs/GPU_SETUP.md](docs/GPU_SETUP.md) | Mali-G610 OpenCL/Vulkan bring-up on RK3588, traps to avoid on other units, GPU vs CPU vs NPU ASR results |
 | [docs/ASR.md](docs/ASR.md) | Moonshine (ONNX) ASR — audio-based ad CONFIRM signal on top of OCR+VLM (worker process, 2s window, veto removed 2026-05) |
 | [docs/VLM_NPU_DEGRADATION.md](docs/VLM_NPU_DEGRADATION.md) | Investigation of "NPU degradation" — root cause is per-image output-length variance; fix is `max_new_tokens` cap |
