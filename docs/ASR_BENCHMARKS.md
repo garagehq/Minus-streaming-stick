@@ -26,6 +26,37 @@ video.
   default drove this headless box to 80 °C at 86% CPU, versus 48 °C at
   10% for SenseVoice.
 
+## Decision table
+
+Each row is one ASR engine at one effective delay. Caption OCR runs in
+every row (NPU core 0). Coverage adds both videos where both were run.
+
+* **Fully muted** is the overall result with captions on.
+* **ASR alone** is what you would get with captions off.
+* Temperature and CPU are the live means during those runs, on a box with
+  no TV attached (ASR off: 43–46 °C, 8% CPU). All runs held 30 fps with no
+  throttling.
+
+| Engine | Where it runs | Effective delay (`MINUS_AV_DELAY_S`) | Fully muted (captions on) | ASR alone (captions off) | SoC temp | CPU busy (whole system) |
+|---|---|---|---|---|---|---|
+| SenseVoice | NPU core 1 | 2.35 s (2.0, today's default) | 15/15 (100%) | 11/15 (73%) | ~48 °C | ~10% |
+| SenseVoice | NPU core 1 | 2.0 s (1.65) | 11/12 (92%) | 8/12 (67%) | 48.7 °C | 10% |
+| SenseVoice | NPU core 1 | 1.6 s (1.25) | 13/14 (93%) | 11/14 (79%) | 47.9 °C | 10% |
+| SenseVoice | NPU core 1 | 1.2 s (0.85) | 31/32 (97%) | 6/32 (19%) | 48.3–48.5 °C | 10% |
+| SenseVoice | NPU core 1 | 0.8 s (0.45) | 26/30 (87%) | 0/30 (0%) | 48.0–48.5 °C | 10% |
+| Parakeet-110M | 1 A76 core | 1.6 s (1.25) | 8/9 (89%) | 7/9 (78%) | 50.8 °C | 16% |
+| Parakeet-110M | 1 A76 core | 1.2 s (0.85) | 29/30 (97%) | 14/30 (47%) | 50.9–51.1 °C | 16% |
+| Parakeet-110M | 1 A76 core | 0.8 s (0.45) | 30/32 (94%) | 9/32 (28%) | 50.9–51.1 °C | 16% |
+| Parakeet-110M | 1 A76 core | 0.6 s (0.25) | 8/17 (47%) | 0/17 (0%) | 50.8 °C | 17% |
+| Parakeet 0.6B | 3 CPU cores | 2.35 s (2.0) | 14/15 (93%) | 12/15 (80%) | 67 °C | 46% |
+| Moonshine medium (old) | 3 CPU cores | 5.35 s (5.0) | 108/110 (98%, earlier runs) | most | 80 °C | 86% |
+
+Notes on the rows:
+* No name was missed outright in any row; the rest were partial.
+* The Parakeet 0.6B and Moonshine temperature and CPU come from the
+  7-minute heat runs below.
+* Rows with one video have 9–15 mentions, so ±1 mention is noise.
+
 ## Definitions
 
 * **Effective delay**: how far the TV output lags the source.
