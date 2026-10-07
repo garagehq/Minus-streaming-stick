@@ -21,6 +21,20 @@ video.
   mutes on time more often below 1.6 s. It costs ~7% more total CPU and
   ~3 °C more than SenseVoice. It is the best choice for ASR-only operation
   at 1.2 s.
+* **Captions-off runs confirm it** (Oct 7). At 1.2 s with no captions,
+  SenseVoice fully muted 6/32 and Parakeet-110M 17/31, close to the
+  "ASR alone" column below. At that delay the name was still recognisable
+  in 10 of 25 SenseVoice clips but only 2 of 23 Parakeet clips.
+* **Partial mutes don't give the name away when captions are on.** At
+  0.8 s, mutes that clipped the name left 2–52 ms audible (one 345 ms case
+  is likely caption timing). SenseVoice could not hear the name in any
+  muted clip.
+* **Bare "King" is the main false-mute source.** Ordinary news and a
+  non-Kings game: 0 false mutes with SenseVoice, 1–2 per 10 min with
+  Parakeet (clipped "making" → "king"). A Kings game: 7–9 per 10 min,
+  because the "s" is lost. Content about another King (MLK, Stephen King)
+  is muted 4–6 times a minute. See
+  [False mutes](#false-mutes-on-non-lebron-content).
 * Larger or slower models (Parakeet 0.6B, Moonshine, whisper) do not help
   latency, and their heat cost is what hurts the video. The old Moonshine
   default drove this headless box to 80 °C at 86% CPU, versus 48 °C at
@@ -197,6 +211,120 @@ the engines and again right after Moonshine (still cooling).
 * "CPU busy" is the whole 8-core system, so Moonshine's 86% means nearly
   every core was saturated.
 
+## Captions off (real runs)
+
+The "ASR alone" column above is reconstructed from runs with captions on.
+These runs turn caption OCR off (`MINUS_NAME_MUTE_CAPTIONS=0`) at 1.2 s
+effective (`MINUS_AV_DELAY_S=0.85`), on the same two videos.
+
+| Engine | Video | Fully muted | Partial | Missed | Name still recognisable after muting* | Detection lag p50 / p90 | Temp / CPU |
+|---|---|---|---|---|---|---|---|
+| SenseVoice | B (game) | 1/16 | 4 | 11 | 8 of 12 | 1.21 / 2.69 s | 48.6 °C / 10% |
+| SenseVoice | A (news) | 5/16 | 8 | 3 | 2 of 13 | 1.11 / 1.63 s | 48.8 °C / 10% |
+| Parakeet-110M | B (game) | 6/17 | 5 | 6 | 2 of 12 | 1.22 / 2.71 s | 50.8 °C / 16% |
+| Parakeet-110M | A (news) | 11/14 | 3 | 0 | 0 of 11 | 0.78 / 2.99 s | 52.5 °C / 17% |
+
+\* Counted with SenseVoice over clips where it could hear the name in the
+original audio (`tests/name_mute_render.py`).
+
+* The totals (SenseVoice 6/32, Parakeet 17/31) agree with the
+  reconstruction (6/32 and 14/30), so that column can be trusted.
+* Fast game commentary (video B) is the hard case. Without captions,
+  SenseVoice lets the name through most of the time at 1.2 s.
+* For ASR-only operation below 1.6 s, Parakeet-110M is clearly better.
+  SenseVoice needs about 1.6 s or more.
+
+## Does a partial mute give the name away?
+
+`tests/name_mute_render.py` applies a run's mute windows to the source
+audio and cuts one clip per mention, from 1.5 s before the name to 1.5 s
+after. Audible time is measured against caption word timing, which is
+only accurate to about ±0.1–0.2 s. SenseVoice then listens to each muted
+clip. Clips and a `listen_all.wav` per run are in `~/lebron_test/render/`.
+
+| Run (captions on) | Mentions | Full | Partial | Audible in partials | Name heard after muting |
+|---|---|---|---|---|---|
+| Parakeet-110M 0.8 s, video B | 14 | 13 | 1 | 52 ms | 0 |
+| SenseVoice 0.8 s, video B | 14 | 13 | 1 | 2 ms | 0 |
+| Parakeet-110M 0.8 s, video A | 14 | 13 | 1 | 34 ms | 0 |
+| SenseVoice 0.8 s, video A | 14 | 11 | 3 | 16, 31, 345 ms | 0 |
+| SenseVoice 1.2 s, video B | — | all | 0 | — | 0 |
+| Parakeet-110M 0.6 s, video B | 17 | 8 | 9 | 36–357 ms (median ~144) | 0 |
+
+* With captions on, a partial mute usually clips only the first few tens
+  of milliseconds: the start of the "L". The 345 ms case (video A, 299.5 s)
+  was partial in every run, including at 2.35 s, so the caption timing is
+  probably off there rather than the mute.
+* Even at 0.6 s, SenseVoice did not recognise the name in any muted clip.
+  A person may still catch a "…Bron" after 150–350 ms, so listen to
+  `render/B-pk-0.6/listen_all.wav` before going that low.
+* Captions off is different: partials leave 40–640 ms audible, and the name
+  stays recognisable in some clips (table above).
+
+## False mutes on non-LeBron content
+
+`tools/false_mute_bench.sh` plays videos and logs every mute with the
+text that triggered it. Captions on, 1.2 s effective, 8–10 minutes per
+video.
+
+| Video | SenseVoice | Parakeet-110M | What triggered it |
+|---|---|---|---|
+| PBS NewsHour, Oct 5 2026 (218gMy1KfyQ), 10 min | 0 | 2 | "king very hard", "king about": the "-king" of "making"/"talking" clipped at the start of a window |
+| Warriors–Celtics Finals G6 (AOYACk7m7Fk), 10 min | 0 | 1 | "king down shots": same clipped "-king" |
+| Warriors at Kings (Rmjz1iGXPeU, no YouTube captions), 10 min | 7 (6 ASR, 1 OCR) | 9 (6 ASR, 3 OCR) | "Sacramento King", "the King": the plural "s" is lost; OCR read "King" in on-screen graphics |
+| PBS: MLK biography (m0nr13xnRzU), 8 min | 51 (32 ASR, 19 OCR) | 54 (35 ASR, 19 OCR) | Every "Dr. King" / "Martin Luther King" |
+| PBS: Stephen King interview (CQF37Z4CEWg), 8 min | 29 (10 ASR, 19 OCR) | 32 (11 ASR, 21 OCR) | Every "Stephen King", plus OCR on the "STEPHEN KING:" speaker labels |
+
+Counts are mute events, about 1 s each; one spoken name often triggers
+both an ASR and a caption mute.
+
+* **Bare "King" works as specified, and the cost is real.** Content
+  about any other King gets muted 4–6 times a minute: MLK, Stephen King,
+  King Charles, *The Lion King*, Burger King. With captions on, OCR also
+  mutes whenever a speaker label says "KING:", even if nobody says the
+  word.
+* **Kings games: ~40–55 mutes an hour.** The ASR often drops the final
+  "s" of "Kings". The pattern excludes plural "Kings", but it can't see an
+  "s" the ASR never wrote.
+* **Parakeet invents "king" from clipped words.** When a window starts
+  mid-word, the tail of "making"/"talking"/"taking" comes out as "king".
+  That gave 3 false mutes in 20 minutes of ordinary speech. SenseVoice
+  had none.
+* **Ordinary speech is otherwise clean.** Bare "James" is not targeted,
+  so the dozens of "James" in the test videos never muted.
+* Possible fixes, none built yet:
+  * Ignore "king" when it's the first word and starts at the window edge;
+    the next window re-hears it whole. This fixes the clipped-word case.
+  * Ignore "king" right after Sacramento/Lion/Stephen/Burger/Dr./Luther/
+    Charles, and ignore a "KING:" speaker label in captions.
+  * Make bare "King" opt-in: only "LeBron" / "King James" by default.
+* Test-setup trap: the TV has YouTube **Restricted Mode** on, which
+  blocks some videos (NBC Nightly News, a *Lion King* review) behind a
+  "Something went wrong" screen. Those runs showed 0 mutes because there
+  was no audio. Check a frame (`curl localhost:9090/snapshot`) or
+  `asr.last_transcript` before trusting a 0.
+
+## Parakeet on the NPU?
+
+As of Oct 2026, nobody has published an RKNN conversion of Parakeet
+(110M or 0.6B). Hugging Face, GitHub and the sherpa-onnx release assets
+were all checked. The pip sherpa-onnx wheel is also built without RKNN.
+The RK3588 options that do exist:
+
+* sherpa-onnx's own RKNN builds: `sherpa-onnx-rk3588-*-sense-voice-*`
+  (the same SenseVoice model, with 5 s/10 s/… fixed inputs) and
+  `sherpa-onnx-rk3588-streaming-zipformer-en-2023-06-26`, an English
+  streaming transducer. The Zipformer is the one untested option that
+  could beat the window-based floor, because it emits words as they
+  stream in.
+* Convert Parakeet-110M ourselves. `rknn-toolkit2` 2.3.2 installs with
+  pip on aarch64 and matches the board's `librknnrt` 2.3.2. The CTC model
+  is a single ONNX file. Its FastConformer encoder needs a fixed input
+  length (e.g. 3 s), and attention and layer-norm ops often fall back to
+  the CPU or lose accuracy in int8 on RKNN, so expect fp16 and some
+  debugging. The gain would be CPU heat (Parakeet-110M costs ~7% more CPU
+  and ~3 °C over SenseVoice), not latency, which is already small.
+
 ## Recommendations
 
 | Goal | Setting |
@@ -223,8 +351,12 @@ Ideas to get under the ~0.8 s floor, not yet tried:
 * **Smaller caption pad.** Caption mutes use 0.7 s before the frame where
   the name first appears, which makes them late below 1.2 s. Captions
   appear only ~0.1–0.2 s after the word, so ~0.4 s may be enough.
-* **Run Parakeet-110M on the NPU.** It would need an RKNN conversion of the
-  CTC model; that removes its CPU cost.
+* **Run Parakeet-110M on the NPU.** No conversion exists yet; see
+  [Parakeet on the NPU?](#parakeet-on-the-npu).
+* **Try sherpa-onnx's RK3588 streaming Zipformer** (true streaming on the
+  NPU).
+* **Fix "Kings" false mutes** (see
+  [False mutes](#false-mutes-on-non-lebron-content)).
 
 ## Reproducing
 
@@ -234,6 +366,10 @@ python3 tests/sensevoice_npu_eval.py ~/asr_models/sensevoice-rknn clip16k.wav ca
 taskset -c 4 python3 tests/parakeet_eval.py ctc ~/asr_models/parakeet/<model> clip16k.wav captions.json3 3.0 0.5 1
 # live matrix (root): one config per "label|ENV=..." argument
 sudo tools/asr_live_bench.sh <tv-ip> <video-id> captions.json3 1000 OUTDIR "sv-1.2|MINUS_AV_DELAY_S=0.85"
+# what the viewer heard: per-mention clips + audibility check
+python3 tests/name_mute_render.py OUTDIR/sv-1.2.json captions.json3 source16k.wav RENDERDIR 2
+# false mutes on videos that should never mute
+sudo tools/false_mute_bench.sh <tv-ip> OUTDIR 600 "sv-1.2|MINUS_AV_DELAY_S=0.85" -- <video-id> ...
 ```
 
 Models:
@@ -242,4 +378,5 @@ Models:
 * Parakeet: `~/asr_models/parakeet/*` (sherpa-onnx `asr-models` release).
 
 Raw results are in `~/lebron_test/bench`, `~/lebron_test/bench2`,
-`~/lebron_test/heat2` and `~/lebron_test/live5-8.json` on minus-2.
+`~/lebron_test/heat2`, `~/lebron_test/nocap-{A,B}`, `~/lebron_test/render`,
+`~/lebron_test/fp` and `~/lebron_test/live5-8.json` on minus-2.

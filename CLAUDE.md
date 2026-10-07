@@ -52,6 +52,23 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   analyzer now scores only stretches where the video clock was steady
   (YouTube mid-roll ads stop it); earlier "missed at video start" results
   were that artifact.
+- **Follow-up tests (2026-10-07), details in ASR_BENCHMARKS.md.**
+  - *Captions off, 1.2s:* real runs confirm the reconstructed "ASR
+    alone" numbers. SenseVoice fully muted 6/32, Parakeet-110M 17/31.
+  - *Partial mutes:* with captions on, at 0.8s only 2-52ms of the name
+    leaks, and SenseVoice cannot hear it in any muted clip
+    (`tests/name_mute_render.py`).
+  - *False mutes* (`tools/false_mute_bench.sh`):
+    - SenseVoice: 0 on news and non-Kings games.
+    - Parakeet: 1-2 per 10 min, from a clipped "making" heard as "king".
+    - Kings games: 7-9 per 10 min, because the "s" is lost.
+    - MLK / Stephen King content: muted 4-6 times a minute (bare "King"
+      as specified). OCR also mutes on "STEPHEN KING:" speaker labels.
+    - The TV's YouTube Restricted Mode blocks some test videos. A run
+      with 0 mutes and an empty `asr.last_transcript` means no audio was
+      playing.
+  - *Parakeet on the NPU:* no public RKNN conversion exists.
+    sherpa-onnx ships an RK3588 streaming Zipformer (untested).
 - **NVIDIA Parakeet: tried, not adopted (2026-10-06).** sherpa-onnx int8 on
   the 3 pinned CPU cores, 3s windows, NBA commentary clip:
   TDT 0.6B v2 96% name recall (25/26 caption mentions, plus a real
