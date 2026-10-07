@@ -35,6 +35,10 @@ video.
   because the "s" is lost. Content about another King (MLK, Stephen King)
   is muted 4–6 times a minute. See
   [False mutes](#false-mutes-on-non-lebron-content).
+* **Streaming models don't beat SenseVoice.** The sherpa-onnx RK3588
+  streaming Zipformer can't recognise "LeBron" (4/38) and still lags more
+  (0.72 s after the name ends, versus ~0.41 s). Kroko recognises it
+  (74%) but is slower (~1.3 s).
 * Larger or slower models (Parakeet 0.6B, Moonshine, whisper) do not help
   latency, and their heat cost is what hurts the video. The old Moonshine
   default drove this headless box to 80 °C at 86% CPU, versus 48 °C at
@@ -316,7 +320,8 @@ The RK3588 options that do exist:
   `sherpa-onnx-rk3588-streaming-zipformer-en-2023-06-26`, an English
   streaming transducer. The Zipformer is the one untested option that
   could beat the window-based floor, because it emits words as they
-  stream in.
+  stream in. **Tested since: it doesn't**; see
+  [Streaming models](#streaming-models-sherpa-onnx-oct-7).
 * Convert Parakeet-110M ourselves. `rknn-toolkit2` 2.3.2 installs with
   pip on aarch64 and matches the board's `librknnrt` 2.3.2. The CTC model
   is a single ONNX file. Its FastConformer encoder needs a fixed input
@@ -324,6 +329,60 @@ The RK3588 options that do exist:
   the CPU or lose accuracy in int8 on RKNN, so expect fp16 and some
   debugging. The gain would be CPU heat (Parakeet-110M costs ~7% more CPU
   and ~3 °C over SenseVoice), not latency, which is already small.
+
+## Streaming models (sherpa-onnx), Oct 7
+
+Streaming models emit words as audio arrives instead of re-reading a 3 s
+window. The question was whether that beats SenseVoice's sliding window,
+which mutes about 0.41 s after the word ends (live median).
+
+Method: feed the audio in 20 ms steps and decode whenever a chunk is
+ready. For each word, record when it first appeared plus that chunk's
+decode time, then compare with the caption word timing. Recall is
+measured on the first 15 min of video B plus the first 15 min of video A
+(38 name mentions).
+
+| Model | Runs on | Name recall | "James" emitted after the name ends (p50 / p90) | Compute |
+|---|---|---|---|---|
+| `sherpa-onnx-rk3588-streaming-zipformer-en-2023-06-26` | NPU (sherpa-onnx 1.13.8 RKNN build) | 4/38 (11%) | 0.72 / 1.06 s | 142 ms of NPU per 0.64 s chunk (22% of a core) |
+| `sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06` | 1 A76 core | 28/38 (74%) | 1.33 / 2.45 s | RTF 0.075 (7.5% of one core) |
+| NeMo streaming FastConformer CTC 80 ms / 480 ms int8 | 1 A76 core | ~0 | — | RTF 0.39 / 0.15 |
+| SenseVoice sliding window (reference) | NPU | — | ~0.41 s (live median, time to mute) | 0.30 s of NPU per 0.5 s cycle |
+
+* **The NPU Zipformer is fast to emit, but it can't recognise the name,
+  and it is still slower than SenseVoice.**
+  * It was trained on LibriSpeech, so "LeBron" comes out as "the bron",
+    "abroad", "lebran", "philipron", "apron" and so on.
+  * The keyword spotter on the same model, with `▁LE B RO N` targeted,
+    never triggered, even at threshold 0.01 and boost 5. As a check, "JAMES"
+    did trigger.
+  * Hotword biasing didn't help either.
+  * A fuzzy `l?b?r[aeiou]n` matcher would catch about half of the names,
+    but real words like "brown" and "abroad" would trigger it too.
+* **Kroko recognises the name** ("an easy lay up there for Lebron James")
+  and is very cheap, but its large chunks (~1.28 s) make it slower than
+  SenseVoice: p50 1.5–1.9 s after the name starts.
+* **NeMo streaming CTC** works on its bundled LibriSpeech test file but
+  produces almost nothing on TV audio, even level-matched. Not pursued.
+* Streaming doesn't help here. Chunk length plus look-ahead costs about as
+  much as SenseVoice's 0.5 s cycle and 0.3 s inference. The ~0.8 s floor
+  comes from how long the name takes to say, not from model architecture.
+  Converting Kroko to RKNN would cut its CPU cost but not its chunk delay.
+
+Harnesses are in `tests/streaming_asr/`:
+* `zf_stream.cc` (C++, links the sherpa-onnx RKNN build);
+* `stream_cpu.py` (pip sherpa-onnx);
+* `zf_analyze.py` (scoring).
+
+Build and run:
+
+```bash
+# sherpa-onnx-v1.13.8-rknn-linux-aarch64-shared + headers from the v1.13.8 tag
+g++ -O2 -std=c++17 -Iinc tests/streaming_asr/zf_stream.cc -L$SHERPA/lib \
+    -lsherpa-onnx-cxx-api -lsherpa-onnx-c-api -Wl,-rpath,$SHERPA/lib -o zf_stream
+./zf_stream asr ~/asr_models/zipformer-rknn/sherpa-onnx-rk3588-streaming-zipformer-en-2023-06-26 clip16k.wav > out.tsv
+python3 tests/streaming_asr/zf_analyze.py out.tsv captions.json3
+```
 
 ## Recommendations
 
@@ -353,8 +412,6 @@ Ideas to get under the ~0.8 s floor, not yet tried:
   appear only ~0.1–0.2 s after the word, so ~0.4 s may be enough.
 * **Run Parakeet-110M on the NPU.** No conversion exists yet; see
   [Parakeet on the NPU?](#parakeet-on-the-npu).
-* **Try sherpa-onnx's RK3588 streaming Zipformer** (true streaming on the
-  NPU).
 * **Fix "Kings" false mutes** (see
   [False mutes](#false-mutes-on-non-lebron-content)).
 

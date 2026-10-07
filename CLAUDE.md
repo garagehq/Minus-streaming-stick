@@ -68,7 +68,14 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
       with 0 mutes and an empty `asr.last_transcript` means no audio was
       playing.
   - *Parakeet on the NPU:* no public RKNN conversion exists.
-    sherpa-onnx ships an RK3588 streaming Zipformer (untested).
+  - *Streaming models: no gain.*
+    - sherpa-onnx RK3588 streaming Zipformer (NPU, via the sherpa-onnx
+      RKNN Linux build): name recall 4/38, "LeBron" heard as
+      "the bron"/"abroad". It emits 0.72s after the name ends, versus
+      SenseVoice ~0.41s.
+    - Kroko 2025 Zipformer (CPU): recall 74%, but ~1.3s.
+    - NeMo streaming CTC: empty output on TV audio.
+    - Harnesses: `tests/streaming_asr/`.
 - **NVIDIA Parakeet: tried, not adopted (2026-10-06).** sherpa-onnx int8 on
   the 3 pinned CPU cores, 3s windows, NBA commentary clip:
   TDT 0.6B v2 96% name recall (25/26 caption mentions, plus a real
