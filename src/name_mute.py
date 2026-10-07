@@ -292,7 +292,8 @@ class NameMuteController:
         self.matcher = matcher or NameMatcher()
         self.enabled = True
         self.use_asr = True
-        self.use_captions = True
+        # MINUS_NAME_MUTE_CAPTIONS=0 mutes from ASR only (OCR still runs).
+        self.use_captions = os.environ.get('MINUS_NAME_MUTE_CAPTIONS', '1') != '0'
         self._recent_asr = []        # capture-time centers of recent ASR hits
         self._recent_captions = {}   # caption key -> last seen (monotonic)
         self.asr_hits = 0

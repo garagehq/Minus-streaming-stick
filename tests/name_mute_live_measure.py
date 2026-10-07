@@ -65,7 +65,17 @@ def main():
     # Sync often: YouTube mid-roll ads stop the video clock, and the analyzer
     # only scores stretches where consecutive syncs agree.
     every = float(os.environ.get('SYNC_EVERY_S', '5'))
-    syncs = [sync(dev, n=25)]
+    # The video may still be loading or in a pre-roll ad: retry until the
+    # player reports PLAYING (up to ~90s).
+    first = []
+    for _ in range(18):
+        first = sync(dev, n=25)
+        if first:
+            break
+        time.sleep(5)
+    if not first:
+        sys.exit("player never reported PLAYING")
+    syncs = [first]
     print(f"initial sync: rtt {syncs[0][0]['rtt']*1000:.0f}ms, "
           f"video at {syncs[0][0]['position']:.1f}s", flush=True)
     while time.monotonic() - start < secs:

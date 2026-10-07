@@ -30,7 +30,11 @@ EOF
     sleep 8
     python3 "$HERE/tests/thermal_sample.py" "$SECS" "$OUT/$label.thermal.json" > "$OUT/$label.thermal.txt" &
     tp=$!
-    python3 "$HERE/tests/name_mute_live_measure.py" "$IP" "$SECS" "$OUT/$label.json" > "$OUT/$label.measure.txt" 2>&1
+    if ! python3 "$HERE/tests/name_mute_live_measure.py" "$IP" "$SECS" "$OUT/$label.json" > "$OUT/$label.measure.txt" 2>&1; then
+        kill $tp 2>/dev/null
+        echo "=== $label FAILED: $(tail -1 "$OUT/$label.measure.txt")"
+        continue
+    fi
     wait $tp
     {
         echo "=== $label ($envs)"
