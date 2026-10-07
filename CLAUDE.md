@@ -76,6 +76,25 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     - Kroko 2025 Zipformer (CPU): recall 74%, but ~1.3s.
     - NeMo streaming CTC: empty output on TV audio.
     - Harnesses: `tests/streaming_asr/`.
+- **Captions off, partial names, training clips (2026-10-07 evening).**
+  - *1.6s, captions off:* news 15/15 (Parakeet). Game commentary is
+    9/17 (Parakeet) and 8/17 (SenseVoice), with 5 names never recognised,
+    so it's limited by recognition, not delay.
+  - *Partial names* (`NameMuteController._check_partial`, SenseVoice
+    only by default, `MINUS_NAME_MUTE_PARTIAL`):
+    - A cut-off "le"/"leb"/"lebr…"/"leron" ending a window mutes
+      provisionally (`asr_partial`).
+    - A later window hearing that stretch whole without the name drops
+      the mute, or cuts it short if already playing
+      (`NameMuteScheduler.cancel`).
+    - Live, captions off, 1.2s: 18/33 fully muted vs 6/32 before.
+    - Simulated with `tests/asr_window_dump.py` +
+      `tests/partial_name_sim.py`. Parakeet gains nothing from it.
+  - *Training clips* (`src/asr_clips.py`, `MINUS_ASR_CLIPS`): 10s WAV +
+    JSON (ASR windows, OCR lines) around every detection, `caption_only`
+    for names the ASR missed, plus random speech every 5 min. Saved to
+    `screenshots/asr_clips`, 2 GB budget. The audio tap ring is now 30s
+    (`AudioASRTap.recent_samples`).
 - **NVIDIA Parakeet: tried, not adopted (2026-10-06).** sherpa-onnx int8 on
   the 3 pinned CPU cores, 3s windows, NBA commentary clip:
   TDT 0.6B v2 96% name recall (25/26 caption mentions, plus a real

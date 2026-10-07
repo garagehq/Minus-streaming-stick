@@ -21,6 +21,15 @@ video.
   mutes on time more often below 1.6 s. It costs ~7% more total CPU and
   ~3 °C more than SenseVoice. It is the best choice for ASR-only operation
   at 1.2 s.
+* **Most viewers won't have captions on, so captions-off is the number
+  that matters.** With partial-name muting (below), SenseVoice at 1.2 s
+  fully muted **18/33 (55%)** with captions off, up from 6/32, which ties
+  Parakeet-110M while staying at SenseVoice's 49 °C and 10% CPU.
+  At 1.6 s, clear news speech is solved (Parakeet 15/15), but fast game
+  commentary is not (Parakeet 9/17, SenseVoice 8/17, 5 names never
+  recognised). Those misses are recognition failures, which fine-tuning
+  would address and more delay would not; see
+  [Captions off at 1.6 s and partial names](#captions-off-at-16-s-and-partial-names).
 * **Captions-off runs confirm it** (Oct 7). At 1.2 s with no captions,
   SenseVoice fully muted 6/32 and Parakeet-110M 17/31, close to the
   "ASR alone" column below. At that delay the name was still recognisable
@@ -238,6 +247,89 @@ original audio (`tests/name_mute_render.py`).
 * For ASR-only operation below 1.6 s, Parakeet-110M is clearly better.
   SenseVoice needs about 1.6 s or more.
 
+## Captions off at 1.6 s and partial names
+
+### 1.6 s, captions off (Oct 7)
+
+| Engine | Video | Fully muted | Partial | Missed | Detection lag p50 / p90 | Temp / CPU |
+|---|---|---|---|---|---|---|
+| Parakeet-110M | B (game) | 9/17 (53%) | 3 | 5 | 1.11 / 2.82 s | (71 °C / 36%, inflated by an offline job running alongside) |
+| SenseVoice | B (game) | 8/17 (47%) | 4 | 5 | 1.35 / 2.68 s | (63 °C / 21%, same) |
+| Parakeet-110M | A (news) | **15/15 (100%)** | 0 | 0 | 0.77 / 1.66 s | 52.2 °C / 16% |
+
+On clear speech, 1.6 s is enough. On fast game commentary, both engines
+miss about a third of the names outright, so the model never recognised
+them. That is a recognition problem, not a latency one.
+
+### Partial names
+
+When a 3 s window ends partway through "LeBron", the engine writes the
+start of it: SenseVoice gives "le", "leb", "lebra" or "leron", and
+Parakeet gives "L" or "Lebr". The full word only arrives in the next
+window. Muting on that fragment gains a whole cycle (0.5 s for SenseVoice).
+
+Rule (`NameMuteController._check_partial`):
+* The last word of a window matches `le|leb|lebr…|lebo…|ler|lero|leron|lbr…`
+  and starts in the window's last 0.5 s. It mutes provisionally for
+  0.8 s from the fragment (`asr_partial`).
+* If a later window hears that stretch whole with no name, the mute is
+  dropped if it hasn't started, or cut short if it has.
+
+**Offline simulation** (`tests/asr_window_dump.py` dumps every window
+over 20 min of each video, and `tests/partial_name_sim.py` replays them
+through each rule):
+
+| Engine | Delay | Fully muted, current rule | With partial names | False triggers / h |
+|---|---|---|---|---|
+| SenseVoice | 1.0 s | 7/44 (16%) | **20/44 (45%)** | 9 → 12 |
+| SenseVoice | 1.2 s | 19/44 (43%) | **30/44 (68%)** | 7.5 → 12 |
+| SenseVoice | 1.6 s | 33/44 (75%) | 34/44 (77%) | 3 → 7.5 |
+| SenseVoice | 2.35 s | 38/44 (86%) | 38/44 | 3 → 3 |
+| Parakeet-110M | 1.2 s | 32/44 (73%) | 32/44 (no gain) | 9 → 23 |
+
+* SenseVoice fragments over the 40 minutes:
+  * near a real name: "leb" ×9, "le" ×4, "leron", "lebra";
+  * another word: "le" ×2, "leb" ×1.
+* Parakeet only ever ended a window on a bare "le", and all 9 of those
+  were false. Its 0.25 s cycle already sees the whole word a quarter
+  second later, so the rule is on by default for SenseVoice only
+  (`MINUS_NAME_MUTE_PARTIAL=0/1` overrides).
+* The simulation is optimistic in absolute terms: it has no ads and no
+  live jitter, so offline base SenseVoice at 1.2 s is 43% versus 19%
+  live. The relative gain is what carried over.
+
+**Live, captions off, 1.2 s (SenseVoice + partial names):**
+
+| Video | Before | With partial names | False mutes |
+|---|---|---|---|
+| B (game) | 1/16 full, 11 missed | **5/17 full, 4 missed** | 1 partial + 2 ASR in 15.6 min |
+| A (news) | 5/16 full, 3 missed | **13/16 full, 1 missed** | 1 ASR in 15.8 min |
+| Total | 6/32 (19%) | **18/33 (55%)** | |
+
+That ties Parakeet-110M at 1.2 s (17/31) at SenseVoice's heat: 49.2–49.6 °C,
+9–10% CPU.
+
+## Training clips for fine-tuning
+
+`src/asr_clips.py` (on by default, `MINUS_ASR_CLIPS=0` to disable) saves
+10 s of 16 kHz mono audio around moments that matter for fine-tuning, to
+`screenshots/asr_clips/`:
+* every name detection, kind `asr`, `both`, or **`caption_only`**. A
+  `caption_only` clip is a mention the captions saw and the ASR missed,
+  which makes it the most valuable training example;
+* a random clip of non-silent audio every 5 min (`MINUS_ASR_CLIPS_RANDOM_S`).
+
+Each WAV has a JSON sidecar with the mention time and every detection.
+It also holds every ASR window transcript with word times and every
+distinct OCR screen during the clip, all relative to the clip start.
+That's enough to label clips later from captions where present, or with
+a larger teacher model (Parakeet 0.6B, 96% offline recall).
+
+* Clips are ~330 KB each. The budget is 2 GB (`MINUS_ASR_CLIPS_BUDGET_MB`),
+  about 6,000 clips, oldest evicted first.
+* The audio tap's ring buffer grew from 8 s to 30 s to hold the context.
+* `GET /api/name-mute` reports the clip count under `training_clips`.
+
 ## Does a partial mute give the name away?
 
 `tests/name_mute_render.py` applies a run's mute windows to the source
@@ -389,8 +481,8 @@ python3 tests/streaming_asr/zf_analyze.py out.tsv captions.json3
 | Goal | Setting |
 |---|---|
 | Lowest delay with captions available | `MINUS_AV_DELAY_S=0.45` (0.8 s effective). Either ASR; SenseVoice adds the least heat. |
-| Lowest delay without relying on captions | Parakeet-110M on one A76 core, `MINUS_AV_DELAY_S=0.85` (1.2 s). |
-| Under 2 s with good ASR-only coverage | SenseVoice, `MINUS_AV_DELAY_S=1.25` (1.6 s), ~2% CPU. |
+| Lowest delay without relying on captions | SenseVoice with partial names (default), `MINUS_AV_DELAY_S=0.85` (1.2 s): 55% fully muted, same as Parakeet-110M but cooler. |
+| Under 2 s, captions off, best coverage | `MINUS_AV_DELAY_S=1.25` (1.6 s). News 100%, game commentary ~50%. Game commentary is limited by recognition, not delay, so the next step there is fine-tuning. |
 | Coolest | SenseVoice on the NPU (any delay). |
 
 Parakeet-110M settings:
@@ -402,11 +494,11 @@ MINUS_ASR_THREADS=1 MINUS_ASR_CPU_AFFINITY=4 MINUS_ASR_MIN_CYCLE=0.25
 ```
 
 Ideas to get under the ~0.8 s floor, not yet tried:
-* **Mute on a partial name.** Act on "le b…"/"lebr" or a CTC prefix as
-  soon as it appears, instead of waiting for the full word. This trades
-  false mutes for 0.2–0.4 s.
-* **Fine-tune the 110M CTC model on NBA commentary.** Its recall is the
-  weak point (81%), and its speed leaves headroom for a 0.15 s cycle.
+* ~~Mute on a partial name~~: done, see
+  [partial names](#partial-names).
+* **Fine-tune on NBA commentary.** This is now the biggest lever with
+  captions off. Clips are being collected
+  ([Training clips](#training-clips-for-fine-tuning)).
 * **Smaller caption pad.** Caption mutes use 0.7 s before the frame where
   the name first appears, which makes them late below 1.2 s. Captions
   appear only ~0.1–0.2 s after the word, so ~0.4 s may be enough.
@@ -423,6 +515,9 @@ python3 tests/sensevoice_npu_eval.py ~/asr_models/sensevoice-rknn clip16k.wav ca
 taskset -c 4 python3 tests/parakeet_eval.py ctc ~/asr_models/parakeet/<model> clip16k.wav captions.json3 3.0 0.5 1
 # live matrix (root): one config per "label|ENV=..." argument
 sudo tools/asr_live_bench.sh <tv-ip> <video-id> captions.json3 1000 OUTDIR "sv-1.2|MINUS_AV_DELAY_S=0.85"
+# per-window ASR dump + offline rule simulation (partial names)
+python3 tests/asr_window_dump.py sensevoice source16k.wav sv.jsonl 0 1200
+python3 tests/partial_name_sim.py sv.jsonl captions.json3 [more.jsonl more.json3 ...]
 # what the viewer heard: per-mention clips + audibility check
 python3 tests/name_mute_render.py OUTDIR/sv-1.2.json captions.json3 source16k.wav RENDERDIR 2
 # false mutes on videos that should never mute

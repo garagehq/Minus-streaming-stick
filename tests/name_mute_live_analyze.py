@@ -111,7 +111,8 @@ def main():
         else:
             missed.append((round(a, 1), text, 'missed'))
         for src in by_src:
-            if covered_by(a, b, {src}):
+            # Provisional partial-name mutes (asr_partial) are ASR too.
+            if covered_by(a, b, {src, src + '_partial'}):
                 by_src[src] += 1
 
     extra = [(round(s, 1), round(e - s, 2), src, lab[:50], meta)
@@ -153,6 +154,7 @@ def main():
           f"({muted / max(speech, 0.01):.1f}x)")
     print(f"  not near any spoken mention: {len(extra)} "
           f"(asr {sum(1 for x in extra if x[2] == 'asr')}, "
+          f"asr_partial {sum(1 for x in extra if x[2] == 'asr_partial')}, "
           f"caption {sum(1 for x in extra if x[2] == 'caption')})")
     print(f"asr word start vs caption word: {q(offsets('asr', 'capture_start'))}")
     cap_off = [o + (0.7 if any(d['capture_end'] - d['capture_start'] > 0.01
