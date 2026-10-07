@@ -1,0 +1,19 @@
+[Unit]
+Description=Minus clip farm: play captioned LeBron videos to build an ASR fine-tuning dataset
+After=minus.service network-online.target
+Wants=network-online.target
+Requires=minus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/radxa/Minus/tools/clip_farm.py
+Environment=PYTHONUNBUFFERED=1
+# Environment=CLIP_FARM_TV_IP=192.168.1.203
+# Environment=ASR_DATASET_MAX_MB=2500
+Restart=on-failure
+RestartSec=60
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

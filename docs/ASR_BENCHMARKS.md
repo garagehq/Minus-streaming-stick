@@ -329,6 +329,60 @@ a larger teacher model (Parakeet 0.6B, 96% offline recall).
   about 6,000 clips, oldest evicted first.
 * The audio tap's ring buffer grew from 8 s to 30 s to hold the context.
 * `GET /api/name-mute` reports the clip count under `training_clips`.
+  `POST /api/name-mute/clips {"random_interval_s": N}` changes the
+  random-clip rate at runtime.
+
+### Clip farm: automatic labelled data
+
+`tools/clip_farm.py` runs as the `minus-clipfarm` systemd service
+(`tools/minus-clipfarm.service`, enabled at boot). It turns the collector
+into a labelled dataset with no manual work:
+
+1. **Find videos.** yt-dlp searches 20 rotating LeBron queries (games,
+   interviews, debate shows, podcasts, documentaries). It keeps 5–90 min
+   videos whose caption track mentions LeBron/King James at least 3 times,
+   and saves that caption track.
+2. **Play them** on the Google TV over ADB. A video is skipped if it never
+   reaches PLAYING (Restricted Mode, region lock) or the ASR hears
+   nothing for 75 s. It moves on when the video ends, autoplay switches
+   videos, or after 40 min.
+3. **Log the position.** Every 5 s, video position vs the box's monotonic
+   clock goes to `~/clip_farm/playlog/`. The farm also sets random clips to
+   every 20 s, because with a caption track every clip is labelable.
+4. **Label** every 10 min (`tools/label_clips.py`):
+   * the clip's capture time maps to a video position, but only inside
+     stretches where consecutive syncs agree, which drops mid-roll ads;
+   * the clip takes the caption words fully inside it;
+   * the audio is trimmed to those words plus 0.15 s / 0.25 s, and a line
+     goes into `~/asr_dataset/manifest.jsonl` (NeMo format:
+     `audio_filepath`, `duration`, `text`, plus `text_raw`, `video_id`,
+     `has_name`).
+
+* **Held-out videos are never used.** `label_clips.HELD_OUT` lists every
+  video used to evaluate the muter: videos A and B, the
+  `roku_lebron.py` list, and the false-mute videos. The farm never queues
+  them, and the labeler rejects their clips.
+* **Size cap.** The dataset stops at 2.5 GB (`ASR_DATASET_MAX_MB`), and the
+  farm then stops playing. Raw clips have their own 2 GB budget.
+* **Rate.** A 6.5 min smoke test labelled 23 clips (~1 every 17 s, about
+  0.5 h of labelled audio per hour). At that rate the 2.5 GB cap is about
+  2 days.
+* **Label check.** SenseVoice re-transcribing the 23 trimmed clips matched
+  the caption label with a mean word overlap of 0.80 (min 0.45). The
+  mismatches are ASR or auto-caption errors, not misalignment: "oak hill"
+  heard as "o kill", and the captions writing "dished the rock baby" as
+  "dished the rug bribed". YouTube auto-captions are a noisy label; a
+  teacher pass (Parakeet 0.6B) can filter low-agreement clips before
+  training.
+
+Controls:
+
+```bash
+sudo systemctl stop minus-clipfarm      # pause (TV keeps whatever it was playing)
+sudo systemctl disable --now minus-clipfarm
+journalctl -u minus-clipfarm -f         # what it is playing, dataset size
+python3 tools/label_clips.py            # label now and print a summary
+```
 
 ## Does a partial mute give the name away?
 

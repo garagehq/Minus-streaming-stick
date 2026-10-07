@@ -135,6 +135,25 @@ class TestASRClipCollector(unittest.TestCase):
         q._tick(time.monotonic())
         self.assertEqual(entries(dq), [])
 
+    def test_sidecar_has_monotonic_clip_start(self):
+        c, d = make()
+        now = time.monotonic()
+        c.tap.end = now
+        c.on_detection({'source': 'asr', 'label': 'x', 'capture_start': now - 10})
+        c._tick(now)
+        meta = entries(d)[0]
+        self.assertAlmostEqual(meta['clip_start_mono'], now - 10 - c.PRE_S, delta=0.05)
+
+    def test_set_random_interval(self):
+        c, d = make()
+        c.set_random_interval(20)
+        self.assertEqual(c.get_status()['random_interval_s'], 20)
+        c._last_random -= 25
+        c._tick(time.monotonic())
+        self.assertEqual(entries(d)[0]['kind'], 'random')
+        c.set_random_interval(-5)
+        self.assertEqual(c.random_interval_s, 0)
+
     def test_disabled_collects_nothing(self):
         c, d = make(MINUS_ASR_CLIPS=0)
         now = time.monotonic()

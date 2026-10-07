@@ -176,6 +176,10 @@ class ASRClipCollector:
         os.replace(tmp, str(base) + '.wav')
         meta = {
             'kind': kind, 'created': time.time(), 'engine': self.engine,
+            # Capture time of the first sample on the system-wide monotonic
+            # clock, so other processes (tools/clip_farm.py play log) can
+            # map the clip to a video position for labelling.
+            'clip_start_mono': round(clip_start, 3),
             'duration_s': round(len(data) / self.tap.SAMPLE_RATE, 3),
             'mention_t': None if kind == 'random' else round(p['anchor'] - clip_start, 3),
             'detections': p['labels'], 'rms': round(rms, 4),
@@ -208,6 +212,13 @@ class ASRClipCollector:
         while self._ocr and now - self._ocr[0][0] > self.CONTEXT_S:
             self._ocr.popleft()
 
+    def set_random_interval(self, seconds: float):
+        """Random-clip cadence (0 disables). tools/clip_farm.py raises it
+        while it plays captioned videos, since every clip is labelable then."""
+        self.random_interval_s = max(0.0, float(seconds))
+        self._last_random = time.monotonic()
+        logger.info(f"[ASRClips] random clip interval -> {self.random_interval_s:.0f}s")
+
     def get_status(self) -> dict:
         try:
             wavs = list(self.dir.glob('*.wav'))
@@ -217,4 +228,5 @@ class ASRClipCollector:
         return {'enabled': self.enabled, 'dir': str(self.dir), 'clips_on_disk': len(wavs),
                 'bytes_on_disk': size, 'budget_bytes': self.budget_bytes,
                 'saved_this_run': dict(self.saved), 'evicted': self.evicted,
+                'random_interval_s': self.random_interval_s,
                 'pending': len(self._pending), 'last_error': self.last_error}

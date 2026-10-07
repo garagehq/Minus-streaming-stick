@@ -95,6 +95,17 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     for names the ASR missed, plus random speech every 5 min. Saved to
     `screenshots/asr_clips`, 2 GB budget. The audio tap ring is now 30s
     (`AudioASRTap.recent_samples`).
+  - *Clip farm* (`tools/clip_farm.py`, systemd `minus-clipfarm`):
+    - Searches YouTube for captioned LeBron videos and plays them on the
+      Google TV over ADB.
+    - Logs video position vs monotonic clock (`~/clip_farm/playlog`).
+    - `tools/label_clips.py` then labels each clip from the caption
+      track and writes `~/asr_dataset/manifest.jsonl` (NeMo format,
+      trimmed WAVs, 2.5 GB cap).
+    - `label_clips.HELD_OUT` keeps every evaluation video out of
+      training.
+    - Clip sidecars carry `clip_start_mono`. The random-clip rate is set
+      at runtime via `POST /api/name-mute/clips`.
 - **NVIDIA Parakeet: tried, not adopted (2026-10-06).** sherpa-onnx int8 on
   the 3 pinned CPU cores, 3s windows, NBA commentary clip:
   TDT 0.6B v2 96% name recall (25/26 caption mentions, plus a real

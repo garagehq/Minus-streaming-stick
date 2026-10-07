@@ -2689,6 +2689,22 @@ class WebUI:
             st['training_clips'] = clips.get_status() if clips is not None else None
             return jsonify(st)
 
+        @self.app.route('/api/name-mute/clips', methods=['POST'])
+        def api_name_mute_clips():
+            """Training-clip collector settings. Body: {"random_interval_s": N}
+            (0 disables random clips). Not persisted: a restart returns to
+            MINUS_ASR_CLIPS_RANDOM_S."""
+            clips = getattr(self.minus, 'asr_clips', None)
+            if clips is None:
+                return jsonify({'success': False, 'error': 'clip collector not running'}), 404
+            data = request.get_json(silent=True) or {}
+            if 'random_interval_s' in data:
+                try:
+                    clips.set_random_interval(float(data['random_interval_s']))
+                except (TypeError, ValueError):
+                    return jsonify({'success': False, 'error': 'random_interval_s must be a number'}), 400
+            return jsonify({'success': True, **clips.get_status()})
+
         @self.app.route('/api/name-mute/log', methods=['GET'])
         def api_name_mute_log():
             """Every detection with capture/playback times (time.monotonic()).
