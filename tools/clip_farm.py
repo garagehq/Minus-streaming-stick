@@ -254,17 +254,24 @@ def play(dev_box, ip, item, last_label):
     """Play one video until it ends; returns (status, seconds, last_label)."""
     vid, duration = item['id'], item['duration']
     dev = dev_box[0]
+    t_launch = time.monotonic()
     dev.shell(f"am start -a android.intent.action.VIEW -d "
               f"'https://www.youtube.com/watch?v={vid}&t=0s' com.google.android.youtube.tv")
     set_random_interval(RANDOM_INTERVAL_S)
     t_start = time.monotonic()
     playlog({'type': 'start', 'video': vid, 't': t_start, 'wall': time.time()})
 
+    def fresh(x):
+        # The previous video's session keeps reporting PLAYING for a moment;
+        # only trust a session whose last state change came after the launch.
+        return x and x['updated'] >= x['device_uptime'] - (x['board_mid'] - t_launch) - 0.5
+
     first = None
     while time.monotonic() - t_start < 90 and not _stop:      # pre-roll ads, loading
         first = best_sync(dev, n=3)
-        if first:
+        if fresh(first):
             break
+        first = None
         time.sleep(5)
     if not first:
         return 'never_playing', 0, last_label
