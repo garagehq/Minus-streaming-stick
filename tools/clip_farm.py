@@ -46,6 +46,7 @@ ADBKEY = os.environ.get('ADBKEY', '/root/.android/adbkey')
 SYNC_EVERY_S = 5.0
 AD_DROP_S = 10          # position this far behind the furthest seen: ad or new video
 AD_MAX_S = 240          # ...and still behind after this long: autoplay moved on
+END_SLACK_S = 20        # a drop this close to the end is the video ending
 PREROLL_S = 180         # a drop this early is the pre-roll ad giving way to the video
 RANDOM_INTERVAL_S = float(os.environ.get('CLIP_FARM_RANDOM_S', '20'))
 LABEL_EVERY_S = 600
@@ -311,6 +312,9 @@ def play(dev_box, ip, item, last_label):
             if pos < max_pos - AD_DROP_S:
                 # A mid-roll ad (content resumes where it paused) or autoplay
                 # moved on to another video (it never comes back).
+                if max_pos >= duration - END_SLACK_S:
+                    status = 'ended'           # autoplay right after the end; syncs can miss the last seconds
+                    break
                 dropped_at = dropped_at or now
                 if now - dropped_at > AD_MAX_S:
                     status = 'next_video'
