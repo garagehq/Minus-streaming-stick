@@ -31,7 +31,7 @@ from pathlib import Path
 CLIPS_DIR = Path(os.environ.get('MINUS_ASR_CLIPS_DIR', '/home/radxa/Minus/screenshots/asr_clips'))
 FARM_DIR = Path(os.environ.get('CLIP_FARM_DIR', '/home/radxa/clip_farm'))
 DATASET_DIR = Path(os.environ.get('ASR_DATASET_DIR', '/home/radxa/asr_dataset'))
-DATASET_MAX_BYTES = int(float(os.environ.get('ASR_DATASET_MAX_MB', '2500')) * 1e6)
+DATASET_MAX_BYTES = int(float(os.environ.get('ASR_DATASET_MAX_MB', '10000')) * 1e6)
 
 SR = 16000
 SYNC_AGREE_S = 0.3      # consecutive syncs this close are one steady stretch

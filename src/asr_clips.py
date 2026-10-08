@@ -15,7 +15,7 @@ during the clip, with times relative to the clip start. Text labels come
 later, offline (captions where present, or a larger teacher model).
 
 Clips live in screenshots/asr_clips/ under a byte budget (oldest evicted).
-Env: MINUS_ASR_CLIPS=0 disables; MINUS_ASR_CLIPS_BUDGET_MB (2048);
+Env: MINUS_ASR_CLIPS=0 disables; MINUS_ASR_CLIPS_BUDGET_MB (10000);
 MINUS_ASR_CLIPS_RANDOM_S (300, 0 disables random clips).
 """
 import collections
@@ -46,7 +46,7 @@ class ASRClipCollector:
         self.engine = engine
         self._delay_fn = delay_fn
         self.enabled = os.environ.get('MINUS_ASR_CLIPS', '1') != '0'
-        self.budget_bytes = int(float(os.environ.get('MINUS_ASR_CLIPS_BUDGET_MB', '2048')) * 1e6)
+        self.budget_bytes = int(float(os.environ.get('MINUS_ASR_CLIPS_BUDGET_MB', '10000')) * 1e6)
         self.random_interval_s = float(os.environ.get('MINUS_ASR_CLIPS_RANDOM_S', '300'))
         self._lock = threading.Lock()
         self._asr = collections.deque()       # (window_start_mono, transcript, words)

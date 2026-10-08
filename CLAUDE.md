@@ -93,7 +93,7 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   - *Training clips* (`src/asr_clips.py`, `MINUS_ASR_CLIPS`): 10s WAV +
     JSON (ASR windows, OCR lines) around every detection, `caption_only`
     for names the ASR missed, plus random speech every 5 min. Saved to
-    `screenshots/asr_clips`, 2 GB budget. The audio tap ring is now 30s
+    `screenshots/asr_clips`, 10 GB budget. The audio tap ring is now 30s
     (`AudioASRTap.recent_samples`).
   - *Clip farm* (`tools/clip_farm.py`, systemd `minus-clipfarm`):
     - Searches YouTube for captioned LeBron videos and plays them on the
@@ -101,7 +101,7 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     - Logs video position vs monotonic clock (`~/clip_farm/playlog`).
     - `tools/label_clips.py` then labels each clip from the caption
       track and writes `~/asr_dataset/manifest.jsonl` (NeMo format,
-      trimmed WAVs, 2.5 GB cap). A label is kept only if >=45% of its
+      trimmed WAVs, 10 GB cap). A label is kept only if >=45% of its
       words appear in Minus's own ASR for that clip (rejects autoplay/ad
       mislabels). End/autoplay detection uses the extrapolated position.
     - `label_clips.HELD_OUT` keeps every evaluation video out of

@@ -325,8 +325,8 @@ distinct OCR screen during the clip, all relative to the clip start.
 That's enough to label clips later from captions where present, or with
 a larger teacher model (Parakeet 0.6B, 96% offline recall).
 
-* Clips are ~330 KB each. The budget is 2 GB (`MINUS_ASR_CLIPS_BUDGET_MB`),
-  about 6,000 clips, oldest evicted first.
+* Clips are ~330 KB each. The budget is 10 GB (`MINUS_ASR_CLIPS_BUDGET_MB`),
+  about 30,000 clips, oldest evicted first.
 * The audio tap's ring buffer grew from 8 s to 30 s to hold the context.
 * `GET /api/name-mute` reports the clip count under `training_clips`.
   `POST /api/name-mute/clips {"random_interval_s": N}` changes the
@@ -378,11 +378,12 @@ into a labelled dataset with no manual work:
   video used to evaluate the muter: videos A and B, the
   `roku_lebron.py` list, and the false-mute videos. The farm never queues
   them, and the labeler rejects their clips.
-* **Size cap.** The dataset stops at 2.5 GB (`ASR_DATASET_MAX_MB`), and the
-  farm then stops playing. Raw clips have their own 2 GB budget.
+* **Size cap.** The dataset stops at 10 GB (`ASR_DATASET_MAX_MB`; 2.5 GB until 2026-10-08), and the
+  farm then stops playing. Raw clips have their own 10 GB budget.
 * **Rate.** A 6.5 min smoke test labelled 23 clips (~1 every 17 s, about
-  0.5 h of labelled audio per hour). At that rate the 2.5 GB cap is about
-  2 days.
+  0.5 h of labelled audio per hour). Over the first ~23 h of farming the
+  dataset grew ~60 MB/h (12.1 h of audio, 1.4 GB), so the 10 GB cap is
+  about 6 days of farming.
 * **Label check.** SenseVoice re-transcribing the 23 trimmed clips matched
   the caption label with a mean word overlap of 0.80 (min 0.45). The
   mismatches are ASR or auto-caption errors, not misalignment: "oak hill"
