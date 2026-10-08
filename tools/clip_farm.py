@@ -47,6 +47,7 @@ SYNC_EVERY_S = 5.0
 AD_DROP_S = 10          # position this far behind the furthest seen: ad or new video
 AD_MAX_S = 240          # ...and still behind after this long: autoplay moved on
 END_SLACK_S = 20        # a drop this close to the end is the video ending
+START_WAIT_S = 30       # every video that played reported PLAYING within ~6 s; Restricted Mode blocks never do
 PREROLL_S = 180         # a drop this early is the pre-roll ad giving way to the video
 RANDOM_INTERVAL_S = float(os.environ.get('CLIP_FARM_RANDOM_S', '20'))
 LABEL_EVERY_S = 600
@@ -268,7 +269,7 @@ def play(dev_box, ip, item, last_label):
         return x and x['updated'] >= x['device_uptime'] - (x['board_mid'] - t_launch) - 0.5
 
     first = None
-    while time.monotonic() - t_start < 90 and not _stop:      # pre-roll ads, loading
+    while time.monotonic() - t_start < START_WAIT_S and not _stop:   # loading; blocked videos never start
         first = best_sync(dev, n=3)
         if fresh(first):
             break
