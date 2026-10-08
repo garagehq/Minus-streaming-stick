@@ -44,6 +44,9 @@ MINUS = os.environ.get('MINUS_URL', 'http://localhost')
 ADBKEY = os.environ.get('ADBKEY', '/root/.android/adbkey')
 
 SYNC_EVERY_S = 5.0
+AD_DROP_S = 10          # position this far behind the furthest seen: ad or new video
+AD_MAX_S = 240          # ...and still behind after this long: autoplay moved on
+PREROLL_S = 180         # a drop this early is the pre-roll ad giving way to the video
 RANDOM_INTERVAL_S = float(os.environ.get('CLIP_FARM_RANDOM_S', '20'))
 LABEL_EVERY_S = 600
 MAX_PER_VIDEO_S = float(os.environ.get('CLIP_FARM_MAX_PER_VIDEO_S', '2400'))
@@ -266,8 +269,13 @@ def play(dev_box, ip, item, last_label):
     if not first:
         return 'never_playing', 0, last_label
 
+    # Media-session 'position' is the position at 'updated' (the last state
+    # change), so it barely moves while playing; extrapolate to the sync time.
+    def cur(x):
+        return label_clips.vpos(x, x['board_mid'])
+
     heard = False
-    max_pos, last_playing = first['position'], time.monotonic()
+    max_pos, last_playing, dropped_at = cur(first), time.monotonic(), None
     playlog({'type': 'sync', 'video': vid, **first})
     while not _stop:
         now = time.monotonic()
@@ -290,14 +298,23 @@ def play(dev_box, ip, item, last_label):
             continue
         if s:
             last_playing = now
-            if s['position'] < max_pos - 30:
-                status = 'next_video'      # autoplay moved on
-                break
-            max_pos = max(max_pos, s['position'])
-            playlog({'type': 'sync', 'video': vid, **s})
-            if s['position'] >= duration - 3:
-                status = 'ended'
-                break
+            pos = cur(s)
+            if pos < max_pos - AD_DROP_S and now - t_start < PREROLL_S:
+                max_pos = pos                  # pre-roll ad over; the video starts
+            if pos < max_pos - AD_DROP_S:
+                # A mid-roll ad (content resumes where it paused) or autoplay
+                # moved on to another video (it never comes back).
+                dropped_at = dropped_at or now
+                if now - dropped_at > AD_MAX_S:
+                    status = 'next_video'
+                    break
+            else:
+                dropped_at = None
+                max_pos = max(max_pos, pos)
+                playlog({'type': 'sync', 'video': vid, **s})
+                if pos >= duration - 3:
+                    status = 'ended'
+                    break
         elif now - last_playing > 90:
             status = 'stopped'             # ended screen, error, or long ad
             break

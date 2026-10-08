@@ -14,7 +14,8 @@ monotonic time of its first sample. This script joins the two:
 Output (DATASET_DIR, default /home/radxa/asr_dataset):
   wavs/<clip>.wav     16 kHz mono, trimmed to the labelled words
   manifest.jsonl      {"audio_filepath", "duration", "text", "text_raw",
-                       "video_id", "video_start", "kind", "has_name"}
+                       "video_id", "video_start", "kind", "asr_overlap",
+                       "has_name"}
   labeled.txt         clip names already processed (labelled or rejected)
 
 usage: python3 tools/label_clips.py [CLIPS_DIR] [FARM_DIR] [DATASET_DIR]
@@ -38,6 +39,10 @@ MAX_SYNC_GAP_S = 20.0   # a stretch breaks if syncs are further apart than this
 EDGE_MARGIN_S = 0.1     # words must lie this far inside the clip
 LEAD_S, TAIL_S = 0.15, 0.25   # audio kept around the labelled words
 MIN_WORDS, MIN_SPAN_S = 3, 1.5
+# Share of label words that Minus's own ASR also heard somewhere in the clip.
+# Correct labels score ~0.7-0.9; labels from the wrong video (autoplay, an ad,
+# a resumed position) score ~0-0.3. Clips with no ASR text are rejected too.
+MIN_ASR_OVERLAP = float(os.environ.get('ASR_LABEL_MIN_OVERLAP', '0.45'))
 NAME_RE = re.compile(r"\blebron\b|\bking\b(?!s)", re.I)
 
 # Videos used to evaluate the muter (docs/ASR_BENCHMARKS.md, tools/roku_lebron.py
@@ -154,6 +159,17 @@ def normalize(text):
     return re.sub(r'\s+', ' ', t).strip()
 
 
+def asr_overlap(meta, text):
+    """Fraction of label words found in the clip's ASR windows (None if no ASR text)."""
+    heard = set()
+    for w in meta.get('asr_windows') or []:
+        heard |= set(normalize(w.get('text', '')).split())
+    words = text.split()
+    if not heard or not words:
+        return None
+    return sum(w in heard for w in words) / len(words)
+
+
 def dataset_bytes(ds: Path):
     return sum(f.stat().st_size for f in (ds / 'wavs').glob('*.wav')) if (ds / 'wavs').exists() else 0
 
@@ -205,6 +221,11 @@ def label_all(clips_dir=CLIPS_DIR, farm_dir=FARM_DIR, ds=DATASET_DIR, log=print)
             if len(ws) < MIN_WORDS or ws[-1][2] - ws[0][1] < MIN_SPAN_S:
                 stats['rejected'] += 1
                 continue
+            raw = ' '.join(x[0] for x in ws)
+            ov = asr_overlap(meta, normalize(raw))
+            if ov is None or ov < MIN_ASR_OVERLAP:
+                stats['rejected'] += 1         # label doesn't match what was playing
+                continue
             if size >= DATASET_MAX_BYTES:
                 stats['full'] = True
                 new_done.pop()              # retry once space is freed
@@ -223,12 +244,11 @@ def label_all(clips_dir=CLIPS_DIR, farm_dir=FARM_DIR, ds=DATASET_DIR, log=print)
             if os.geteuid() == 0:
                 os.chown(out, 1000, 1000)      # the farm runs as root; data is radxa's
             size += out.stat().st_size
-            raw = ' '.join(x[0] for x in ws)
             man.write(json.dumps({
                 'audio_filepath': str(out), 'duration': round(b - a, 3),
                 'text': normalize(raw), 'text_raw': raw, 'video_id': vid,
                 'video_start': round(v0 + a, 3), 'kind': meta.get('kind'),
-                'has_name': bool(NAME_RE.search(raw))}) + '\n')
+                'asr_overlap': round(ov, 2), 'has_name': bool(NAME_RE.search(raw))}) + '\n')
             stats['labeled'] += 1
     if new_done:
         with open(done_file, 'a') as fh:

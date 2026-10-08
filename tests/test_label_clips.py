@@ -99,14 +99,17 @@ class TestLabelAll(unittest.TestCase):
                  enumerate('and a strong move by lebron james to the rim'.split())]
         write_json3(self.farm / 'captions' / 'vid1.json3', words)
 
-    def clip(self, name, start_mono, kind='random', seconds=10.0):
+    HEARD = 'and a strong move by lebron james to the rim'
+
+    def clip(self, name, start_mono, kind='random', seconds=10.0, heard=HEARD):
         n = int(seconds * SR)
         ramp = (np.arange(n) % 20000).astype(np.int16)
         with wave.open(str(self.clips / f'{name}.wav'), 'wb') as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
             w.writeframes(ramp.tobytes())
         (self.clips / f'{name}.json').write_text(json.dumps(
-            {'kind': kind, 'duration_s': seconds, 'clip_start_mono': start_mono}))
+            {'kind': kind, 'duration_s': seconds, 'clip_start_mono': start_mono,
+             'asr_windows': [{'t': 0.0, 'text': heard}] if heard else []}))
 
     def run_label(self):
         return lc.label_all(self.clips, self.farm, self.ds, log=lambda *_: None)
@@ -158,6 +161,23 @@ class TestLabelAll(unittest.TestCase):
         st = self.run_label()
         self.assertEqual(st['labeled'], 0)
         self.assertEqual(st['rejected'], 1)
+
+    def test_label_not_matching_asr_rejected(self):
+        # Wrong video on screen (autoplay, ad): ASR heard something else.
+        self.clip('c6', 1018.0, heard='welcome back to the show folks')
+        st = self.run_label()
+        self.assertEqual((st['labeled'], st['rejected']), (0, 1))
+
+    def test_clip_without_asr_text_rejected(self):
+        self.clip('c7', 1018.0, heard='')
+        self.assertEqual(self.run_label()['rejected'], 1)
+
+    def test_partial_asr_agreement_kept(self):
+        # ASR misheard the name but got most words: still a good label.
+        self.clip('c8', 1018.0, heard='and a strong move by le bron james to rim')
+        self.assertEqual(self.run_label()['labeled'], 1)
+        row = json.loads((self.ds / 'manifest.jsonl').read_text())
+        self.assertGreaterEqual(row['asr_overlap'], lc.MIN_ASR_OVERLAP)
 
     def test_summary(self):
         self.clip('c1', 1018.0)

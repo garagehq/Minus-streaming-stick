@@ -345,7 +345,11 @@ into a labelled dataset with no manual work:
 2. **Play them** on the Google TV over ADB. A video is skipped if it never
    reaches PLAYING (Restricted Mode, region lock) or the ASR hears
    nothing for 75 s. It moves on when the video ends, autoplay switches
-   videos, or after 40 min.
+   videos, or after 40 min. The media session's `position` is the position
+   at its last state change, so end and autoplay detection use the position
+   extrapolated to the sync time. A drop of more than 10 s is treated as an
+   ad until it has lasted 4 min (ad breaks of 165 s were seen), then as
+   autoplay; a drop in the first 3 min is the pre-roll ad ending.
 3. **Log the position.** Every 5 s, video position vs the box's monotonic
    clock goes to `~/clip_farm/playlog/`. The farm also sets random clips to
    every 20 s, because with a caption track every clip is labelable.
@@ -356,7 +360,11 @@ into a labelled dataset with no manual work:
    * the audio is trimmed to those words plus 0.15 s / 0.25 s, and a line
      goes into `~/asr_dataset/manifest.jsonl` (NeMo format:
      `audio_filepath`, `duration`, `text`, plus `text_raw`, `video_id`,
-     `has_name`).
+     `asr_overlap`, `has_name`);
+   * **ASR agreement gate:** at least 45% of the label's words must appear in
+     what Minus's own ASR heard in that clip (`ASR_LABEL_MIN_OVERLAP`).
+     Correct labels score 0.7–0.9; labels from whatever autoplay, an ad or
+     a resumed position put on screen score 0–0.3.
 
 * **Held-out videos are never used.** `label_clips.HELD_OUT` lists every
   video used to evaluate the muter: videos A and B, the
@@ -374,6 +382,15 @@ into a labelled dataset with no manual work:
   "dished the rug bribed". YouTube auto-captions are a noisy label; a
   teacher pass (Parakeet 0.6B) can filter low-agreement clips before
   training.
+
+**First night (2026-10-07, 3.3 h):** the first version compared the raw
+`position` (stale between state changes) so it never saw a video end, and
+autoplay content was labelled with the queued video's captions. In the
+manifest this showed up as overlap dropping from ~0.9 to ~0.1 exactly where
+each video ended (e.g. a 7-min video credited with 99 clips). The gate
+removed 169 of 627 rows; 458 clips (1.18 h, 230 with the name, 7 videos)
+remain, and the per-video counts now match each video's real length.
+The pre-purge manifest is kept as `manifest.before_purge.jsonl`.
 
 Controls:
 

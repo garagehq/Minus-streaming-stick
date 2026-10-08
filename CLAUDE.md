@@ -101,7 +101,9 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     - Logs video position vs monotonic clock (`~/clip_farm/playlog`).
     - `tools/label_clips.py` then labels each clip from the caption
       track and writes `~/asr_dataset/manifest.jsonl` (NeMo format,
-      trimmed WAVs, 2.5 GB cap).
+      trimmed WAVs, 2.5 GB cap). A label is kept only if >=45% of its
+      words appear in Minus's own ASR for that clip (rejects autoplay/ad
+      mislabels). End/autoplay detection uses the extrapolated position.
     - `label_clips.HELD_OUT` keeps every evaluation video out of
       training.
     - Clip sidecars carry `clip_start_mono`. The random-clip rate is set
