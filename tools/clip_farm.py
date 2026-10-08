@@ -404,6 +404,8 @@ def main():
             status, secs, last_label = play(dev_box, args.ip, item, last_label)
             log(f"{item['id']}: {status} after {secs}s")
             st['played'][item['id']] = {'status': status, 'secs': secs, 'when': time.time()}
+            if status == 'interrupted' and secs < 60 and not args.once:
+                st['queue'].insert(0, item)    # stopped right at its start: play it next run
             save_state(st)
             if args.once:
                 break
