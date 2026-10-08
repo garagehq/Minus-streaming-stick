@@ -276,7 +276,7 @@ def play(dev_box, ip, item, last_label):
         first = None
         time.sleep(5)
     if not first:
-        return 'never_playing', 0, last_label
+        return ('interrupted' if _stop else 'never_playing'), 0, last_label
 
     # Media-session 'position' is the position at 'updated' (the last state
     # change), so it barely moves while playing; extrapolate to the sync time.
