@@ -44,6 +44,8 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
+import output_recorder
+
 logger = logging.getLogger(__name__)
 
 # Timeout for GStreamer state changes (in nanoseconds)
@@ -374,7 +376,7 @@ class AudioPassthrough:
                 f"queue max-size-buffers=10 max-size-time=100000000 leaky=downstream name=audioqueue ! "
                 f"audioconvert ! "
                 f"volume name=vol volume=1.0 mute=false ! "
-                f"{sink}"
+                f"{output_recorder.tee_chain(sink)}"
             )
             if self.asr_tap is not None:
                 # ASR tap branch is leaky: if the ASR worker falls behind, the
@@ -412,6 +414,8 @@ class AudioPassthrough:
 
             logger.debug(f"[AudioPassthrough] Creating pipeline: {pipeline_str}")
             self.pipeline = Gst.parse_launch(pipeline_str)
+            if output_recorder.recorder():
+                output_recorder.recorder().attach(self.pipeline)
 
             # Get volume element for mute control
             self.volume = self.pipeline.get_by_name('vol')

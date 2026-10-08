@@ -95,6 +95,14 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     for names the ASR missed, plus random speech every 5 min. Saved to
     `screenshots/asr_clips`, 10 GB budget. The audio tap ring is now 30s
     (`AudioASRTap.recent_samples`).
+  - *Demo recordings* (2026-10-08): `MINUS_RECORD_OUTPUT_DIR` makes the
+    audio pipeline tee the output (after the delay + mute) to raw files
+    with monotonic timestamps (`src/output_recorder.py`; its appsink must
+    be async=false). `tools/demo_take.py` (root, ADB) plays a segment and
+    captures the live MJPEG stream + state; `tools/demo_compose.py` renders
+    the delayed picture + recorded audio + overlays. Before/after clips
+    (Oct 5 code 62531eb, Moonshine CPU 5s vs SenseVoice NPU 3s) are in
+    `~/minus_demo/videos`.
   - *Clip farm* (`tools/clip_farm.py`, systemd `minus-clipfarm`):
     - Searches YouTube for captioned LeBron videos and plays them on the
       Google TV over ADB.
