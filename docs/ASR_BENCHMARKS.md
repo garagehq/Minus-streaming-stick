@@ -350,6 +350,14 @@ into a labelled dataset with no manual work:
    extrapolated to the sync time. A drop of more than 10 s is treated as an
    ad until it has lasted 4 min (ad breaks of 165 s were seen), then as
    autoplay; a drop in the first 3 min is the pre-roll ad ending.
+   Some long ads report the *content's* position, so position alone can't
+   see them (a 2003 Jam Fest video played a 10-min Scotland travel ad).
+   Every minute the farm compares the content words (4+ letters) Minus's
+   ASR heard with the caption words at that position; normal videos score
+   ~0.6-0.8, wrong audio ~0.05. Five low minutes in a row (<0.15) ends the
+   video as `mismatch`. Replayed on 77 videos it fires only on the two that
+   really played other audio; a 3-min insurance ad that then gave way to
+   the show peaks at 3 low minutes.
 3. **Log the position.** Every 5 s, video position vs the box's monotonic
    clock goes to `~/clip_farm/playlog/`. The farm also sets random clips to
    every 20 s, because with a caption track every clip is labelable.

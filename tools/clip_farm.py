@@ -48,6 +48,9 @@ AD_DROP_S = 10          # position this far behind the furthest seen: ad or new 
 AD_MAX_S = 240          # ...and still behind after this long: autoplay moved on
 END_SLACK_S = 20        # a drop this close to the end is the video ending
 START_WAIT_S = 30       # every video that played reported PLAYING within ~6 s; Restricted Mode blocks never do
+MISMATCH_EVERY_S = 60   # how often ASR is compared with the captions at the current position
+MISMATCH_MAX = 0.15     # share of heard words found in the captions; normal videos ~0.6-0.8
+MISMATCH_RUNS = 5       # this many low checks in a row: something else is playing (ads run up to ~3 min)
 PREROLL_S = 180         # a drop this early is the pre-roll ad giving way to the video
 RANDOM_INTERVAL_S = float(os.environ.get('CLIP_FARM_RANDOM_S', '20'))
 LABEL_EVERY_S = 600
@@ -245,6 +248,16 @@ def best_sync(dev, n=3):
     return min(s, key=lambda x: x['rtt']) if s else None
 
 
+def caption_match(heard, captions):
+    """Share of the content words ASR heard that appear in `captions`
+    (caption words near the current position). None if too little was heard."""
+    words = {w for t in heard for w in label_clips.normalize(t).split() if len(w) >= 4}
+    if len(words) < 6:
+        return None
+    cap = {label_clips.normalize(w) for w in captions}
+    return len(words & cap) / len(words)
+
+
 def playlog(rec):
     d = FARM_DIR / 'playlog'
     d.mkdir(parents=True, exist_ok=True)
@@ -286,6 +299,8 @@ def play(dev_box, ip, item, last_label):
 
     heard = False
     max_pos, last_playing, dropped_at = cur(first), time.monotonic(), None
+    cap_words = label_clips.caption_words(FARM_DIR, vid)
+    window, last_check, low_runs = [], time.monotonic(), 0   # [(pos, transcript)]
     playlog({'type': 'sync', 'video': vid, **first})
     while not _stop:
         now = time.monotonic()
@@ -325,6 +340,17 @@ def play(dev_box, ip, item, last_label):
                 dropped_at = None
                 max_pos = max(max_pos, pos)
                 playlog({'type': 'sync', 'video': vid, **s})
+                window.append((pos, asr_transcript()))
+                if cap_words and now - last_check >= MISMATCH_EVERY_S:
+                    lo, hi = min(p for p, _ in window) - 15, max(p for p, _ in window) + 5
+                    m = caption_match([t for _, t in window],
+                                      [w for w, a, _ in cap_words if lo <= a <= hi])
+                    window, last_check = [], now
+                    if m is not None:
+                        low_runs = low_runs + 1 if m < MISMATCH_MAX else 0
+                        if low_runs >= MISMATCH_RUNS:
+                            status = 'mismatch'    # audio isn't this video (long ad, wrong video)
+                            break
                 if pos >= duration - 3:
                     status = 'ended'
                     break
