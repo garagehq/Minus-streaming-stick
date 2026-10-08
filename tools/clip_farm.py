@@ -265,8 +265,9 @@ def play(dev_box, ip, item, last_label):
 
     def fresh(x):
         # The previous video's session keeps reporting PLAYING for a moment;
-        # only trust a session whose last state change came after the launch.
-        return x and x['updated'] >= x['device_uptime'] - (x['board_mid'] - t_launch) - 0.5
+        # only trust a session whose last state change came >1 s after the launch
+        # (a video takes ~5 s to start; the old one can change state at launch).
+        return x and x['updated'] >= x['device_uptime'] - (x['board_mid'] - t_launch) + 1.0
 
     first = None
     while time.monotonic() - t_start < START_WAIT_S and not _stop:   # loading; blocked videos never start
