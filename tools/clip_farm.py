@@ -409,6 +409,15 @@ def main():
 
     (FARM_DIR / 'captions').mkdir(parents=True, exist_ok=True)
     st = load_state()
+    # Started alongside minus.service (boot, restarts): its API takes ~30 s.
+    for _ in range(60):
+        try:
+            api('/api/status', timeout=3)
+            break
+        except Exception:
+            if _stop:
+                return
+            time.sleep(5)
     try:
         api('/api/asr/enable', {})
     except Exception as e:
