@@ -777,6 +777,10 @@ class Minus:
         self.static_ocr_count = 0         # OCR iterations without scene change
         self.static_blocking_suppressed = False  # Currently suppressing due to static
         self.screen_became_dynamic_time = 0      # When screen went from static to dynamic
+        # Set when the screen resumes after a static period while a block is
+        # active. That block was judged on the paused frame, so the next
+        # _update_blocking_state ends it instead of holding it on new content.
+        self._static_resume_release = False
 
         # Strong-ad-signal override for static suppression. Some video ads
         # (Michelob "Skip MI 15", graphic banner ads, etc.) have so little
@@ -3668,6 +3672,17 @@ class Minus:
                         "(stream frozen on ad frame; awaiting scene change)")
                     should_start = False
 
+                # Never start a block while static suppression is on. The
+                # overlay would be hidden anyway, but ad_detected would latch
+                # on the paused ad's evidence and the block would surface on
+                # the real content once the screen resumed. Observed live: a
+                # block started the instant the frozen-stream guard cleared,
+                # on the first frame of the show, and held it for 6s. A strong
+                # keyword lifts suppression in the OCR loop before we get
+                # here, so real low-motion video ads still block.
+                if should_start and self.static_blocking_suppressed:
+                    should_start = False
+
                 if should_start:
                     self.ad_detected = True
                     self.blocking_start_time = now
@@ -3735,6 +3750,18 @@ class Minus:
 
                 min_duration = self._current_min_blocking_duration()
 
+                # Screen resumed after a static period: this block's evidence
+                # came from the paused frame, not what is on screen now. End
+                # it outright; if the ad really is still playing, fresh
+                # detection starts a new block within a frame or two.
+                release_stale = getattr(self, '_static_resume_release', False)
+                self._static_resume_release = False
+                if release_stale:
+                    logger.info(
+                        f"[Static] Screen resumed — ending {self.blocking_source} "
+                        f"block held from the static period (stale evidence)")
+                    should_stop = True
+
                 # The ad's own countdown outranks every detector, not just
                 # OCR. Observed live: an ad flapped through 6 blocks in 27s
                 # and every one ended "stopped by BOTH" -- VLM was ending
@@ -3743,10 +3770,12 @@ class Minus:
                 # should end the block. Same guards as before: corroborated
                 # readings only, expires, and a frozen clock (a pause) never
                 # holds.
-                if self._ad_clock_says_playing(now):
+                if not release_stale and self._ad_clock_says_playing(now):
                     return
 
-                if blocking_elapsed >= min_duration:
+                if release_stale:
+                    pass
+                elif blocking_elapsed >= min_duration:
                     ocr_says_stop = self._ocr_says_stop()
                     # For VLM stopping, use consecutive no-ad count (not sliding window)
                     # This ensures responsive stopping after ad ends
@@ -4172,7 +4201,7 @@ class Minus:
                         # had no effect.
                         had_state = (
                             self.ocr_ad_detected or self.vlm_ad_detected or
-                            self.ocr_ad_detection_count > 0
+                            self.ocr_ad_detection_count > 0 or self.ad_detected
                         )
                         if had_state:
                             logger.info(
@@ -4186,6 +4215,11 @@ class Minus:
                             self.vlm_ad_detected = False
                             self.vlm_no_ad_count = 0
                             self.vlm_decision_history.clear()  # Clear VLM sliding window
+                            # A block still active here was held over from the
+                            # static period; end it rather than show it on
+                            # the resumed content.
+                            if self.ad_detected:
+                                self._static_resume_release = True
                             self._update_blocking_state()  # Update combined state
                 elif not self.static_blocking_suppressed:
                     # Normal state - not suppressed and not in cooldown
