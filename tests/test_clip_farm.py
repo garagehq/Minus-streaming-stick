@@ -32,5 +32,32 @@ class TestCaptionMatch(unittest.TestCase):
         self.assertEqual(cf.caption_match(heard, CAPTIONS), 0.0)
 
 
+class TestNicknames(unittest.TestCase):
+    def test_find_nicknames(self):
+        lc = cf.label_clips
+        self.assertEqual(lc.find_nicknames("L.B.J. -- the Chosen One, Bron-Bron!"),
+                         ['bron bron', 'chosen one', 'lbj'])
+        self.assertEqual(lc.find_nicknames("the Kings and the king, brain train"), [])
+
+    def test_nickname_hits_give_caption_time(self):
+        words = [('and', 4.0, 4.2), ('Captain', 5.0, 5.4), ('LeMerica', 5.4, 6.0), ('L-Train', 9.0, 9.5)]
+        self.assertEqual(cf.label_clips.nickname_hits(words),
+                         [('captain lemerica', 5.0), ('l train', 9.0)])
+
+    def test_request_window(self):
+        sent = []
+        orig = cf.api
+        cf.api = lambda path, body=None, timeout=5: sent.append(body)
+        try:
+            hits = [('lbj', 10.0), ('chosen one', 30.0), ('king james', 60.0)]
+            nxt = cf.request_nickname_clips('vid', hits, 5.0, 35.0, 1000.0)
+        finally:
+            cf.api = orig
+        self.assertEqual(nxt, 35.0)
+        # 10.0 is 25 s back (outside the tap buffer); 60.0 hasn't played yet.
+        self.assertEqual([round(b['clip_at'], 1) for b in sent], [995.0])
+        self.assertIn('chosen one', sent[0]['label'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -8,7 +8,10 @@ sidecar, for fine-tuning the ASR on TV/sports commentary later:
   * caption mentions the ASR did not catch: kind "caption_only", the most
     useful examples, because the ASR missed a name the captions confirm;
   * a random clip every RANDOM_INTERVAL_S of non-silent audio, so the
-    dataset also has ordinary speech.
+    dataset also has ordinary speech;
+  * on request (request_clip, POST /api/name-mute/clips {"clip_at": t}):
+    kind "nickname", used by tools/clip_farm.py when the playing video's
+    captions say a LeBron nickname (kept for later training, not muted).
 
 The sidecar records every ASR window transcript and every OCR line seen
 during the clip, with times relative to the clip start. Text labels come
@@ -93,6 +96,20 @@ class ASRClipCollector:
                                   'due': anchor + self.POST_S + 0.5,
                                   'sources': {src}, 'labels': [[src, label, 0.0]]})
 
+    def request_clip(self, anchor: float, label: str = ''):
+        """Save a clip around capture time `anchor` (time.monotonic())."""
+        if not self.enabled:
+            return
+        with self._lock:
+            for p in self._pending:
+                if p['kind'] != 'random' and abs(p['anchor'] - anchor) < self.MERGE_S:
+                    p['sources'].add('request')
+                    p['labels'].append(['request', label, round(anchor - p['anchor'], 3)])
+                    return
+            self._pending.append({'kind': 'mention', 'anchor': anchor,
+                                  'due': anchor + self.POST_S + 0.5,
+                                  'sources': {'request'}, 'labels': [['request', label, 0.0]]})
+
     # ---- worker ----------------------------------------------------------
 
     def start(self):
@@ -148,11 +165,14 @@ class ASRClipCollector:
             return
         clip_end = clip_start + len(data) / self.tap.SAMPLE_RATE
 
+        srcs = p['sources'] - {'request'}     # a requested clip that is also a mention keeps the mention kind
         if p['kind'] == 'random':
             kind = 'random'
-        elif p['sources'] == {'caption'}:
+        elif not srcs:
+            kind = 'nickname'
+        elif srcs == {'caption'}:
             kind = 'caption_only'     # captions saw the name, the ASR did not
-        elif 'caption' in p['sources']:
+        elif 'caption' in srcs:
             kind = 'both'
         else:
             kind = 'asr'

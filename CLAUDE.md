@@ -116,6 +116,13 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
       training.
     - Clip sidecars carry `clip_start_mono`. The random-clip rate is set
       at runtime via `POST /api/name-mute/clips`.
+    - Nicknames (2026-10-09, low priority, not muted, not searched for):
+      `label_clips.NICKNAMES` (King James, LBJ, kid from Cleveland, Chosen
+      One, Captain LeMerica, Bron-Bron, Benjamin Buckets, L-Train, Akron
+      Hammer, Little Emperor). When the playing video's captions say one,
+      the farm posts `{"clip_at": <capture mono time>}` and Minus saves a
+      `nickname` clip; manifest rows carry `nicknames`, the summary
+      `with_nickname`. ~1 in 5 farmed videos says one ("Chosen One" most).
 - **NVIDIA Parakeet: tried, not adopted (2026-10-06).** sherpa-onnx int8 on
   the 3 pinned CPU cores, 3s windows, NBA commentary clip:
   TDT 0.6B v2 96% name recall (25/26 caption mentions, plus a real

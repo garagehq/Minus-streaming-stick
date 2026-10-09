@@ -90,6 +90,25 @@ class TestASRClipCollector(unittest.TestCase):
         self.assertEqual(meta[0]['kind'], 'both')
         self.assertEqual(len(meta[0]['detections']), 2)
 
+    def test_requested_clip_is_nickname_kind(self):
+        c, d = make()
+        now = time.monotonic()
+        c.request_clip(now - 10, 'chosen one abc@12.0')
+        c._tick(now)
+        meta = entries(d)
+        self.assertEqual(meta[0]['kind'], 'nickname')
+        self.assertEqual(meta[0]['detections'][0][1], 'chosen one abc@12.0')
+
+    def test_requested_clip_merges_into_mention(self):
+        c, d = make()
+        now = time.monotonic()
+        c.on_detection({'source': 'caption', 'label': 'LeBron', 'capture_start': now - 10})
+        c.request_clip(now - 9.5, 'king james')
+        c._tick(now)
+        meta = entries(d)
+        self.assertEqual(len(meta), 1)
+        self.assertEqual(meta[0]['kind'], 'caption_only')
+
     def test_far_apart_detections_are_separate_clips(self):
         c, d = make()
         now = time.monotonic()

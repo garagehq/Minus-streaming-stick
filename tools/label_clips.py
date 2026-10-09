@@ -15,7 +15,7 @@ Output (DATASET_DIR, default /home/radxa/asr_dataset):
   wavs/<clip>.wav     16 kHz mono, trimmed to the labelled words
   manifest.jsonl      {"audio_filepath", "duration", "text", "text_raw",
                        "video_id", "video_start", "kind", "asr_overlap",
-                       "has_name"}
+                       "has_name", "nicknames"}
   labeled.txt         clip names already processed (labelled or rejected)
 
 usage: python3 tools/label_clips.py [CLIPS_DIR] [FARM_DIR] [DATASET_DIR]
@@ -44,6 +44,46 @@ MIN_WORDS, MIN_SPAN_S = 3, 1.5
 # a resumed position) score ~0-0.3. Clips with no ASR text are rejected too.
 MIN_ASR_OVERLAP = float(os.environ.get('ASR_LABEL_MIN_OVERLAP', '0.45'))
 NAME_RE = re.compile(r"\blebron\b|\bking\b(?!s)", re.I)
+# Nicknames kept for possible later training (not muted). Matched on
+# normalize()d text, so hyphens and dots are already spaces.
+NICKNAMES = {
+    'king james': r"king james",
+    'lbj': r"l b j|lbj",
+    'kid from cleveland': r"kid from cleveland",
+    'chosen one': r"chosen one",
+    'captain lemerica': r"captain le ?merica",
+    'bron bron': r"bron ?bron",
+    'benjamin buckets': r"benjamin buckets",
+    'l train': r"l ?train",
+    'akron hammer': r"akron hammer",
+    'little emperor': r"little emperor",
+}
+NICKNAME_RE = re.compile(r"\b(?:" + "|".join(f"(?P<n{k}>{rx})" for k, rx in
+                                             enumerate(NICKNAMES.values())) + r")\b")
+_NICK_KEYS = list(NICKNAMES)
+
+
+def find_nicknames(text):
+    """Nickname keys found in text (normalized first)."""
+    return sorted({_NICK_KEYS[int(m.lastgroup[1:])] for m in NICKNAME_RE.finditer(normalize(text))})
+
+
+def nickname_hits(words):
+    """[(key, start_s)] for nicknames in a caption word list [(word, start, end)]."""
+    toks = [(normalize(w), s) for w, s, _ in words]
+    text, starts = '', []
+    for t, s in toks:
+        if not t:
+            continue
+        if text:
+            text += ' '
+        starts.append((len(text), s))
+        text += t
+    hits = []
+    for m in NICKNAME_RE.finditer(text):
+        at = max(s for off, s in starts if off <= m.start())
+        hits.append((_NICK_KEYS[int(m.lastgroup[1:])], at))
+    return hits
 
 # Videos used to evaluate the muter (docs/ASR_BENCHMARKS.md, tools/roku_lebron.py
 # held-out runs, false-mute runs). Never train on them, or the benchmarks stop
@@ -248,7 +288,8 @@ def label_all(clips_dir=CLIPS_DIR, farm_dir=FARM_DIR, ds=DATASET_DIR, log=print)
                 'audio_filepath': str(out), 'duration': round(b - a, 3),
                 'text': normalize(raw), 'text_raw': raw, 'video_id': vid,
                 'video_start': round(v0 + a, 3), 'kind': meta.get('kind'),
-                'asr_overlap': round(ov, 2), 'has_name': bool(NAME_RE.search(raw))}) + '\n')
+                'asr_overlap': round(ov, 2), 'has_name': bool(NAME_RE.search(raw)),
+                'nicknames': find_nicknames(raw)}) + '\n')
             stats['labeled'] += 1
     if new_done:
         with open(done_file, 'a') as fh:
@@ -272,6 +313,7 @@ def summary(ds=DATASET_DIR):
         rows = [json.loads(l) for l in fh if l.strip()]
     return {'clips': len(rows), 'hours': round(sum(r['duration'] for r in rows) / 3600, 2),
             'with_name': sum(r['has_name'] for r in rows),
+            'with_nickname': sum(bool(find_nicknames(r['text_raw'])) for r in rows),
             'videos': len({r['video_id'] for r in rows}),
             'bytes': dataset_bytes(ds)}
 

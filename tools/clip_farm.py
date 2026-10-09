@@ -127,6 +127,21 @@ def set_random_interval(seconds):
         log(f"could not set clip interval: {e}")
 
 
+def request_nickname_clips(vid, hits, lo, pos, board_t):
+    """Ask Minus to keep a clip for each caption nickname (label_clips.NICKNAMES)
+    played since the last sync. Not searched for; just kept when they occur.
+    Returns the position checked up to."""
+    for key, p in hits:
+        if lo < p <= pos and pos - p < 20:      # still inside the 30 s tap buffer
+            try:
+                api('/api/name-mute/clips', {'clip_at': board_t - (pos - p),
+                                             'label': f"{key} {vid}@{p:.1f}"})
+                log(f"{vid}: nickname '{key}' at {p:.0f}s, clip requested")
+            except Exception as e:
+                log(f"nickname clip request failed: {e}")
+    return max(lo, pos)
+
+
 def asr_transcript():
     try:
         return api('/api/status')['asr'].get('last_transcript', '') or ''
@@ -300,6 +315,7 @@ def play(dev_box, ip, item, last_label):
     heard = False
     max_pos, last_playing, dropped_at = cur(first), time.monotonic(), None
     cap_words = label_clips.caption_words(FARM_DIR, vid)
+    nick_hits, nick_from = label_clips.nickname_hits(cap_words), cur(first)
     window, last_check, low_runs = [], time.monotonic(), 0   # [(pos, transcript)]
     playlog({'type': 'sync', 'video': vid, **first})
     while not _stop:
@@ -325,7 +341,7 @@ def play(dev_box, ip, item, last_label):
             last_playing = now
             pos = cur(s)
             if pos < max_pos - AD_DROP_S and now - t_start < PREROLL_S:
-                max_pos = pos                  # pre-roll ad over; the video starts
+                max_pos = nick_from = pos      # pre-roll ad over; the video starts
             if pos < max_pos - AD_DROP_S:
                 # A mid-roll ad (content resumes where it paused) or autoplay
                 # moved on to another video (it never comes back).
@@ -340,6 +356,7 @@ def play(dev_box, ip, item, last_label):
                 dropped_at = None
                 max_pos = max(max_pos, pos)
                 playlog({'type': 'sync', 'video': vid, **s})
+                nick_from = request_nickname_clips(vid, nick_hits, nick_from, pos, s['board_mid'])
                 window.append((pos, asr_transcript()))
                 if cap_words and now - last_check >= MISMATCH_EVERY_S:
                     lo, hi = min(p for p, _ in window) - 15, max(p for p, _ in window) + 5
