@@ -139,6 +139,19 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   audio sink is `async=false` (a live sink otherwise waits for its first
   buffer, i.e. the whole delay, to reach PLAYING), and the stall watchdog
   threshold is 6s + delay.
+- **Adaptive delay (`src/adaptive_delay.py`, 2026-10-09).** The delay is only
+  held while there is audio. Input quiet (< -60 dBFS, measured on syncqueue's
+  sink pad, i.e. before the delay) for 5s -> both queues drop their silent
+  backlog (shrink + `leaky=downstream`, then `min-threshold-time` to 0 / 300ms
+  audio floor): menus and the remote respond in real time. Audio for 0.2s ->
+  thresholds go back to the full delay; the queues stop output until refilled
+  (picture freezes ~2s once), then play delayed and in sync. The onset is
+  caught while still inside the 300ms audio floor, so the first words are
+  delayed and mutable. `playback_delay_s()` returns max(fill, threshold) so a
+  mute scheduled mid-refill lands right. Tunables: `MINUS_ADAPTIVE_DELAY=0`
+  (off), `MINUS_ADAPTIVE_QUIET_DBFS`, `MINUS_ADAPTIVE_ONSET_S`,
+  `MINUS_ADAPTIVE_QUIET_S`. State in `/api/status` -> `adaptive_delay`.
+  Programme audio measured -26..-12 dBFS (game commentary).
 - **Scheduler.** Detections are converted to capture times (the audio tap
   stamps its newest sample with `time.monotonic()`), then muted over
   `[start + delay - 0.4s, end + delay + 0.35s]` via

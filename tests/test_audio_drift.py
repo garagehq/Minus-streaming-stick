@@ -8,6 +8,7 @@ piles samples into `syncqueue`, which creeps from its 300ms floor toward its
 the pure decision logic and the drain procedure with a mocked queue.
 """
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,6 +24,7 @@ def make_audio(level_ms=300.0, muted=False, silent=True):
     a = AudioPassthrough.__new__(AudioPassthrough)
     a.SYNC_BASELINE_MS = 300.0
     a.SYNC_MAX_MS = 500.0
+    a.queue_lock = threading.Lock()
     a.DRIFT_RESYNC_MS = 100.0
     a.DRIFT_HARD_MS = 170.0
     a.DRIFT_SUSTAIN_CHECKS = 3

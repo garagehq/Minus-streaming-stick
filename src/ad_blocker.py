@@ -411,11 +411,14 @@ class DRMAdBlocker:
             # stay in step. Needs arrival timestamps (do-timestamp) — without
             # them the queue's time level never rises and it would stall.
             # Sits after the frame gate so dropped frames never fill it.
+            # Adaptive delay (src/adaptive_delay.py) sets its hold to 0 while
+            # the input is quiet; a rebuilt pipeline comes up in that mode.
             from config import AV_DELAY_S
             delay_ns = int(AV_DELAY_S * 1e9)
             if delay_ns > 0:
+                hold_ns = 0 if getattr(self, '_delay_live', False) else delay_ns
                 delay_part = (
-                    f"queue name=avdelay min-threshold-time={delay_ns} "
+                    f"queue name=avdelay min-threshold-time={hold_ns} "
                     f"max-size-time={delay_ns + 2_000_000_000} "
                     f"max-size-buffers=0 max-size-bytes=0 ! ")
             else:
@@ -2062,6 +2065,20 @@ class DRMAdBlocker:
 
     def set_audio(self, audio):
         self.audio = audio
+
+    def set_delay_live(self, live: bool):
+        """Record the delay mode (the queue itself is switched by AdaptiveDelay)."""
+        self._delay_live = bool(live)
+
+    def delay_queue_plan(self, live: bool):
+        """(avdelay, min-threshold-time ns, max-size-time ns) for a delay mode,
+        or None when the current pipeline has no delay line (no-signal, loading)."""
+        from config import AV_DELAY_S
+        q = self.pipeline.get_by_name('avdelay') if self.pipeline else None
+        if q is None:
+            return None
+        delay_ns = int(AV_DELAY_S * 1e9)
+        return q, 0 if live else delay_ns, delay_ns + 2_000_000_000
 
     def is_preview_enabled(self):
         return self._preview_enabled

@@ -206,6 +206,7 @@ os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 from drm import probe_drm_output
 from v4l2 import probe_v4l2_device
 from name_mute import NameMatcher, NameMuteScheduler, NameMuteController
+import adaptive_delay
 from asr_clips import ASRClipCollector
 from ustreamer_proc import kill_ustreamer
 from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR, STREAM_FPS, ENCODE_SCALE
@@ -1106,6 +1107,18 @@ class Minus:
             except Exception as e:
                 logger.warning(f"Name mute init failed: {e}")
                 self.name_mute = None
+
+        # Adaptive delay (src/adaptive_delay.py): real time while the input
+        # is quiet (menus feel instant), the full A/V delay once audio plays.
+        self.adaptive_delay = None
+        from config import AV_DELAY_S
+        if adaptive_delay.ENABLED and AV_DELAY_S > 0 and self.audio is not None and self.ad_blocker:
+            try:
+                self.adaptive_delay = adaptive_delay.AdaptiveDelay(self.audio, self.ad_blocker, AV_DELAY_S)
+                self.adaptive_delay.start()
+            except Exception as e:
+                logger.warning(f"Adaptive delay init failed: {e}")
+                self.adaptive_delay = None
 
         # Training clips for fine-tuning the ASR (src/asr_clips.py): audio
         # around every name detection plus random ordinary speech.
@@ -2393,6 +2406,8 @@ class Minus:
             'asr_verdict': self._asr_verdict(),
             'asr': (self.asr.get_status() if self.asr is not None else
                     {'available': False, 'enabled': False, 'running': False}),
+            'adaptive_delay': (self.adaptive_delay.get_status() if self.adaptive_delay is not None
+                               else {'enabled': False}),
             'hdmi_reconnect_grace': self.is_in_hdmi_reconnect_grace(),
             'hdmi_reconnect_grace_remaining': self.get_hdmi_reconnect_grace_remaining(),
             'thermal_degraded': self.thermal_degraded,

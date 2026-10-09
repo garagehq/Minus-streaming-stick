@@ -41,6 +41,7 @@ import time
 import wave
 
 import gi
+import numpy as np
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
@@ -214,8 +215,13 @@ class AudioPassthrough:
         # baseline; drift detection measures against the combined level.
         from config import AV_DELAY_S
         self.av_delay_ms = AV_DELAY_S * 1000.0
-        self.SYNC_BASELINE_MS = 300.0 + self.av_delay_ms   # == syncqueue min-threshold-time
-        self.SYNC_MAX_MS = self.SYNC_BASELINE_MS + 200.0   # == syncqueue max-size-time
+        # Adaptive delay (src/adaptive_delay.py) drops the delay line while
+        # the input is quiet; the baseline follows the current mode so a
+        # rebuilt pipeline comes up in it and drift is measured against it.
+        self._delay_live = False
+        self._input_level_cb = None        # fn(dbfs, monotonic) from the input probe
+        self.queue_lock = threading.Lock()  # delay-mode switches vs drift resync
+        self._set_sync_baseline()
         # The stall probe sits after the delay line, so the first buffer
         # (and every buffer after a restart) arrives AV_DELAY_S late.
         self._stall_threshold = 6.0 + AV_DELAY_S
@@ -433,6 +439,10 @@ class AudioPassthrough:
                 pad = queue.get_static_pad('src')
                 if pad:
                     pad.add_probe(Gst.PadProbeType.BUFFER, self._buffer_probe, None)
+            syncqueue = self.pipeline.get_by_name('syncqueue')
+            if syncqueue:
+                syncqueue.get_static_pad('sink').add_probe(
+                    Gst.PadProbeType.BUFFER, self._input_level_probe, None)
 
             # Attach the ASR tap to the appsink (if a tap is configured).
             # Done here, after parse_launch, so the tap gets re-attached
@@ -459,6 +469,41 @@ class AudioPassthrough:
             import traceback
             traceback.print_exc()
             self.pipeline = None
+
+    def _set_sync_baseline(self):
+        self.SYNC_BASELINE_MS = 300.0 + (0.0 if self._delay_live else self.av_delay_ms)  # == syncqueue min-threshold-time
+        self.SYNC_MAX_MS = self.SYNC_BASELINE_MS + 200.0   # == syncqueue max-size-time
+
+    def set_delay_live(self, live: bool):
+        """Record the delay mode (the queue itself is switched by AdaptiveDelay)."""
+        self._delay_live = bool(live)
+        self._set_sync_baseline()
+
+    def delay_queue_plan(self, live: bool):
+        """(syncqueue, min-threshold-time ns, max-size-time ns) for a delay mode."""
+        q = self.pipeline.get_by_name('syncqueue') if self.pipeline else None
+        if q is None:
+            return None
+        thr = 300.0 + (0.0 if live else self.av_delay_ms)
+        return q, int(thr * 1e6), int((thr + 200.0) * 1e6)
+
+    def set_input_level_callback(self, cb):
+        self._input_level_cb = cb
+
+    def _input_level_probe(self, pad, info, user_data):
+        """Level of the audio entering the delay line (real time, not delayed)."""
+        cb = self._input_level_cb
+        if cb is not None:
+            buf = info.get_buffer()
+            ok, m = buf.map(Gst.MapFlags.READ)
+            if ok:
+                try:
+                    x = np.frombuffer(m.data, dtype=np.int16).astype(np.float32)
+                    rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+                finally:
+                    buf.unmap(m)
+                cb(20.0 * np.log10(max(rms, 1e-3) / 32768.0), time.monotonic())
+        return Gst.PadProbeReturn.OK
 
     def _buffer_probe(self, pad, info, user_data):
         """Probe callback to track buffer flow for stall detection.
@@ -1008,17 +1053,21 @@ class AudioPassthrough:
 
     def playback_delay_s(self) -> float:
         """Capture-to-speaker delay: the sync queue's live fill (falls back
-        to its configured baseline) plus the ~60ms ALSA buffers."""
-        level_ms = None
+        to its configured baseline) plus the ~60ms ALSA buffers. Never less
+        than the queue's hold threshold: while it refills after a switch to
+        the full delay its fill is low, but audio entering now still leaves
+        a full threshold later."""
+        level_ms = thr_ms = None
         try:
             q = self.pipeline.get_by_name('syncqueue') if self.pipeline else None
             if q is not None:
                 level_ms = q.get_property('current-level-time') / 1e6
+                thr_ms = q.get_property('min-threshold-time') / 1e6
         except Exception:
             level_ms = None
         if not level_ms:
             level_ms = self.SYNC_BASELINE_MS
-        return level_ms / 1000.0 + 0.06
+        return max(level_ms, thr_ms or 0.0) / 1000.0 + 0.06
 
     def set_volume(self, level):
         """
@@ -1421,17 +1470,18 @@ class AudioPassthrough:
         q = self.pipeline.get_by_name('syncqueue')
         if q is None:
             return {'success': False, 'error': 'syncqueue not found'}
-        before = self._queue_level_ms('syncqueue')
-        try:
-            q.set_property('max-size-time', int(self.SYNC_BASELINE_MS * 1e6))
-            q.set_property('leaky', 2)  # GST_QUEUE_LEAK_DOWNSTREAM: drop oldest
-            time.sleep(0.15)
-        finally:
+        with self.queue_lock:
+            before = self._queue_level_ms('syncqueue')
             try:
-                q.set_property('leaky', 0)
-                q.set_property('max-size-time', int(self.SYNC_MAX_MS * 1e6))
-            except Exception as e:
-                logger.warning(f"[AudioPassthrough] resync restore failed: {e}")
+                q.set_property('max-size-time', int(self.SYNC_BASELINE_MS * 1e6))
+                q.set_property('leaky', 2)  # GST_QUEUE_LEAK_DOWNSTREAM: drop oldest
+                time.sleep(0.15)
+            finally:
+                try:
+                    q.set_property('leaky', 0)
+                    q.set_property('max-size-time', int(self.SYNC_MAX_MS * 1e6))
+                except Exception as e:
+                    logger.warning(f"[AudioPassthrough] resync restore failed: {e}")
         after = self._queue_level_ms('syncqueue')
         self._resync_count += 1
         self._last_resync_time = time.time()
