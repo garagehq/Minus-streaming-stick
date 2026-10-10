@@ -93,7 +93,7 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   - *Training clips* (`src/asr_clips.py`, `MINUS_ASR_CLIPS`): 10s WAV +
     JSON (ASR windows, OCR lines) around every detection, `caption_only`
     for names the ASR missed, plus random speech every 5 min. Saved to
-    `screenshots/asr_clips`, 10 GB budget. The audio tap ring is now 30s
+    `screenshots/asr_clips`, 15 GB budget. The audio tap ring is now 30s
     (`AudioASRTap.recent_samples`).
   - *Demo recordings* (2026-10-08): `MINUS_RECORD_OUTPUT_DIR` makes the
     audio pipeline tee the output (after the delay + mute) to raw files
