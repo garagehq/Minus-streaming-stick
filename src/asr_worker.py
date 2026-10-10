@@ -54,7 +54,14 @@ def resolve_engine() -> str:
     'moonshine' when the SenseVoice model or its runtime is missing."""
     engine = os.environ.get('MINUS_ASR_ENGINE', 'sensevoice').lower()
     if engine == 'sensevoice':
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        # Called after every transcription (ASRProcess.transcribe), so only
+        # add the path once: an unconditional insert grew the parent's
+        # sys.path by one entry per inference, and spawned workers inherit
+        # it — after ~8h the OCR worker could no longer import within its
+        # 30s start timeout and OCR stayed down.
+        src_dir = os.path.dirname(os.path.abspath(__file__))
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
         from sensevoice_npu import is_available
         if not is_available():
             log.warning("[ASRWorker] SenseVoice model/runtime missing; using moonshine")

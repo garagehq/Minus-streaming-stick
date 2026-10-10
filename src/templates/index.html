@@ -1354,7 +1354,10 @@
                 }
 
                 const vlmStatus = document.getElementById('vlm-status');
-                if (status.vlm_disabled) {
+                if (status.vlm_available === false) {
+                    vlmStatus.textContent = 'VLM: N/A';
+                    vlmStatus.className = 'system-badge warning';
+                } else if (status.vlm_disabled) {
                     vlmStatus.textContent = 'VLM: Disabled';
                     vlmStatus.className = 'system-badge warning';
                 } else if (status.vlm_ready) {

@@ -2435,6 +2435,10 @@ class Minus:
             'hdmi_signal': health_status.hdmi_signal if health_status else True,
             'vlm_ready': not self.vlm_disabled and (self.vlm is not None and self.vlm.is_ready if self.vlm else False),
             'vlm_disabled': self.vlm_disabled,
+            # False once there is no VLM at all (--no-vlm, module missing, or
+            # the startup load gave up, e.g. the accelerator is unplugged), so
+            # the webui doesn't show it as loading forever.
+            'vlm_available': self.vlm is not None,
             'ocr_ready': self.ocr is not None and self.ocr.is_ready,
             'ocr_disabled': getattr(self, 'ocr_disabled', False),
             # Live OCR block for the webui OCR-Live panel (mirrors 'asr').
