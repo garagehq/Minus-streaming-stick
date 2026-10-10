@@ -51,6 +51,12 @@ START_WAIT_S = 30       # every video that played reported PLAYING within ~6 s; 
 MISMATCH_EVERY_S = 60   # how often ASR is compared with the captions at the current position
 MISMATCH_MAX = 0.15     # share of heard words found in the captions; normal videos ~0.6-0.8
 MISMATCH_RUNS = 5       # this many low checks in a row: something else is playing (ads run up to ~3 min)
+# A position drop whose audio matches the captions at the NEW position is the
+# same video, not an ad: the TV's media session sometimes stops updating
+# while playback stalls, the extrapolated position runs ahead, and the next
+# real update looks like a jump back.
+RESYNC_CHECK_S = 45     # heard this long after a drop before judging it
+RESYNC_MIN = 0.4        # caption match at the new position that counts as resynced
 PREROLL_S = 180         # a drop this early is the pre-roll ad giving way to the video
 RANDOM_INTERVAL_S = float(os.environ.get('CLIP_FARM_RANDOM_S', '20'))
 LABEL_EVERY_S = 600
@@ -273,6 +279,16 @@ def caption_match(heard, captions):
     return len(words & cap) / len(words)
 
 
+def is_resync(window, cap_words):
+    """True when what ASR heard during a position drop ([(pos, transcript)])
+    matches this video's captions around the dropped-to positions."""
+    if not window or not cap_words:
+        return False
+    lo, hi = min(p for p, _ in window) - 15, max(p for p, _ in window) + 5
+    m = caption_match([t for _, t in window], [w for w, a, _ in cap_words if lo <= a <= hi])
+    return m is not None and m >= RESYNC_MIN
+
+
 def playlog(rec):
     d = FARM_DIR / 'playlog'
     d.mkdir(parents=True, exist_ok=True)
@@ -314,6 +330,7 @@ def play(dev_box, ip, item, last_label):
 
     heard = False
     max_pos, last_playing, dropped_at = cur(first), time.monotonic(), None
+    drop_window = []
     cap_words = label_clips.caption_words(FARM_DIR, vid)
     nick_hits, nick_from = label_clips.nickname_hits(cap_words), cur(first)
     window, last_check, low_runs = [], time.monotonic(), 0   # [(pos, transcript)]
@@ -348,7 +365,13 @@ def play(dev_box, ip, item, last_label):
                 if max_pos >= duration - END_SLACK_S:
                     status = 'ended'           # autoplay right after the end; syncs can miss the last seconds
                     break
-                dropped_at = dropped_at or now
+                if dropped_at is None:
+                    dropped_at, drop_window = now, []
+                drop_window.append((pos, asr_transcript()))
+                if now - dropped_at >= RESYNC_CHECK_S and is_resync(drop_window, cap_words):
+                    log(f"{vid}: position resynced {max_pos:.0f}s -> {pos:.0f}s (captions match)")
+                    max_pos, dropped_at = pos, None
+                    continue
                 if now - dropped_at > AD_MAX_S:
                     status = 'next_video'
                     break

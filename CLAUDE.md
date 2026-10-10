@@ -112,6 +112,10 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
       trimmed WAVs, 10 GB cap). A label is kept only if >=45% of its
       words appear in Minus's own ASR for that clip (rejects autoplay/ad
       mislabels). End/autoplay detection uses the extrapolated position.
+      The TV's media session can stop updating during a stall, so the
+      extrapolation runs ahead and the next update looks like a jump
+      back; a drop whose ASR matches the captions at the new position
+      (`is_resync`) is taken as the same video instead of an ad.
     - `label_clips.HELD_OUT` keeps every evaluation video out of
       training.
     - Clip sidecars carry `clip_start_mono`. The random-clip rate is set

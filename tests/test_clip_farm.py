@@ -32,6 +32,25 @@ class TestCaptionMatch(unittest.TestCase):
         self.assertEqual(cf.caption_match(heard, CAPTIONS), 0.0)
 
 
+class TestResync(unittest.TestCase):
+    # caption words (word, start_s, end_s) around 600s
+    CAP = [(w, 600 + i, 600.5 + i) for i, w in enumerate(CAPTIONS)]
+
+    def test_same_video_at_new_position_is_resync(self):
+        window = [(602, "look at lebron james and his greatness"),
+                  (606, "compared to michael jordan"), (610, "pippen embraces the defense")]
+        self.assertTrue(cf.is_resync(window, self.CAP))
+
+    def test_ad_during_drop_is_not_resync(self):
+        window = [(5, "parts and labor included in my first year"),
+                  (9, "your rate stays the same"), (13, "nearly two decades endurance just gives me")]
+        self.assertFalse(cf.is_resync(window, self.CAP))
+
+    def test_nothing_heard_is_not_resync(self):
+        self.assertFalse(cf.is_resync([(602, "")], self.CAP))
+        self.assertFalse(cf.is_resync([], self.CAP))
+
+
 class TestNicknames(unittest.TestCase):
     def test_find_nicknames(self):
         lc = cf.label_clips
