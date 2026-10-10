@@ -49,7 +49,10 @@ AD_MAX_S = 240          # ...and still behind after this long: autoplay moved on
 END_SLACK_S = 20        # a drop this close to the end is the video ending
 START_WAIT_S = 30       # every video that played reported PLAYING within ~6 s; Restricted Mode blocks never do
 MISMATCH_EVERY_S = 60   # how often ASR is compared with the captions at the current position
-MISMATCH_MAX = 0.15     # share of heard words found in the captions; normal videos ~0.6-0.8
+MISMATCH_MAX = 0.25     # share of heard words found in the captions; normal videos ~0.6-0.8
+# (0.15 missed a 16-min golf video playing in place of the queued one: it
+# scored 0.08-0.29 on shared common words. Over 70 genuine videos no run of
+# even 3 windows fell below 0.25; the 4 wrong-audio videos ran 10-11.)
 MISMATCH_RUNS = 5       # this many low checks in a row: something else is playing (ads run up to ~3 min)
 # A position drop whose audio matches the captions at the NEW position is the
 # same video, not an ad: the TV's media session sometimes stops updating

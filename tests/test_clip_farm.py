@@ -22,6 +22,14 @@ class TestCaptionMatch(unittest.TestCase):
                  "nearly two decades endurance just gives me"]
         self.assertLess(cf.caption_match(heard, CAPTIONS), cf.MISMATCH_MAX)
 
+    def test_wrong_video_sharing_common_words_scores_low(self):
+        # A golf lesson played instead of the queued video: only common words
+        # like 'that' overlap (scored ~0.15-0.2, above the old 0.15 limit).
+        heard = ["that wedge setup", "thinking about contact"]
+        m = cf.caption_match(heard, CAPTIONS)
+        self.assertGreater(m, 0.15)
+        self.assertLess(m, cf.MISMATCH_MAX)
+
     def test_too_little_heard_is_none(self):
         self.assertIsNone(cf.caption_match(["and the", "lebron"], CAPTIONS))
 
