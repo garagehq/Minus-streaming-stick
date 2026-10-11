@@ -228,6 +228,8 @@ def discover(st, want=4):
             if not MIN_DUR <= dur <= MAX_DUR:
                 continue
             cap = fetch_captions(vid)
+            if cap and cap.suffix == '.vtt' and label_clips.is_rolling_vtt(cap):
+                continue    # live roll-up captions: repeated, late, garbled; no usable labels
             n = count_mentions(cap) if cap else 0
             if n < MIN_MENTIONS:
                 continue

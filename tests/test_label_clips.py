@@ -194,3 +194,32 @@ class TestNormalize(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestVttCaptions(unittest.TestCase):
+    PLAIN = ("WEBVTT\nKind: captions\nLanguage: en\n\n"
+             "00:00:01.000 --> 00:00:03.000 line:7%\n&gt;&gt; LEBRON. I'M SURE WE'LL GET\n\n"
+             "00:00:03.000 --> 00:00:05.000 line:7%\nTO FUTURE QUESTIONS SOON.\n\n")
+    ROLLING = ("WEBVTT\nKind: captions\nLanguage: en\n\n"
+               "00:00:08.641 --> 00:00:30.262 align:start position:0%\n \n"
+               "AT<00:00:08.674><c> H</c><00:00:08.707><c>OM</c><00:00:08.741><c>E </c>\n\n"
+               "00:00:30.262 --> 00:00:30.396 align:start position:0%\nAT HOME \n \n\n")
+
+    def _farm(self, vid, text):
+        d = Path(tempfile.mkdtemp())
+        (d / 'captions').mkdir()
+        (d / 'captions' / f'{vid}.vtt').write_text(text)
+        return d
+
+    def test_entities_decoded_and_speaker_marks_dropped(self):
+        d = self._farm('plainvid0001', self.PLAIN)
+        words = [w for w, _, _ in lc.caption_words(d, 'plainvid0001')]
+        self.assertEqual(words[:3], ['LEBRON.', "I'M", 'SURE'])
+        self.assertNotIn('gt', lc.normalize(' '.join(words)).split())
+
+    def test_rolling_vtt_gives_no_words(self):
+        d = self._farm('rollvid00001', self.ROLLING)
+        self.assertTrue(lc.is_rolling_vtt(d / 'captions' / 'rollvid00001.vtt'))
+        self.assertEqual(lc.caption_words(d, 'rollvid00001'), [])
+        self.assertFalse(lc.is_rolling_vtt(self._farm('plainvid0002', self.PLAIN)
+                                           / 'captions' / 'plainvid0002.vtt'))

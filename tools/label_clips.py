@@ -21,6 +21,7 @@ Output (DATASET_DIR, default /home/radxa/asr_dataset):
 usage: python3 tools/label_clips.py [CLIPS_DIR] [FARM_DIR] [DATASET_DIR]
 """
 import bisect
+import html
 import json
 import os
 import re
@@ -140,9 +141,24 @@ def position_span(syncs, t0, t1):
 _caption_cache = {}
 
 
+_INLINE_TS = re.compile(r'<\d+:\d+:\d+\.\d+>')
+
+
+def is_rolling_vtt(path: Path) -> bool:
+    """A vtt with inline word timestamps is a roll-up (live broadcast) track:
+    every cue repeats the previous line, the text is typed seconds behind
+    the speech and often garbled ('ITWOULD BEE'). Unusable as labels."""
+    try:
+        with open(path, errors='ignore') as fh:
+            return bool(_INLINE_TS.search(fh.read(200_000)))
+    except OSError:
+        return False
+
+
 def caption_words(farm_dir: Path, vid: str):
     """[(word, start, end)] for a video, from its json3 (word-level) or vtt
-    (cue-level, words spread evenly over the cue) caption file."""
+    (cue-level, words spread evenly over the cue) caption file. Roll-up vtt
+    tracks give no words (see is_rolling_vtt), so their clips are rejected."""
     if vid in _caption_cache:
         return _caption_cache[vid]
     words = []
@@ -166,7 +182,7 @@ def caption_words(farm_dir: Path, vid: str):
             nxt = starts[k + 1][0] if k + 1 < len(starts) else ev_end
             for w in txt.split():
                 words.append((w, s, min(max(nxt, s + 0.1), s + 1.0)))
-    elif v.exists():
+    elif v.exists() and not is_rolling_vtt(v):
         cue_re = re.compile(r'(\d+):(\d+):(\d+)\.(\d+) --> (\d+):(\d+):(\d+)\.(\d+)')
         cur = None
         lines = []
@@ -180,7 +196,10 @@ def caption_words(farm_dir: Path, vid: str):
                        g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000)
                 lines = []
             elif cur and line.strip():
-                lines.append(re.sub(r'<[^>]+>', '', line.strip()))
+                # Unescape after stripping tags: broadcast captions mark a
+                # speaker change with '&gt;&gt;', which normalize() would
+                # otherwise turn into the words 'gt gt'.
+                lines.append(html.unescape(re.sub(r'<[^>]+>', '', line.strip())))
             elif cur and not line.strip():
                 ws = ' '.join(lines).split()
                 if ws:

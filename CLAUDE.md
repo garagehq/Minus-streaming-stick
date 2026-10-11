@@ -116,6 +116,11 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
       extrapolation runs ahead and the next update looks like a jump
       back; a drop whose ASR matches the captions at the new position
       (`is_resync`) is taken as the same video instead of an ad.
+    - Roll-up vtt tracks (live broadcast CC with inline word timestamps,
+      e.g. NBA 'FULL GAME HIGHLIGHTS') repeat every line, lag the speech
+      and are garbled: `label_clips.is_rolling_vtt` makes them yield no
+      words and the farm skips them at discovery. vtt text is
+      html-unescaped (`&gt;&gt;` speaker marks became 'gt gt' labels).
     - `label_clips.HELD_OUT` keeps every evaluation video out of
       training.
     - Clip sidecars carry `clip_start_mono`. The random-clip rate is set
