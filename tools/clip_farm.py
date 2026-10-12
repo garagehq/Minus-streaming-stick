@@ -65,6 +65,7 @@ RANDOM_INTERVAL_S = float(os.environ.get('CLIP_FARM_RANDOM_S', '20'))
 LABEL_EVERY_S = 600
 MAX_PER_VIDEO_S = float(os.environ.get('CLIP_FARM_MAX_PER_VIDEO_S', '2400'))
 MIN_MENTIONS = 3
+SEARCH_DEPTH = 50       # results per search query
 MIN_DUR, MAX_DUR = 300, 5400
 
 QUERIES = [
@@ -88,6 +89,29 @@ QUERIES = [
     'lebron james lakers full game highlights',
     'nba today lebron james',
     'the decision lebron james 2010',
+    # Talk and analysis shows label best (dense, clean speech); added when
+    # the first 20 queries ran dry (~1050 results seen, searches came back
+    # with nothing new and the farm idled while the TV autoplayed).
+    'skip and shannon lebron james',
+    'stephen a smith lebron james',
+    'lebron james press conference',
+    'inside the nba lebron james',
+    'lebron james goat debate',
+    'lebron james legacy analysis',
+    'lebron james 76ers',
+    'lebron james bronny',
+    'lebron james interview espn',
+    'lebron james best moments compilation',
+    'lebron james season highlights',
+    'lebron james playoff highlights',
+    'lebron james cavaliers highlights',
+    'lebron james miami heat highlights',
+    'lebron james vs warriors finals',
+    'kendrick perkins lebron james',
+    'nick wright lebron james',
+    'colin cowherd lebron james',
+    'lebron james retirement',
+    'lebron james clutch moments',
 ]
 HELD_OUT = label_clips.HELD_OUT
 NAME_RE = re.compile(r'\blebron\b|\bking james\b', re.I)
@@ -214,7 +238,7 @@ def discover(st, want=4):
         q = QUERIES[st['query_idx'] % len(QUERIES)]
         st['query_idx'] += 1
         r = ytdlp(['--flat-playlist', '--print', '%(id)s|%(duration)s|%(title)s',
-                   f'ytsearch25:{q}'])
+                   f'ytsearch{SEARCH_DEPTH}:{q}'])
         for line in r.stdout.splitlines():
             parts = line.split('|', 2)
             if len(parts) != 3 or parts[0] in st['seen']:
