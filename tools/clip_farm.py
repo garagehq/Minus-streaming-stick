@@ -400,6 +400,7 @@ def play(dev_box, ip, item, last_label):
                 if now - dropped_at >= RESYNC_CHECK_S and is_resync(drop_window, cap_words):
                     log(f"{vid}: position resynced {max_pos:.0f}s -> {pos:.0f}s (captions match)")
                     max_pos, dropped_at = pos, None
+                    nick_from = min(nick_from, pos)   # the ad ran it ahead: clip the real ones
                     continue
                 if now - dropped_at > AD_MAX_S:
                     status = 'next_video'
