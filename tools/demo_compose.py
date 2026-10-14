@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 """Compose a demo video from a tools/demo_take.py capture.
 
-What a viewer of Minus saw and heard: the main picture is the live input
-shifted by the A/V delay (the output shows each frame DELAY seconds late),
-with Minus's recorded output audio, so mutes land where they really did.
-A small live-input inset shows how far behind the output runs. Overlays:
-a MUTED badge (output audio is exact digital silence), a mute timeline,
-CPU temperature and big-core clock caps (throttling), and what Minus's ASR
-was hearing at that moment.
+What a viewer of Minus saw and heard: the picture is the captured HDMI input
+and the sound is Minus's recorded output audio (MINUS_RECORD_OUTPUT_DIR),
+shown in sync with each other, so mutes land on the words they really cut.
+Overlays: a title bar, a MUTED badge (output audio is exact digital silence)
+and a mute timeline.
 
-usage: python3 tools/demo_compose.py TAKE_DIR AUDIO_DIR OUT.mp4 "TAG" "TITLE" "SUBTITLE"
+Both streams are lined up against the original video (SOURCE, e.g. from
+yt-dlp, covering the segment with some margin): the output audio by
+cross-correlating it with the source audio, the captured frames by
+cross-correlating frame-to-frame change with the source's. That gives the
+box-clock time at which each source position was captured and played out,
+independent of media-session timing, and the real A/V delay is the
+difference.
+
+usage: python3 tools/demo_compose.py TAKE_DIR AUDIO_DIR OUT.mp4 "TAG" "TITLE" "SUBTITLE" \\
+           SOURCE.mp4 SOURCE_START_S
+
+SOURCE_START_S is the video position of SOURCE's first frame. "{delay}" in
+SUBTITLE is replaced by the measured delay (e.g. "2.4").
 """
 import bisect
 import glob
@@ -22,77 +32,124 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 W, H, FPS, SR = 1280, 720, 30, 48000
+ASR = 16000                # alignment sample rate
 FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
 BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+SIG_W, SIG_H = 64, 36
 
 
 def font(size, bold=False):
     return ImageFont.truetype(BOLD if bold else FONT, size)
 
 
-def load_jsonl(path):
-    with open(path) as f:
-        return [json.loads(l) for l in f if l.strip()]
+def xcorr(x, y):
+    """Valid-mode cross-correlation of y slid along x."""
+    n = len(x) + len(y) - 1
+    N = 1 << (n - 1).bit_length()
+    r = np.fft.irfft(np.fft.rfft(x, N) * np.fft.rfft(y[::-1], N), N)[:n]
+    return r[len(y) - 1:len(x)]
 
 
-def live_time_of(syncs, start):
-    """Box-monotonic time at which the live input reached video position `start`."""
-    est = [s['board_mid'] + (start - s['pos']) for s in syncs if abs(s['pos'] - start) < 40]
-    if not est:
-        sys.exit('no syncs near the segment start')
-    return float(np.median(est))
+def source_audio(path):
+    raw = subprocess.run(['ffmpeg', '-loglevel', 'error', '-i', path, '-ac', '1', '-ar', str(ASR),
+                          '-f', 's16le', '-'], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.int16).astype(np.float32)
 
 
-def output_audio(audio_dir, t0, seconds):
+def source_signature(path):
+    raw = subprocess.run(['ffmpeg', '-loglevel', 'error', '-i', path, '-vf',
+                          f'fps={FPS},scale={SIG_W}:{SIG_H},format=gray', '-f', 'rawvideo', '-'],
+                         capture_output=True, check=True).stdout
+    fr = np.frombuffer(raw, np.uint8).reshape(-1, SIG_H, SIG_W).astype(np.float32)
+    return np.abs(np.diff(fr, axis=0)).mean(axis=(1, 2))
+
+
+def load_output(audio_dir, t_lo, t_hi):
+    """(stereo int16 samples, idx rows) of the recording covering [t_lo, t_hi]."""
     for idx_path in sorted(glob.glob(os.path.join(audio_dir, '*.idx'))):
         if os.path.getsize(idx_path) == 0:
             continue
         rows = np.loadtxt(idx_path, ndmin=2)
-        if len(rows) < 2 or not (rows[0, 0] <= t0 and rows[-1, 0] >= t0 + seconds):
-            continue
-        f0 = int(np.interp(t0, rows[:, 0], rows[:, 1]))
-        n = int(seconds * SR)
-        raw = np.fromfile(idx_path[:-4] + '.s16', dtype=np.int16, count=n * 2, offset=f0 * 4)
-        return raw.reshape(-1, 2)
-    sys.exit(f'no output audio in {audio_dir} covers {t0:.1f}..{t0 + seconds:.1f}')
+        if len(rows) > 1 and rows[0, 0] <= t_lo and rows[-1, 0] >= t_hi:
+            return np.fromfile(idx_path[:-4] + '.s16', dtype=np.int16).reshape(-1, 2), rows
+    sys.exit(f'no output audio in {audio_dir} covers {t_lo:.1f}..{t_hi:.1f}')
 
 
-def mute_mask(audio, frames):
-    """Per video frame: True when the output audio is digital silence (muted)."""
-    per = SR // FPS
-    return [bool(len(audio[k * per:(k + 1) * per]) and
-                 not np.any(audio[k * per:(k + 1) * per])) for k in range(frames)]
+def align_audio(out, src, src_start, start, seconds):
+    """Index (48 kHz frames) of the output sample where video position
+    `start` plays. Found by content, not by the recorder's arrival times
+    (those are stamped in Python and lag when the GIL is busy); checked
+    against a second match near the end for lost or gained samples."""
+    mono = out.mean(axis=1)
+    mono = mono[:len(mono) // 3 * 3].reshape(-1, 3).mean(axis=1)     # 48k -> 16k
+    found = []
+    for p in (start, start + seconds - 6):
+        y = src[int((p - src_start) * ASR):int((p - src_start + 6) * ASR)]
+        c = xcorr(mono, y)
+        k = int(np.argmax(np.abs(c)))
+        q = abs(c[k]) / (np.linalg.norm(y) * np.linalg.norm(mono[k:k + len(y)]) + 1e-9)
+        found.append((k / ASR - (p - start), q))
+    (s0, q0), (s1, q1) = found
+    print(f'audio: match {q0:.2f}/{q1:.2f}, samples over the segment {1000 * (s1 - s0):+.0f} ms off')
+    # Lost samples pull later audio earlier (negative). A positive offset is
+    # the TV's own playback stalling, in the capture as well as the output.
+    if min(q0, q1) < 0.3 or not -0.03 <= s1 - s0 <= 0.3:
+        sys.exit('output audio does not line up with the source (lost samples?)')
+    return int(round(s0 * SR))
 
 
-def throttle_info(entry):
-    """(lowest big-core clock cap in GHz, any big cluster capped below its own max)."""
-    clocks = entry.get('clocks') or {}
-    big = [c for c in clocks.values() if c.get('max') and c['max'] > 2000000]
-    if not big:
-        return None, False
-    capped = [c for c in big if c.get('cap') and c['cap'] < c['max']]
-    cap = min((c['cap'] for c in capped), default=max(c['max'] for c in big))
-    return cap / 1e6, bool(capped)
+def align_video(take, f_t, sig_src, src_start, start, t_out):
+    """Box time at which video position `start` was captured."""
+    # Captured frames resampled onto a FPS grid around the expected time
+    # (the output delay is a few seconds at most).
+    grid = np.arange(t_out - 8.0, t_out + 22.0, 1.0 / FPS)
+    prev, sig = None, []
+    for t in grid:
+        j = min(max(bisect.bisect_left(f_t, t), 0), len(f_t) - 1)
+        im = Image.open(os.path.join(take, 'frames', f'{j:06d}.jpg'))
+        im.draft('L', (SIG_W * 4, SIG_H * 4))
+        a = np.asarray(im.convert('L').resize((SIG_W, SIG_H), Image.BILINEAR), np.float32)
+        sig.append(0.0 if prev is None else float(np.abs(a - prev).mean()))
+        prev = a
+    sig = np.array(sig[1:])
+    # Source change signal over the segment, slid along the capture's.
+    i0 = int(round((start - src_start) * FPS))
+    y = sig_src[i0:i0 + 20 * FPS]
+    y = (y - y.mean()) / (y.std() + 1e-9)
+    best = None
+    for k in range(0, len(sig) - len(y)):
+        x = sig[k:k + len(y)]
+        r = float(np.dot((x - x.mean()) / (x.std() + 1e-9), y)) / len(y)
+        if best is None or r > best[0]:
+            best = (r, k)
+    r, k = best
+    print(f'video: frame-change match {r:.2f}')
+    if r < 0.5:
+        sys.exit('captured frames do not line up with the source')
+    return float(grid[k + 1])
 
 
 def main():
-    take, audio_dir, out, tag, title, subtitle = sys.argv[1:7]
+    take, audio_dir, out, tag, title, subtitle, src_path = sys.argv[1:8]
+    src_start = float(sys.argv[8])
     meta = json.load(open(os.path.join(take, 'take.json')))
-    seconds = meta['seconds']
-    syncs = load_jsonl(os.path.join(take, 'syncs.jsonl'))
-    tl = load_jsonl(os.path.join(take, 'timeline.jsonl'))
-    tl_t = [e['t'] for e in tl]
-    delays = [e['delay_s'] for e in tl if e.get('delay_s')]
-    delay = float(np.median(delays)) if delays else meta['delay_s']
+    start, seconds = meta['start_s'], meta['seconds']
     fidx = np.loadtxt(os.path.join(take, 'frames.idx'), ndmin=2)
     f_t = fidx[:, 1]
 
-    t_live = live_time_of(syncs, meta['start_s'])
-    t0 = t_live + delay
+    out_audio, rows = load_output(audio_dir, f_t[0], f_t[-1])
+    f0 = align_audio(out_audio, source_audio(src_path), src_start, start, seconds)
+    t_out = float(np.interp(f0, rows[:, 1], rows[:, 0]))      # approximate
+    t_cap = align_video(take, f_t, source_signature(src_path), src_start, start, t_out - 3.0)
+    delay = t_out - t_cap
+    print(f'delay about {delay:.2f} s (recorder timestamps)')
+    subtitle = subtitle.replace('{delay}', f'{delay:.1f}')
+
     nframes = int(seconds * FPS)
-    audio = output_audio(audio_dir, t0, seconds)
-    muted = mute_mask(audio, nframes)
-    # Mute intervals for the timeline strip.
+    audio = out_audio[f0:f0 + int(seconds * SR)]
+    per = SR // FPS
+    muted = [bool(len(audio[k * per:(k + 1) * per]) and not np.any(audio[k * per:(k + 1) * per]))
+             for k in range(nframes)]
     spans, k = [], 0
     while k < nframes:
         if muted[k]:
@@ -115,76 +172,21 @@ def main():
          '-c:a', 'aac', '-b:a', '160k', '-t', str(seconds), '-movflags', '+faststart', out],
         stdin=subprocess.PIPE)
 
-    cache = {}
-
-    def frame(i, size):
-        key = (i, size)
-        if key not in cache:
-            if len(cache) > 12:
-                cache.clear()
-            im = Image.open(os.path.join(take, 'frames', f'{int(fidx[i, 0]):06d}.jpg'))
-            im.draft('RGB', size)
-            cache[key] = im.convert('RGB').resize(size, Image.BILINEAR)
-        return cache[key]
-
-    def nearest(t):
-        j = bisect.bisect_left(f_t, t)
-        if j <= 0:
-            return 0
-        if j >= len(f_t):
-            return len(f_t) - 1
-        return j if f_t[j] - t < t - f_t[j - 1] else j - 1
-
     f_tag, f_title, f_sub = font(30, True), font(24, True), font(18)
-    f_stat, f_small, f_mute = font(17, True), font(16), font(44, True)
-    pip_w, pip_h = 352, 198
+    f_small, f_mute = font(16), font(44, True)
     for k in range(nframes):
-        t = t0 + k / FPS
-        img = frame(nearest(t - delay), (W, H)).copy()
+        j = min(max(bisect.bisect_left(f_t, t_cap + k / FPS), 0), len(f_t) - 1)
+        im = Image.open(os.path.join(take, 'frames', f'{int(fidx[j, 0]):06d}.jpg'))
+        im.draft('RGB', (W, H))
+        img = im.convert('RGB').resize((W, H), Image.BILINEAR)
         d = ImageDraw.Draw(img, 'RGBA')
         # Title bar.
         d.rectangle([0, 0, W, 74], fill=(0, 0, 0, 185))
         tag_w = d.textlength(tag, font=f_tag) + 28
-        d.rounded_rectangle([14, 14, 14 + tag_w, 60], 8,
-                            fill=(200, 40, 40, 255) if tag.startswith('BEFORE') else (30, 130, 70, 255))
+        d.rounded_rectangle([14, 14, 14 + tag_w, 60], 8, fill=(30, 130, 70, 255))
         d.text((28, 19), tag, font=f_tag, fill='white')
         d.text((tag_w + 34, 12), title, font=f_title, fill='white')
         d.text((tag_w + 34, 44), subtitle, font=f_sub, fill=(210, 210, 210))
-        # Live inset.
-        px, py = W - pip_w - 16, 90
-        img.paste(frame(nearest(t), (pip_w, pip_h)), (px, py))
-        d.rectangle([px - 2, py - 2, px + pip_w + 1, py + pip_h + 1], outline=(255, 255, 255, 220), width=2)
-        d.rectangle([px, py + pip_h - 26, px + pip_w, py + pip_h], fill=(0, 0, 0, 170))
-        d.text((px + 8, py + pip_h - 23), f'LIVE INPUT  ·  output is {delay:.1f} s behind',
-               font=f_small, fill='white')
-        # Stats.
-        e = tl[max(0, bisect.bisect_right(tl_t, t) - 1)]
-        temps = e.get('temps') or {}
-        hot = max(temps.values()) if temps else None
-        cap, throttled = throttle_info(e)
-        lines = []
-        if hot is not None:
-            s = f'CPU {hot:.0f}°C (throttles at 85°C)'
-            if cap:
-                s += f'   big cores capped at {cap:.2f} GHz' if throttled else f'   big cores {cap:.2f} GHz'
-            lines.append((s + ('   THROTTLING' if throttled else ''),
-                          (255, 90, 90) if throttled or hot >= 85 else (255, 255, 255)))
-        heard = (e.get('asr_text') or '').strip()
-        eng = e.get('asr_engine') or 'ASR'
-        lines.append((f'{eng} hears: “{heard[-40:]}”' if heard else f'{eng} hears: …', (230, 230, 230)))
-        load = []
-        if e.get('cpu_percent') is not None:
-            load.append(f'CPU load {e["cpu_percent"]:.0f}%')
-        if e.get('asr_latency_s'):
-            load.append(f'speech recognition takes {e["asr_latency_s"]:.1f} s per window')
-        if load:
-            busy = (e.get('cpu_percent') or 0) >= 75
-            lines.append(('   ·   '.join(load), (255, 170, 80) if busy else (200, 200, 200)))
-        # Stats sit top-left, clear of the TV's own captions at the bottom.
-        sw = 560
-        d.rectangle([0, 80, sw, 88 + 26 * len(lines)], fill=(0, 0, 0, 160))
-        for i, (s, c) in enumerate(lines):
-            d.text((12, 84 + 26 * i), s, font=f_stat, fill=c)
         # Mute timeline strip with playhead.
         sx0, sx1, sy = 18, W - 18, H - 22
         d.rectangle([0, sy - 26, W, H], fill=(0, 0, 0, 140))
@@ -196,7 +198,7 @@ def main():
         d.text((sx0, sy - 22), 'audio muted (red) over this clip', font=f_small, fill=(200, 200, 200))
         # MUTED badge.
         if muted[k]:
-            bx = 622
+            bx = W - 300
             d.rounded_rectangle([bx, 90, bx + 280, 160], 12, fill=(210, 30, 30, 235))
             d.text((bx + 38, 99), 'MUTED', font=f_mute, fill='white')
         ff.stdin.write(img.tobytes())
