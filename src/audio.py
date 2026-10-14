@@ -350,7 +350,9 @@ class AudioPassthrough:
             #
             # Latency breakdown (PLAYBACK branch — applies whether or not the
             # ASR tap branch is attached):
-            #   - alsasrc: 50ms buffer
+            #   - alsasrc: 10ms periods in a 200ms ring (the ring only absorbs
+            #     stalls; at 50ms a busy box overran it and lost 10-20% of
+            #     the audio, measured with tools/demo_capture.py running)
             #   - syncqueue: 300ms delay (min-threshold-time forces buffering before output)
             #   - audioqueue: up to 100ms for jitter absorption
             #   - alsasink: 50ms buffer
@@ -398,7 +400,7 @@ class AudioPassthrough:
                     f"appsink name=asr_sink emit-signals=true drop=true sync=false max-buffers=20"
                 )
                 pipeline_str = (
-                    f"alsasrc device={self.capture_device} buffer-time=50000 latency-time=10000 provide-clock=false ! "
+                    f"alsasrc device={self.capture_device} buffer-time=200000 latency-time=10000 provide-clock=false ! "
                     f"audio/x-raw,rate=48000,channels=2,format=S16LE ! "
                     f"tee name=audiotee allow-not-linked=true "
                     # Playback branch (this comes off the tee and runs the
@@ -413,7 +415,7 @@ class AudioPassthrough:
                 # to pre-ASR Minus. No tee, no risk of pipeline-shape
                 # regressions on those installs.
                 pipeline_str = (
-                    f"alsasrc device={self.capture_device} buffer-time=50000 latency-time=10000 provide-clock=false ! "
+                    f"alsasrc device={self.capture_device} buffer-time=200000 latency-time=10000 provide-clock=false ! "
                     f"audio/x-raw,rate=48000,channels=2,format=S16LE ! "
                     f"{playback_chain}"
                 )
