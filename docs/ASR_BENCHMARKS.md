@@ -48,6 +48,13 @@ video.
   streaming Zipformer can't recognise "LeBron" (4/38) and still lags more
   (0.72 s after the name ends, versus ~0.41 s). Kroko recognises it
   (74%) but is slower (~1.3 s).
+* **Mutes are now about the name, not the seconds around it** (Oct 14).
+  The ASR word span narrows caption and partial-name windows, and
+  on-screen banners no longer re-trigger. A 30 s demo clip went from 52%
+  muted to 28%, and live muted time fell from 2.6–3.0x to 1.5x the name
+  speech. The first live run scored 9/11 fully muted (captions on, 2.35 s),
+  so the full matrix needs re-running. See
+  [Tighter mutes](#tighter-mutes-and-the-client-demo-oct-1314).
 * Larger or slower models (Parakeet 0.6B, Moonshine, whisper) do not help
   latency, and their heat cost is what hurts the video. The old Moonshine
   default drove this headless box to 80 °C at 86% CPU, versus 48 °C at
@@ -83,6 +90,9 @@ Notes on the rows:
 * The Parakeet 0.6B and Moonshine temperature and CPU come from the
   7-minute heat runs below.
 * Rows with one video have 9–15 mentions, so ±1 mention is noise.
+* All rows predate the Oct 14 tighter mutes (ASR narrowing, smaller pads,
+  banner handling), which trade a little coverage for much less muted
+  speech. See [Tighter mutes](#tighter-mutes-and-the-client-demo-oct-1314).
 
 ## Definitions
 
@@ -96,8 +106,8 @@ Notes on the rows:
 * **ASR alone**: names the ASR's own mute windows covered fully, ignoring
   captions. This is what you get with captions off.
 * **Detection lag**: from the start of the name (capture time) to the
-  detector reporting it. A mute starts on time only if lag + pad (0.4 s
-  ASR, 0.7 s caption) is under the delay. Late mutes start the moment the
+  detector reporting it. A mute starts on time only if lag + pad (0.35 s
+  ASR since Oct 14, 0.4 s before; 0.7 s caption) is under the delay. Late mutes start the moment the
   name is detected, so they still catch the rest of it.
 * **Recall** (offline): share of caption-track mentions the model found,
   on 3 s windows every 0.5 s over a 5.6 min NBA commentary clip
@@ -308,6 +318,117 @@ through each rule):
 
 That ties Parakeet-110M at 1.2 s (17/31) at SenseVoice's heat: 49.2–49.6 °C,
 9–10% CPU.
+
+## Tighter mutes and the client demo (Oct 13–14)
+
+### Captions off with today's defaults (Oct 13)
+
+SenseVoice with partial names, captions off (`MINUS_NAME_MUTE_CAPTIONS=0`),
+same two videos. Results are in `~/lebron_test/demo-nocap/{A,B}`. Fewer
+mentions are scored than in older runs (11 and 16) because only stretches
+with a steady video clock count.
+
+| Effective delay | A (news) | B (game) | Both | Muted time vs name speech |
+|---|---|---|---|---|
+| 2.35 s (`MINUS_AV_DELAY_S=2.0`) | 10/11 | 14/16 | 24/27 (89%) | 2.0x / 1.8x |
+| 1.2 s (`MINUS_AV_DELAY_S=0.85`) | 6/11 | 5/16 | 11/27 (41%) | 1.5x / 1.5x |
+
+### Problem: muting far more than the name
+
+In demo recordings with captions on, Minus muted 52% (2.4 s) and 60%
+(1.2 s) of a 30 s talk-show clip with 7 mentions. Each mention got 1.5–4.3 s
+of silence, and some mutes had no name in them at all. The older
+captions-on benchmark runs show the same thing: 2.6–3.0x as much muted
+time as name speech. There were three causes:
+
+* **Stacked windows.** One mention could get a caption window
+  (1.4–2.0 s), an ASR window with 0.4 + 0.35 s pads, a cut-off-word
+  extension (+0.4 s) and a partial-name window (0.8 s + pads). Their union
+  was the mute.
+* **On-screen banners.** A lower-third ("Skip's Twitter explodes after
+  questioning LeBron's GOAT status") was read by OCR every frame. The
+  misreads ("ig LeBron's…", "stioning LeBron's…", "questiofing…") defeated
+  caption de-duplication, so it muted again every few seconds with nobody
+  saying the name.
+* **Audio dropouts** (these also made the demo audio drift). Python pad
+  probes ran on the capture and playback threads. When the GIL was busy,
+  for example with the web API being polled, capture overran the 50 ms
+  ALSA ring and lost 10–20% of the samples, and playback paused for up to
+  0.7 s.
+
+### Changes (commits c1b9e73, 32824c3, 2f879fb, ee0f102)
+
+* **The ASR word span narrows every coarser window for the same
+  mention.** Caption, partial-name and cut-off-word windows are dropped if
+  not yet playing, or cut to end with the ASR window if they are. A
+  cut-off word's first whole sighting replaces it. Narrowed windows update
+  their detection-log entry, so `name_mute_live_analyze.py` scores what
+  actually played.
+* **ASR pads 0.4/0.35 → 0.35/0.25 s.** SenseVoice name starts land a
+  median 0.16–0.19 s after the caption word (p90 0.2–0.6 s).
+* **Banners.** Caption de-duplication also compares the text after the
+  name and refreshes while a line stays on screen. A name first seen
+  mid-line (3+ words after it) mutes provisionally (`caption_mid`). An ASR
+  window that hears that moment whole, without the name, cancels it.
+* **Audio.** The ALSA ring is now 200 ms. A queue after `alsasrc` gives
+  capture its own thread. With the ASR tap, the Python probes sit on its
+  leaky branch. Under the same demo-capture load, output is 1.003x real
+  time with no gaps.
+
+Offline (`tests/partial_name_sim.py`-style replay of `sv_A/sv_B`,
+captions off) the trade-off looks like this:
+
+| Rule | 2.35 s fully muted | Extra muted time per mention (median) | 1.2 s fully muted |
+|---|---|---|---|
+| Before | 38/44 (86%) | 0.97 s | 29/44 (66%) |
+| Narrowing, old pads | 38/44 (86%) | 0.73 s | 29/44 (66%) |
+| Narrowing, 0.35/0.25 pads (default) | 34/44 (77%) | 0.60 s | 25/44 (57%) |
+| Narrowing, 0.3/0.15 pads | 27/44 (61%) | 0.46 s | 21/44 (48%) |
+
+"Fully muted" is scored against caption word times, and the word end is
+taken as the next word's start, so tighter pads probably look worse here
+than they sound. The speech-recognizer audibility check is the better
+judge.
+
+### Results
+
+**Demo clip** (talk show, 7 mentions in 30 s, captions on):
+
+| Delay | Muted before → after | Per mention | Name audible (SenseVoice on the output) |
+|---|---|---|---|
+| 2.4 s | 52% → 28% | 1.0–1.3 s (two mentions 1.5 s apart merge into 2.7 s) | no |
+| 1.2 s | 60% → 35% | 0.9–2.1 s | no |
+
+**Live benchmark, new rules.** Only one run finished before the matrix was
+stopped so the clip farm could resume. Results are in
+`~/lebron_test/narrow/A`.
+
+| Run | Fully muted | Partial | Muted time vs name speech | Mute end after word (median) |
+|---|---|---|---|---|
+| A (news), captions on, 2.35 s | 9/11 (82%) | 2 | 1.5x (old captions-on runs: 2.6–3.0x) | +0.49 s |
+
+* That run still had 8 caption mutes away from any spoken mention. These
+  are probably banners or graphics in the news video that the mid-line
+  rule did not catch, for example a name at the end of a banner line.
+  They are worth a look before the next round.
+* The two partials cost the captions-on 2.35 s figure (old: 15/15). Before
+  quoting rates for the new rules, re-run the full matrix:
+
+```bash
+sudo tools/asr_live_bench.sh 192.168.1.203 2nC9z57MuaI ~/lebron_test/v_2nC9z57MuaI.en.json3 720 OUT/A \
+  "cc-2.4|MINUS_AV_DELAY_S=2.0" "cc-1.2|MINUS_AV_DELAY_S=0.85" \
+  "nocc-2.4|MINUS_AV_DELAY_S=2.0 MINUS_NAME_MUTE_CAPTIONS=0" "nocc-1.2|MINUS_AV_DELAY_S=0.85 MINUS_NAME_MUTE_CAPTIONS=0"
+# then the same for MIWYB7qtq6c -> OUT/B (TV captions on for the cc- runs)
+```
+
+### Demo recordings
+
+`tools/demo_take.py` plays a segment and captures it. `tools/demo_compose.py`
+now lines the captured frames and Minus's recorded output audio up against
+the source video (from `yt-dlp`): audio by cross-correlation, frames by
+frame-change correlation. It refuses to build if samples were lost. Don't
+trust the recorder's `.idx` arrival times for alignment: they are stamped
+in Python and lag when the GIL is busy.
 
 ## Training clips for fine-tuning
 
@@ -611,4 +732,5 @@ Models:
 
 Raw results are in `~/lebron_test/bench`, `~/lebron_test/bench2`,
 `~/lebron_test/heat2`, `~/lebron_test/nocap-{A,B}`, `~/lebron_test/render`,
-`~/lebron_test/fp` and `~/lebron_test/live5-8.json` on minus-2.
+`~/lebron_test/fp`, `~/lebron_test/demo-nocap`, `~/lebron_test/narrow` and
+`~/lebron_test/live5-8.json` on minus-2.
