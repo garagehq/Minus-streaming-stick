@@ -402,6 +402,10 @@ class AudioPassthrough:
                 pipeline_str = (
                     f"alsasrc device={self.capture_device} buffer-time=200000 latency-time=10000 provide-clock=false ! "
                     f"audio/x-raw,rate=48000,channels=2,format=S16LE ! "
+                    # Decouples the capture thread from the Python pad
+                    # probes below: a GIL stall backs up here instead of
+                    # overrunning the ALSA ring and losing samples.
+                    f"queue name=srcqueue max-size-time=1000000000 max-size-buffers=0 max-size-bytes=0 ! "
                     f"tee name=audiotee allow-not-linked=true "
                     # Playback branch (this comes off the tee and runs the
                     # same elements as the no-tap pipeline)
@@ -417,6 +421,10 @@ class AudioPassthrough:
                 pipeline_str = (
                     f"alsasrc device={self.capture_device} buffer-time=200000 latency-time=10000 provide-clock=false ! "
                     f"audio/x-raw,rate=48000,channels=2,format=S16LE ! "
+                    # Decouples the capture thread from the Python pad
+                    # probes below: a GIL stall backs up here instead of
+                    # overrunning the ALSA ring and losing samples.
+                    f"queue name=srcqueue max-size-time=1000000000 max-size-buffers=0 max-size-bytes=0 ! "
                     f"{playback_chain}"
                 )
 
