@@ -277,15 +277,20 @@ class TestPartialNames(unittest.TestCase):
         self.assertEqual(sch._windows, [])
         self.assertEqual(ctl.partial_cancels, 1)
 
-    def test_next_window_with_name_keeps_mute(self):
+    def test_next_window_with_name_replaces_guess(self):
         ctl, sch = self._ctl()
         t0 = time.monotonic()
         ctl.on_asr_words("know about leb", [("know", 1.0, 1.5), ("about", 1.5, 2.6), ("leb", 2.7, 3.0)], t0)
         ctl.on_asr_words("about lebron james", [("about", 1.0, 2.1), ("lebron", 2.2, 2.6),
-                                                ("james", 2.6, 2.95)], t0 + 0.5)
+                                                ("james", 2.6, 2.9)], t0 + 0.5)
         self.assertEqual(ctl.partial_cancels, 0)
-        self.assertIn('asr_partial', [w[2] for w in sch._windows])
         self.assertEqual(ctl.asr_hits, 1)
+        # The provisional mute gives way to the heard name's own span.
+        self.assertEqual([w[2] for w in sch._windows], ['asr'])
+        start, end = sch._windows[0][:2]
+        self.assertAlmostEqual(start, t0 + 0.5 + 2.2 + 2.0 - sch.PAD_BEFORE_S, delta=0.01)
+        self.assertAlmostEqual(end, t0 + 0.5 + 2.9 + 2.0 + sch.PAD_AFTER_S, delta=0.01)
+
 
     def test_started_mute_is_cut_short_not_dropped(self):
         ctl, sch = self._ctl(delay=0.0)
@@ -318,6 +323,95 @@ class TestPartialNames(unittest.TestCase):
         t0 = time.monotonic()
         ctl.on_asr_words("know about leb", [("know", 1.0, 1.5), ("about", 1.5, 2.6), ("leb", 2.7, 3.0)], t0)
         self.assertEqual(sch._windows, [])
+
+
+class TestNarrowing(unittest.TestCase):
+    """A precise ASR word span narrows coarser mutes for the same mention."""
+
+    def _ctl(self, delay=2.0):
+        sch = NameMuteScheduler(FakeAudio(), lambda: delay)
+        ctl = NameMuteController(sch)
+        ctl.window_s = 3.0
+        return ctl, sch
+
+    def test_whole_sighting_narrows_cut_off_word(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        ctl.on_asr_words("said lebron", [("said", 2.0, 2.4), ("lebron", 2.5, 3.0)], t0)
+        self.assertEqual([w[2] for w in sch._windows], ['asr_edge'])
+        ctl.on_asr_words("said lebron today", [("said", 1.5, 1.9), ("lebron", 2.0, 2.4),
+                                                ("today", 2.4, 2.8)], t0 + 0.5)
+        self.assertEqual([w[2] for w in sch._windows], ['asr'])
+        self.assertAlmostEqual(sch._windows[0][1], t0 + 0.5 + 2.4 + 2.0 + sch.PAD_AFTER_S, delta=0.01)
+        self.assertEqual(ctl.asr_hits, 1)
+        # Later repeats of the whole word change nothing.
+        ctl.on_asr_words("lebron today", [("lebron", 1.5, 1.9), ("today", 1.9, 2.3)], t0 + 1.0)
+        self.assertEqual(len(sch._windows), 1)
+
+    def test_playing_caption_mute_is_cut_to_the_word(self):
+        ctl, sch = self._ctl(delay=0.0)
+        now = time.monotonic()
+        ctl.on_caption_texts(["here comes LeBron again"], now)   # mutes now-0.7 .. now+0.7
+        self.assertEqual([w[2] for w in sch._windows], ['caption'])
+        ctl.on_asr_words("comes lebron", [("comes", 0.5, 0.9), ("lebron", 1.0, 1.3)], now - 1.5)
+        end = sch._windows[0][1]
+        self.assertLess(end, now + 0.7 - 0.2)
+        log = [d for d in sch.detection_log if d['source'] == 'caption'][0]
+        self.assertEqual(log['play_end'], end)
+        self.assertTrue(log['narrowed'])
+
+    def test_dropped_window_logged_as_zero_length(self):
+        ctl, sch = self._ctl()
+        now = time.monotonic()
+        ctl.on_caption_texts(["here comes LeBron again"], now)
+        ctl.on_asr_words("comes lebron", [("comes", 0.5, 0.9), ("lebron", 1.0, 1.3)], now - 1.5)
+        self.assertEqual([w[2] for w in sch._windows], ['asr'])
+        log = [d for d in sch.detection_log if d['source'] == 'caption'][0]
+        self.assertEqual(log['play_end'], log['play_start'])
+
+
+class TestBanners(unittest.TestCase):
+    """On-screen banners naming him are not spoken mentions."""
+
+    def _ctl(self, delay=2.0):
+        sch = NameMuteScheduler(FakeAudio(), lambda: delay)
+        ctl = NameMuteController(sch)
+        ctl.window_s = 3.0
+        return ctl, sch
+
+    def test_banner_misreads_mute_once(self):
+        ctl, sch = self._ctl()
+        t = time.monotonic()
+        reads = ["Skip's Twitter explodes after questioning LeBron's GOAT status",
+                 "stioning LeBron's GOAT status", "ig LeBron's GOAT status",
+                 "ing LeBron's GOAT status", "g LeBron's GOAT status",
+                 "questiofing LeBron's GOAT status"]
+        for i, r in enumerate(reads * 3):           # 18 frames over 27 s
+            ctl.on_caption_texts([r], t + 1.5 * i)
+        self.assertEqual(ctl.caption_hits, 1)
+
+    def test_mid_line_hit_cancelled_when_not_spoken(self):
+        ctl, sch = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["Is LeBron James really better than Michael Jordan?"], t)
+        self.assertEqual([w[2] for w in sch._windows], ['caption_mid'])
+        # The ASR heard that moment clearly, and no name in it.
+        ctl.on_asr_words("the thing is he was dominant in that",
+                         [("the", 0.3, 0.5), ("thing", 0.5, 0.8), ("is", 0.8, 0.9),
+                          ("he", 0.9, 1.0), ("was", 1.0, 1.2), ("dominant", 1.2, 1.7),
+                          ("in", 1.7, 1.8), ("that", 1.8, 2.5)], t - 2.0)
+        self.assertEqual(sch._windows, [])
+        self.assertEqual(ctl.caption_mid_cancels, 1)
+
+    def test_rolling_caption_at_line_end_not_provisional(self):
+        ctl, sch = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["what they did for LeBron"], t)
+        ctl.on_asr_words("the thing is he was dominant in that",
+                         [("the", 0.3, 0.5), ("thing", 0.5, 0.8), ("is", 0.8, 0.9),
+                          ("he", 0.9, 1.0), ("was", 1.0, 1.2), ("dominant", 1.2, 1.7),
+                          ("in", 1.7, 1.8), ("that", 1.8, 2.5)], t - 2.0)
+        self.assertEqual([w[2] for w in sch._windows], ['caption'])
 
 
 if __name__ == '__main__':

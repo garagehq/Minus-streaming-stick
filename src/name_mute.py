@@ -133,12 +133,14 @@ class NameMuteScheduler:
     capture-to-speaker delay in seconds.
     """
 
-    # Default pads (used for ASR word spans), from live Google TV runs scored
-    # against YouTube caption tracks (tests/name_mute_live_analyze.py).
-    # Moonshine word starts land after the caption word by a median of
-    # 0.22-0.40s depending on the broadcast (p90 0.38-0.64s).
-    PAD_BEFORE_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_BEFORE', '0.4'))
-    PAD_AFTER_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_AFTER', '0.35'))
+    # Default pads (used for ASR word spans). SenseVoice name starts land
+    # after the caption word start by a median 0.16-0.19s (p90 0.2-0.6s) on
+    # the two held-out videos, and its word ends run ~0.15s past the
+    # caption's. Wider pads fully cover a few more names against the
+    # caption track but mute more of the speech around them; these keep a
+    # mention's mute to roughly the name plus ~0.6s.
+    PAD_BEFORE_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_BEFORE', '0.35'))
+    PAD_AFTER_S = float(os.environ.get('MINUS_NAME_MUTE_PAD_AFTER', '0.25'))
     # A detection that arrives too late to cover the word still mutes this
     # long, so a missed head start still cuts the tail of the name.
     MIN_LATE_MUTE_S = float(os.environ.get('MINUS_NAME_MUTE_MIN_LATE', '0.8'))
@@ -148,7 +150,7 @@ class NameMuteScheduler:
         self._audio = audio
         self._delay_fn = delay_fn
         self._lock = threading.Lock()
-        self._windows = []          # [(play_start, play_end, source, label)]
+        self._windows = []          # [(play_start, play_end, source, label, log entry)]
         self._muted = False
         self._stop = threading.Event()
         self._thread = None
@@ -183,9 +185,10 @@ class NameMuteScheduler:
                  replace_sources=()):
         """Mute the playback of audio captured in [capture_start, capture_end].
 
-        replace_sources: pending (not yet started) windows from these sources
-        that overlap this one are dropped first, so a precise detection
-        replaces a coarse one for the same mention instead of widening it.
+        replace_sources: windows from these sources that overlap this one
+        are narrowed first, so a precise detection replaces a coarse one for
+        the same mention instead of widening it: dropped if not yet
+        playing, cut to end with this window if they are.
         """
         delay = max(0.0, float(self._delay_fn() or 0.0))
         pb = self.PAD_BEFORE_S if pad_before is None else pad_before
@@ -195,10 +198,15 @@ class NameMuteScheduler:
         now = time.monotonic()
         if replace_sources:
             with self._lock:
-                self._windows = [
-                    w for w in self._windows
-                    if not (w[2] in replace_sources and w[0] > now
-                            and w[0] < end + 0.8 and w[1] > start - 0.8)]
+                kept = []
+                for w in self._windows:
+                    if w[2] in replace_sources and w[0] < end + 0.8 and w[1] > start - 0.8:
+                        if w[0] > now:
+                            self._narrowed(w, w[0])      # not started: drop
+                            continue
+                        w = self._narrowed(w, min(w[1], max(now, end)))
+                    kept.append(w)
+                self._windows = kept
         with self._lock:
             covered = any(w[0] <= start and end <= w[1] for w in self._windows)
         entry = {'source': source, 'label': label, 'detected': now,
@@ -224,7 +232,7 @@ class NameMuteScheduler:
             end = max(end, now + self.MIN_LATE_MUTE_S)
         entry['play_start'], entry['play_end'] = start, end
         with self._lock:
-            self._windows.append((start, end, source, label))
+            self._windows.append((start, end, source, label, entry))
             self.mute_count += 1
             self.events.append((time.time(), source, label, on_time))
             del self.events[:-50]
@@ -246,13 +254,25 @@ class NameMuteScheduler:
                 if w[2] == source and w[0] >= p0 - self.PAD_BEFORE_S - 0.05 and w[0] <= p1:
                     changed += 1
                     if w[0] > now:
-                        continue                 # not started: drop
-                    w = (w[0], min(w[1], now), w[2], w[3])
+                        self._narrowed(w, w[0])  # not started: drop
+                        continue
+                    w = self._narrowed(w, min(w[1], now))
                 kept.append(w)
             self._windows = kept
         if changed:
             logger.info(f"[NameMute] {source}: provisional mute cancelled ({changed})")
         return changed
+
+    @staticmethod
+    def _narrowed(w, end):
+        """Window `w` cut to end at `end` (== its start: dropped). Its
+        detection-log entry follows, so offline analysis scores the mute
+        that actually played."""
+        entry = w[4] if len(w) > 4 else None
+        if entry is not None:
+            entry['play_end'] = end
+            entry['narrowed'] = True
+        return (w[0], end) + tuple(w[2:])
 
     def _run(self):
         while not self._stop.is_set():
@@ -321,6 +341,19 @@ class NameMuteController:
     # for LeBron" / "they loking for LeBron"); text before the name this
     # similar to a recent one is the same mention.
     CAPTION_FUZZY_RATIO = 0.6
+    # The same comparison on the text after the name (absorbs misreads of
+    # the start of a line, "ig LeBron's GOAT status" / "ing LeBron's GOAT
+    # status"), over at least this many characters.
+    CAPTION_AFTER_FUZZY_RATIO = 0.75
+    CAPTION_AFTER_MIN_CHARS = 5
+    # Rolling captions add words at the end of the line, so a mention is
+    # first seen at (or one or two words from) the end. A line that shows up
+    # with the name further in, followed by MID_LINE_WORDS or more words, is
+    # usually an on-screen banner ("... questioning LeBron's GOAT status")
+    # that nobody is saying: it mutes provisionally, and an ASR window that
+    # hears the moment the name would have been spoken whole, without the
+    # name, ends that mute.
+    MID_LINE_WORDS = 3
 
     # Partial names: a "le…"/"lebr…" fragment that is the last word of an
     # ASR window and starts within PARTIAL_EDGE_S of its end mutes
@@ -344,6 +377,8 @@ class NameMuteController:
         env = os.environ.get('MINUS_NAME_MUTE_PARTIAL')
         self.partial_names = partial_names if env is None else env != '0'
         self._recent_partial = []    # capture starts of provisional mutes
+        self._recent_mid = []        # capture times of mid-line caption hits
+        self.caption_mid_cancels = 0
         self.partial_hits = 0
         self.partial_cancels = 0
         # MINUS_NAME_MUTE_CAPTIONS=0 mutes from ASR only (OCR still runs).
@@ -362,33 +397,66 @@ class NameMuteController:
         if not spans and self.matcher.find(transcript):
             # No usable word timings: mute the whole window.
             spans = [(0.0, max((e for _, _, e in words), default=2.5))]
+        if words:
+            self._cancel_unheard_captions(words, window_start, bool(spans))
         if self.partial_names and words:
             self._check_partial(words, window_start, bool(spans))
         if not spans:
             return
         self.last_asr_text = transcript
         now = time.monotonic()
-        self._recent_asr = [c for c in self._recent_asr if now - c < 15.0]
+        self._recent_asr = [c for c in self._recent_asr if now - c[0] < 15.0]
         for s, e in spans:
             if e - s < self.ASR_MIN_WORD_S:
                 continue
+            truncated = s <= 0.05 or e >= self.window_s - 0.05
             if s <= 0.05:
                 # Word was already under way when this window began.
                 s -= self.TRUNCATED_WORD_EXTRA_S
             if e >= self.window_s - 0.05:
                 # Word runs past the end of this window; its true end is
-                # unknown. Later windows that see it whole are de-duplicated
-                # away, so cover the likely remainder here.
+                # unknown, so cover the likely remainder until a later
+                # window sees it whole and narrows the mute.
                 e += self.TRUNCATED_WORD_EXTRA_S
             c0, c1 = window_start + s, window_start + e
             center = (c0 + c1) / 2
-            if any(abs(center - c) < self.ASR_DEDUP_S for c in self._recent_asr):
+            near = [c for c in self._recent_asr if abs(center - c[0]) < self.ASR_DEDUP_S]
+            # Repeats of a mention are dropped, except the first whole
+            # sighting after only cut-off ones: it has the real word edges.
+            if near and (truncated or not all(c[1] for c in near)):
                 continue
-            self._recent_asr.append(center)
-            self.asr_hits += 1
-            self.scheduler.schedule(c0, c1, 'asr', transcript.strip()[:80],
+            self._recent_asr.append((center, truncated))
+            if not near:
+                self.asr_hits += 1
+            # The ASR word span is the most precise timing there is: it
+            # narrows any coarser mute (caption line, partial name, cut-off
+            # word) for the same mention to itself.
+            self.scheduler.schedule(c0, c1, 'asr_edge' if truncated else 'asr',
+                                    transcript.strip()[:80],
                                     {'word_start': round(s, 3), 'word_end': round(e, 3)},
-                                    replace_sources=('caption',))
+                                    replace_sources=('caption', 'caption_mid',
+                                                     'asr_partial', 'asr_edge'))
+
+    def _cancel_unheard_captions(self, words, window_start: float, has_name: bool):
+        """End mid-line caption mutes whose moment this window heard whole
+        without the name (the name was on screen, not spoken)."""
+        now = time.monotonic()
+        self._recent_mid = [c for c in self._recent_mid if now - c < 15.0]
+        if has_name or len(words) < 2 or not self._recent_mid:
+            return
+        inner = [(s, e) for _, s, e in words if s > 0.1 and e < self.window_s - 0.2]
+        if not inner:
+            return
+        c0 = window_start + min(s for s, _ in inner)
+        c1 = window_start + max(e for _, e in inner)
+        # Caption text shows ~0.66 s after the word starts: the name would
+        # have been spoken in [t - 1.0, t - 0.2] of the frame time t.
+        hit = [c for c in self._recent_mid if c0 <= c - 1.0 and c - 0.2 <= c1]
+        if hit:
+            n = self.scheduler.cancel('caption_mid', min(hit) - self.CAPTION_BEFORE_S - 0.1,
+                                      max(hit) + 0.1)
+            self.caption_mid_cancels += n
+            self._recent_mid = [c for c in self._recent_mid if c not in hit]
 
     def _check_partial(self, words, window_start: float, has_name: bool):
         now = time.monotonic()
@@ -462,7 +530,8 @@ class NameMuteController:
                     # pattern matched it.
                     key = (norm[:hit.start()] + hit.group(0).split(' ')[0])[-40:]
                     ctx = norm[:hit.start()].strip()[-20:]
-                    if self._seen_caption(key, ctx, now):
+                    rest = norm[hit.end():].strip()
+                    if self._seen_caption(key, ctx, rest[:20], now):
                         continue
                     self.caption_hits += 1
                     self.last_caption_text = line
@@ -470,24 +539,37 @@ class NameMuteController:
                     if (hit.end() >= len(norm.rstrip())
                             and 'james' not in hit.group(0)):
                         pad_after += self.CAPTION_LINE_END_EXTRA_S
+                    mid = len(rest.split()) >= self.MID_LINE_WORDS
+                    if mid:
+                        self._recent_mid.append(capture_time)
                     self.scheduler.schedule(capture_time, capture_time,
-                                            'caption', line.strip()[:80], meta,
+                                            'caption_mid' if mid else 'caption',
+                                            line.strip()[:80], meta,
                                             pad_before=self.CAPTION_BEFORE_S,
                                             pad_after=pad_after)
 
-    def _seen_caption(self, key: str, ctx: str, now: float) -> bool:
+    def _seen_caption(self, key: str, ctx: str, after: str, now: float) -> bool:
         """Has this caption mention been seen recently? Records it either way.
 
-        Exact key, or (when there is enough text before the name to compare)
-        a fuzzy match on that text, which absorbs OCR misreads of one line.
+        Exact key, or a fuzzy match on the text before the name (when there
+        is enough of it) or after it, which absorbs OCR misreads of one
+        line. Matching entries are refreshed, so text that stays on screen
+        (a banner) stays seen for as long as it is there.
         """
-        seen = key in self._recent_captions
-        if not seen and len(ctx) >= 4:
-            seen = any(len(c) >= 4 and difflib.SequenceMatcher(None, ctx, c).ratio()
-                       >= self.CAPTION_FUZZY_RATIO
-                       for _, c in self._recent_captions.values())
-        self._recent_captions[key] = (now, ctx)
-        return seen
+        def similar(a, b, ratio, n):
+            k = min(len(a), len(b))
+            return k >= n and difflib.SequenceMatcher(None, a[:k], b[:k]).ratio() >= ratio
+
+        matches = [k for k, (_, c, a) in self._recent_captions.items()
+                   if k == key
+                   or (len(ctx) >= 4 and len(c) >= 4 and difflib.SequenceMatcher(
+                       None, ctx, c).ratio() >= self.CAPTION_FUZZY_RATIO)
+                   or similar(after, a, self.CAPTION_AFTER_FUZZY_RATIO,
+                              self.CAPTION_AFTER_MIN_CHARS)]
+        for k in matches:
+            self._recent_captions[k] = (now,) + self._recent_captions[k][1:]
+        self._recent_captions[key] = (now, ctx, after)
+        return bool(matches)
 
     def get_status(self) -> dict:
         st = self.scheduler.get_status()
@@ -501,6 +583,7 @@ class NameMuteController:
             'partial_hits': self.partial_hits,
             'partial_cancels': self.partial_cancels,
             'caption_hits': self.caption_hits,
+            'caption_mid_cancels': self.caption_mid_cancels,
             'last_asr_text': self.last_asr_text[:200],
             'last_caption_text': self.last_caption_text[:200],
         })

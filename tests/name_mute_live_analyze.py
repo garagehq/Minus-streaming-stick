@@ -111,8 +111,9 @@ def main():
         else:
             missed.append((round(a, 1), text, 'missed'))
         for src in by_src:
-            # Provisional partial-name mutes (asr_partial) are ASR too.
-            if covered_by(a, b, {src, src + '_partial'}):
+            # Provisional partial-name mutes (asr_partial) and cut-off words
+            # (asr_edge) are ASR too.
+            if covered_by(a, b, {src, src + '_partial', src + '_edge', src + '_mid'}):
                 by_src[src] += 1
 
     extra = [(round(s, 1), round(e - s, 2), src, lab[:50], meta)
