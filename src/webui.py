@@ -2676,6 +2676,17 @@ class WebUI:
                 return jsonify({'available': False, 'enabled': False,
                                 'running': False, 'error': str(e)}), 500
 
+        @self.app.route('/api/loading-overlay/test', methods=['POST'])
+        def api_loading_overlay_test():
+            """Show the delay-refill spinner for a few seconds (to check it on
+            the TV: src/loading_overlay.py). JSON {"seconds": 3}."""
+            ad = getattr(self.minus, 'adaptive_delay', None)
+            if ad is None:
+                return jsonify({'success': False, 'error': 'adaptive delay is off'}), 400
+            secs = min(10.0, max(0.5, float((request.get_json(silent=True) or {}).get('seconds', 3))))
+            ad.overlay.show(lambda: False, max_s=secs)
+            return jsonify({'success': True, 'seconds': secs, **ad.overlay.get_status()})
+
         @self.app.route('/api/name-mute', methods=['GET'])
         def api_name_mute_status():
             """Name muter status: hits, recent mutes, A/V delay."""

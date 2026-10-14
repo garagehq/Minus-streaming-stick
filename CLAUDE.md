@@ -170,6 +170,21 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   (off), `MINUS_ADAPTIVE_QUIET_DBFS`, `MINUS_ADAPTIVE_ONSET_S`,
   `MINUS_ADAPTIVE_QUIET_S`. State in `/api/status` -> `adaptive_delay`.
   Programme audio measured -26..-12 dBFS (game commentary).
+  The level probe now sits on the ASR tap's leaky branch (2026-10-14), off
+  the playback path.
+  - *Refill spinner (`src/loading_overlay.py`, 2026-10-14).* During the
+    refill freeze, a dimmed layer with a spinner is drawn on a spare DRM
+    plane (auto: an ARGB overlay plane, 176 on minus-2) by a tiny
+    `appsrc ! kmssink` that shares the video kmssink's fd (only one fd can
+    be DRM master). It cannot go through ustreamer: those overlays are
+    drawn on captured frames, which sit in the same delay line. Stacking is
+    pinned: the video kmssink gets `plane-properties zpos=10`, the spinner
+    11, because the driver reports video plane 192 at zpos 14, above every
+    settable range. It hides when `avdelay` has refilled. Not yet checked on
+    a TV: `curl -X POST localhost/api/loading-overlay/test -d '{"seconds":3}'
+    -H 'Content-Type: application/json'` shows it. Tunables:
+    `MINUS_LOADING_OVERLAY=0`, `MINUS_LOADING_PLANE`, `MINUS_LOADING_ZPOS`,
+    `MINUS_LOADING_VIDEO_ZPOS`.
 - **Scheduler.** Detections are converted to capture times (the audio tap
   stamps its newest sample with `time.monotonic()`), then muted over
   `[start + delay - 0.4s, end + delay + 0.35s]` via

@@ -40,6 +40,7 @@ from gi.repository import Gst
 from vocabulary import SPANISH_VOCABULARY, VOCABULARY_COMBINED
 from facts import DID_YOU_KNOW
 from config import MinusConfig
+import loading_overlay
 from drm import (
     get_color_format, set_color_format, is_connector_connected,
     check_hdmi_i2c_errors, COLOR_FORMAT_YCBCR420, COLOR_FORMAT_NAMES,
@@ -433,6 +434,9 @@ class DRMAdBlocker:
                 f"queue max-size-buffers=3 leaky=downstream name=videoqueue ! "
                 f"identity name=fpsprobe ! "
                 f"kmssink plane-id={self.plane_id} connector-id={self.connector_id} sync=false skip-vsync=true"
+                # Below the loading spinner's plane (src/loading_overlay.py).
+                + (f' plane-properties="props,zpos={loading_overlay.VIDEO_ZPOS}"'
+                   if loading_overlay.ENABLED else '')
                 # skip-vsync=true: the rockchip BSP's legacy drmModeSetPlane ioctl BLOCKS
                 # until the flip latches at vblank (measured 16.67ms/call), so kmssink's
                 # own internal vsync wait was a SECOND full vblank -> every frame took
@@ -1180,6 +1184,9 @@ class DRMAdBlocker:
                 f"font-desc=\"Sans Bold 24\" ! "
                 f"videoconvert ! video/x-raw,format=NV12 ! "
                 f"kmssink plane-id={self.plane_id} connector-id={self.connector_id} sync=false skip-vsync=true"
+                # Below the loading spinner's plane (src/loading_overlay.py).
+                + (f' plane-properties="props,zpos={loading_overlay.VIDEO_ZPOS}"'
+                   if loading_overlay.ENABLED else '')
                 # skip-vsync=true: the rockchip BSP's legacy drmModeSetPlane ioctl BLOCKS
                 # until the flip latches at vblank (measured 16.67ms/call), so kmssink's
                 # own internal vsync wait was a SECOND full vblank -> every frame took
@@ -1377,6 +1384,9 @@ class DRMAdBlocker:
                 f"valignment=center halignment=center font-desc=\"Sans Bold 24\" ! "
                 f"videoconvert ! video/x-raw,format=NV12 ! "
                 f"kmssink plane-id={self.plane_id} connector-id={self.connector_id} sync=false skip-vsync=true"
+                # Below the loading spinner's plane (src/loading_overlay.py).
+                + (f' plane-properties="props,zpos={loading_overlay.VIDEO_ZPOS}"'
+                   if loading_overlay.ENABLED else '')
                 # skip-vsync=true: the rockchip BSP's legacy drmModeSetPlane ioctl BLOCKS
                 # until the flip latches at vblank (measured 16.67ms/call), so kmssink's
                 # own internal vsync wait was a SECOND full vblank -> every frame took

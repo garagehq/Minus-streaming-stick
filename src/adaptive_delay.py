@@ -31,6 +31,8 @@ import os
 import threading
 import time
 
+import loading_overlay
+
 logger = logging.getLogger(__name__)
 
 ENABLED = os.environ.get('MINUS_ADAPTIVE_DELAY', '1') != '0'
@@ -75,6 +77,8 @@ class AdaptiveDelay:
     def __init__(self, audio, video, delay_s: float):
         self.audio, self.video, self.delay_s = audio, video, delay_s
         self.decider = DelayModeDecider()
+        # Spinner over the frozen picture while the delay line refills.
+        self.overlay = loading_overlay.LoadingOverlay(video)
         self.mode = DELAYED            # both pipelines are built delayed
         self.switches = {LIVE: 0, DELAYED: 0}
         self.last_switch = None
@@ -111,7 +115,8 @@ class AdaptiveDelay:
     def _switch(self, mode: str):
         live = mode == LIVE
         t = time.monotonic()
-        queues = [q for q in (self.audio.delay_queue_plan(live), self.video.delay_queue_plan(live)) if q]
+        vplan = self.video.delay_queue_plan(live)
+        queues = [q for q in (self.audio.delay_queue_plan(live), vplan) if q]
         with self.audio.queue_lock:
             if live:
                 # Drop the (silent) backlog: shrink + leak first so nothing
@@ -134,6 +139,13 @@ class AdaptiveDelay:
                     q.set_property('min-threshold-time', thr)
             self.audio.set_delay_live(live)
             self.video.set_delay_live(live)
+        if live:
+            self.overlay.hide()
+        elif vplan is not None:
+            # The picture holds until the video queue has refilled.
+            vq, vthr, _ = vplan
+            self.overlay.show(lambda: vq.get_property('current-level-time') >= vthr * 0.97,
+                              max_s=self.delay_s + 1.5)
         self.mode = mode
         self.switches[mode] += 1
         self.last_switch = time.time()
@@ -145,4 +157,5 @@ class AdaptiveDelay:
         return {'enabled': True, 'mode': self.mode, 'delay_s': self.delay_s,
                 'input_dbfs': None if self.input_dbfs is None else round(self.input_dbfs, 1),
                 'quiet_dbfs': QUIET_DBFS, 'onset_s': ONSET_S, 'quiet_s': QUIET_S,
-                'switches': dict(self.switches), 'last_switch': self.last_switch}
+                'switches': dict(self.switches), 'last_switch': self.last_switch,
+                'loading_overlay': self.overlay.get_status()}
