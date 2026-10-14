@@ -185,6 +185,17 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     -H 'Content-Type: application/json'` shows it. Tunables:
     `MINUS_LOADING_OVERLAY=0`, `MINUS_LOADING_PLANE`, `MINUS_LOADING_ZPOS`,
     `MINUS_LOADING_VIDEO_ZPOS`.
+  - *BLOCKED badge (same module, 2026-10-14, client request).* While the
+    name muter has the speakers muted, a red rounded "BLOCKED" badge (the
+    demo videos' MUTED badge look: DejaVu Sans Bold, scaled to 1080p) sits
+    top right. `NameMuteScheduler.on_mute_change` feeds
+    `ScreenOverlay.set_blocked`; it follows the real mute switch on the
+    delayed output, so it lines up with the matching picture. Mutes within
+    0.25 s keep one badge up. Spinner and badge share the one spare plane:
+    a single `ScreenOverlay` per video output (`loading_overlay.for_video`)
+    composites both into a 1920x1080 layer and releases the plane after 5 s
+    with nothing shown. Test: same endpoint with `{"seconds":3,"badge":true}`.
+    `MINUS_BLOCKED_BADGE=0` turns just the badge off.
 - **Scheduler.** Detections are converted to capture times (the audio tap
   stamps its newest sample with `time.monotonic()`), then muted over
   `[start + delay - 0.4s, end + delay + 0.35s]` via

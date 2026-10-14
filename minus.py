@@ -207,6 +207,7 @@ from drm import probe_drm_output
 from v4l2 import probe_v4l2_device
 from name_mute import NameMatcher, NameMuteScheduler, NameMuteController
 import adaptive_delay
+import loading_overlay
 from asr_clips import ASRClipCollector
 from ustreamer_proc import kill_ustreamer
 from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR, STREAM_FPS, ENCODE_SCALE
@@ -1097,6 +1098,9 @@ class Minus:
                         self._system_settings.get('name_mute_surname', False))),
                     partial_names=getattr(self.asr, 'engine', '') == 'sensevoice')
                 self.name_mute.enabled = bool(self._system_settings.get('name_mute', True))
+                if self.ad_blocker is not None:
+                    # BLOCKED badge on screen while the name mute is on.
+                    scheduler.on_mute_change = loading_overlay.for_video(self.ad_blocker).set_blocked
                 scheduler.start()
                 if self.asr is not None:
                     self.name_mute.window_s = self.asr.WINDOW_SECONDS

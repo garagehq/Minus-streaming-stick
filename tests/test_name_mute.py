@@ -105,6 +105,21 @@ class TestScheduler(unittest.TestCase):
             sch.stop()
         self.assertEqual(sch.late_count, 1)
 
+    def test_mute_change_hook_follows_the_switch(self):
+        # Drives the on-screen BLOCKED badge.
+        audio, seen = FakeAudio(), []
+        sch = NameMuteScheduler(audio, lambda: 0.3)
+        sch.on_mute_change = seen.append
+        sch.start()
+        try:
+            now = time.monotonic()
+            sch.schedule(now, now + 0.1, 'asr', 'LeBron', pad_before=0.0, pad_after=0.0)
+            time.sleep(0.7)
+        finally:
+            sch.stop()
+        self.assertEqual(seen[:2], [True, False])
+        self.assertEqual([m for _, m in audio.calls][:2], [True, False])
+
 
 class TestController(unittest.TestCase):
     def _ctl(self):

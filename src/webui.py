@@ -2678,14 +2678,22 @@ class WebUI:
 
         @self.app.route('/api/loading-overlay/test', methods=['POST'])
         def api_loading_overlay_test():
-            """Show the delay-refill spinner for a few seconds (to check it on
-            the TV: src/loading_overlay.py). JSON {"seconds": 3}."""
-            ad = getattr(self.minus, 'adaptive_delay', None)
-            if ad is None:
-                return jsonify({'success': False, 'error': 'adaptive delay is off'}), 400
-            secs = min(10.0, max(0.5, float((request.get_json(silent=True) or {}).get('seconds', 3))))
-            ad.overlay.show(lambda: False, max_s=secs)
-            return jsonify({'success': True, 'seconds': secs, **ad.overlay.get_status()})
+            """Show the delay-refill spinner, or with "badge": true the
+            BLOCKED badge, for a few seconds (to check them on the TV:
+            src/loading_overlay.py). JSON {"seconds": 3, "badge": false}."""
+            import loading_overlay
+            video = getattr(self.minus, 'ad_blocker', None)
+            if video is None:
+                return jsonify({'success': False, 'error': 'no video output'}), 400
+            body = request.get_json(silent=True) or {}
+            secs = min(10.0, max(0.5, float(body.get('seconds', 3))))
+            ov = loading_overlay.for_video(video)
+            if body.get('badge'):
+                ov.set_blocked(True)
+                threading.Timer(secs, ov.set_blocked, args=(False,)).start()
+            else:
+                ov.show(lambda: False, max_s=secs)
+            return jsonify({'success': True, 'seconds': secs, **ov.get_status()})
 
         @self.app.route('/api/name-mute', methods=['GET'])
         def api_name_mute_status():

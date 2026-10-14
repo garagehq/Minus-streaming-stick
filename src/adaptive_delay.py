@@ -78,7 +78,7 @@ class AdaptiveDelay:
         self.audio, self.video, self.delay_s = audio, video, delay_s
         self.decider = DelayModeDecider()
         # Spinner over the frozen picture while the delay line refills.
-        self.overlay = loading_overlay.LoadingOverlay(video)
+        self.overlay = loading_overlay.for_video(video)
         self.mode = DELAYED            # both pipelines are built delayed
         self.switches = {LIVE: 0, DELAYED: 0}
         self.last_switch = None

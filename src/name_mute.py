@@ -165,6 +165,9 @@ class NameMuteScheduler:
         # Optional callback(entry) for every detection (training-clip
         # collector, src/asr_clips.py). Runs on the detector's thread.
         self.on_detection = None
+        # Optional callback(muted) whenever the mute switches (the BLOCKED
+        # badge, src/loading_overlay.py). Runs on the scheduler's thread.
+        self.on_mute_change = None
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -290,6 +293,12 @@ class NameMuteScheduler:
             self._muted = muted
         except Exception as e:
             logger.warning(f"[NameMute] set_name_mute failed: {e}")
+            return
+        if self.on_mute_change is not None:
+            try:
+                self.on_mute_change(muted)
+            except Exception as e:
+                logger.debug(f"[NameMute] on_mute_change hook failed: {e}")
 
     def get_status(self) -> dict:
         with self._lock:

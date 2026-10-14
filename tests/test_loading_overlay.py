@@ -1,6 +1,7 @@
 """Loading spinner (src/loading_overlay.py): frames and plane choice."""
 import os
 import sys
+import time
 import unittest
 
 import numpy as np
@@ -81,33 +82,69 @@ class TestPlanes(unittest.TestCase):
 
 
 class TestFrames(unittest.TestCase):
-    def test_frames(self):
-        frames, clear = lo.render_frames(w=320, h=180, n=6)
-        self.assertEqual(len(frames), 6)
-        self.assertEqual(clear, bytes(320 * 180 * 4))
-        px = [np.frombuffer(f, np.uint8).reshape(180, 320, 4) for f in frames]
-        for x in px:
-            # Premultiplied: no colour channel exceeds alpha.
-            self.assertTrue((x[..., :3].max(axis=2) <= x[..., 3]).all())
-            # Corners are the plain dim layer.
-            self.assertEqual(int(x[0, 0, 3]), round(lo.DIM_ALPHA * 255))
-            self.assertEqual(int(x[0, 0, :3].max()), 0)
-            # The spinner is white and brighter than the dim layer.
-            self.assertGreater(int(x[60:120, 130:190, 0].max()), 200)
-        self.assertFalse(np.array_equal(px[0], px[1]))    # it moves
+    def setUp(self):
+        self.spin = lo.render_spinner(n=6, size=60, h=180)
+        self.badge = lo.render_badge()
+
+    def test_spinner_frames(self):
+        self.assertEqual(len(self.spin), 6)
+        self.assertEqual(self.spin[0].shape, (60, 60, 4))
+        self.assertFalse(np.array_equal(self.spin[0], self.spin[1]))    # it moves
+
+    def test_spinner_layer(self):
+        x = lo.compose(self.spin[0], None, w=320, h=180)
+        # Premultiplied: no colour channel exceeds alpha.
+        self.assertTrue((x[..., :3].max(axis=2) <= x[..., 3]).all())
+        # Corners are the plain dim layer.
+        self.assertEqual(int(x[0, 0, 3]), round(lo.DIM_ALPHA * 255))
+        self.assertEqual(int(x[0, 0, :3].max()), 0)
+        # The spinner is white and brighter than the dim layer.
+        self.assertGreater(int(x[60:120, 130:190, 0].max()), 200)
+
+    def test_clear_layer(self):
+        self.assertFalse(lo.compose(None, None, w=320, h=180).any())
+
+    def test_badge_top_right(self):
+        bh, bw = self.badge.shape[:2]
+        self.assertEqual(bh, lo.BADGE_H)
+        x = lo.compose(None, self.badge)
+        self.assertTrue((x[..., :3].max(axis=2) <= x[..., 3]).all())
+        m = lo.BADGE_MARGIN
+        box = x[m:m + bh, lo.W - m - bw:lo.W - m]
+        # Opaque red bubble (BGRA), white text inside, nothing elsewhere.
+        r, g, b, a = lo.BADGE_RGBA
+        self.assertEqual(tuple(int(v) for v in box[bh // 2, 8]), (
+            round(b * a / 255), round(g * a / 255), round(r * a / 255), a))
+        self.assertTrue((box[..., :3].min(axis=2) > 240).any())
+        self.assertEqual(int(box[0, 0, 3]), 0)             # rounded corner
+        rest = x.copy()
+        rest[m:m + bh, lo.W - m - bw:lo.W - m] = 0
+        self.assertFalse(rest.any())
+
+    def test_badge_over_spinner_stays_opaque(self):
+        x = lo.compose(lo.render_spinner(n=1)[0], self.badge)
+        m = lo.BADGE_MARGIN
+        self.assertGreaterEqual(int(x[m + lo.BADGE_H // 2, lo.W - m - 20, 3]), lo.BADGE_RGBA[3])
 
 
 class TestHeadless(unittest.TestCase):
+    class Video:
+        pipeline = None
+        plane_id = 192
+        connector_id = 215
+
     def test_no_display_pipeline_is_a_no_op(self):
-        class Video:
-            pipeline = None
-            plane_id = 192
-            connector_id = 215
-        ov = lo.LoadingOverlay(Video())
+        ov = lo.ScreenOverlay(self.Video())
         ov.show(lambda: False, max_s=0.2)
-        ov._thread.join(2)
-        self.assertEqual(ov.shown_count, 0)
-        self.assertEqual(ov.last_error, '')
+        ov.set_blocked(True)
+        time.sleep(0.3)
+        st = ov.get_status()
+        self.assertEqual((st['shown'], st['badge_shown'], st['blocked_now']), (0, 0, False))
+        self.assertEqual(st['last_error'], '')
+
+    def test_one_overlay_per_video(self):
+        v = self.Video()
+        self.assertIs(lo.for_video(v), lo.for_video(v))
 
 
 if __name__ == '__main__':
