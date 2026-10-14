@@ -443,16 +443,27 @@ class AudioPassthrough:
             self.bus.connect('message::eos', self._on_eos)
             self.bus.connect('message::state-changed', self._on_state_changed)
 
-            # Add probe to track buffer flow (for stall detection)
-            queue = self.pipeline.get_by_name('audioqueue')
-            if queue:
-                pad = queue.get_static_pad('src')
-                if pad:
-                    pad.add_probe(Gst.PadProbeType.BUFFER, self._buffer_probe, None)
-            syncqueue = self.pipeline.get_by_name('syncqueue')
-            if syncqueue:
-                syncqueue.get_static_pad('sink').add_probe(
-                    Gst.PadProbeType.BUFFER, self._input_level_probe, None)
+            # Python pad probes: buffer flow (stall detection, visualizer
+            # level) and the input level (adaptive delay). They need the GIL,
+            # so with the ASR tap they sit on its leaky branch, off the
+            # playback path: on audioqueue/syncqueue a GIL stall paused the
+            # output (up to 0.7 s seen with the web API busy), an audible
+            # gap that also left the delay that much longer.
+            asrqueue = self.pipeline.get_by_name('asrqueue')
+            if asrqueue is not None:
+                pad = asrqueue.get_static_pad('src')
+                pad.add_probe(Gst.PadProbeType.BUFFER, self._buffer_probe, None)
+                pad.add_probe(Gst.PadProbeType.BUFFER, self._input_level_probe, None)
+            else:
+                queue = self.pipeline.get_by_name('audioqueue')
+                if queue:
+                    pad = queue.get_static_pad('src')
+                    if pad:
+                        pad.add_probe(Gst.PadProbeType.BUFFER, self._buffer_probe, None)
+                syncqueue = self.pipeline.get_by_name('syncqueue')
+                if syncqueue:
+                    syncqueue.get_static_pad('sink').add_probe(
+                        Gst.PadProbeType.BUFFER, self._input_level_probe, None)
 
             # Attach the ASR tap to the appsink (if a tap is configured).
             # Done here, after parse_launch, so the tap gets re-attached
