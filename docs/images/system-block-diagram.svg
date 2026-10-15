@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 780" width="1200" height="780" font-family="DejaVu Sans, Helvetica, Arial, sans-serif">
+  <defs>
+    <style>
+      .box   { fill: #ffffff; stroke: #1f2937; stroke-width: 2; }
+      .board { fill: #f3f4f6; stroke: #1f2937; stroke-width: 2.5; }
+      .inner { fill: #ffffff; stroke: #6b7280; stroke-width: 1.5; }
+      .ai    { fill: #ede9fe; stroke: #7c3aed; stroke-width: 2; }
+      .pwr   { fill: #fff7ed; stroke: #c2410c; stroke-width: 2; }
+      .t     { font-size: 17px; font-weight: bold; fill: #111827; text-anchor: middle; }
+      .s     { font-size: 13px; fill: #374151; text-anchor: middle; }
+      .h     { stroke: #2563eb; stroke-width: 3; fill: none; }
+      .p     { stroke: #c2410c; stroke-width: 2.5; fill: none; stroke-dasharray: 8 5; }
+      .lh    { font-size: 13px; font-weight: bold; fill: #2563eb; text-anchor: middle; }
+      .lp    { font-size: 13px; font-weight: bold; fill: #c2410c; text-anchor: middle; }
+      .port  { font-size: 12px; font-weight: bold; fill: #2563eb; text-anchor: middle; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="780" fill="#ffffff"/>
+  <text x="30" y="40" font-size="24" font-weight="bold" fill="#111827">Minus: hardware block diagram</text>
+
+  <!-- Streaming device -->
+  <rect class="box" x="20" y="180" width="160" height="90" rx="10"/>
+  <text class="t" x="100" y="218">Streaming device</text>
+  <text class="s" x="100" y="242">Roku / Fire TV</text>
+  <text class="s" x="100" y="259">Google TV</text>
+
+  <!-- HDMI splitter -->
+  <rect class="box" x="235" y="180" width="160" height="90" rx="10"/>
+  <text class="t" x="315" y="218">HDMI splitter</text>
+  <text class="s" x="315" y="242">1 in → 2 out</text>
+
+  <!-- Splitter output 2: unblocked view -->
+  <rect class="box" x="205" y="60" width="220" height="72" rx="10"/>
+  <text class="t" x="315" y="86">2nd display (optional)</text>
+  <text class="s" x="315" y="106">original footage,</text>
+  <text class="s" x="315" y="123">content NOT blocked</text>
+
+  <!-- ROCK 5B+ board -->
+  <rect class="board" x="470" y="80" width="440" height="390" rx="14"/>
+  <text class="t" x="690" y="112">Radxa ROCK 5B+</text>
+
+  <rect class="inner" x="500" y="130" width="380" height="110" rx="8"/>
+  <text class="t" x="690" y="165">RK3588 SoC</text>
+  <text class="s" x="690" y="190">HDMI RX (capture) + HDMI TX (output)</text>
+  <text class="s" x="690" y="212">VPU (video)  ·  NPU (OCR)</text>
+
+  <rect class="ai" x="500" y="262" width="180" height="96" rx="8"/>
+  <text class="t" x="590" y="290">M.2 M-key slot</text>
+  <text class="s" x="590" y="314" font-weight="bold" fill="#5b21b6">AI-8850 accelerator</text>
+  <text class="s" x="590" y="334">plugs into the M.2 slot</text>
+  <text class="s" x="590" y="351">runs the VLM</text>
+
+  <rect class="inner" x="700" y="262" width="180" height="96" rx="8"/>
+  <text class="t" x="790" y="290">microSD slot</text>
+  <text class="s" x="790" y="314" font-weight="bold">SD card (required)</text>
+  <text class="s" x="790" y="334">64 GB+, A2 rated</text>
+  <text class="s" x="790" y="351">OS + Minus</text>
+
+  <rect class="inner" x="500" y="380" width="380" height="64" rx="8"/>
+  <text class="t" x="690" y="406">USB-C power input</text>
+  <text class="s" x="690" y="428">USB-C PD, 30 W or more</text>
+
+  <!-- HDMI ports on board edge -->
+  <rect x="462" y="212" width="16" height="26" fill="#2563eb" rx="3"/>
+  <rect x="902" y="212" width="16" height="26" fill="#2563eb" rx="3"/>
+  <text class="port" x="452" y="258">IN</text>
+  <text class="port" x="934" y="258">OUT</text>
+
+  <!-- TV -->
+  <rect class="box" x="980" y="180" width="190" height="90" rx="10"/>
+  <text class="t" x="1075" y="218">TV</text>
+  <text class="s" x="1075" y="242">content blocked</text>
+
+  <!-- HDMI links -->
+  <text class="lh" x="207" y="208">HDMI</text>
+  <path class="h" d="M180,225 L225,225"/>
+  <text class="lh" x="428" y="208">HDMI</text>
+  <path class="h" d="M395,225 L452,225"/>
+  <text class="lh" x="345" y="162">HDMI</text>
+  <path class="h" d="M315,180 L315,144"/>
+  <text class="lh" x="948" y="208">HDMI</text>
+  <path class="h" d="M918,225 L970,225"/>
+
+  <!-- Power: HDMI splitter -->
+  <path class="p" d="M315,556 L315,282"/>
+  <text class="lp" x="370" y="400">USB cable</text>
+  <text class="lp" x="370" y="418">5 V, 500 mA</text>
+  <rect class="pwr" x="215" y="558" width="200" height="70" rx="10"/>
+  <text class="t" x="315" y="588">USB wall brick</text>
+  <text class="s" x="315" y="610">5 V, 500 mA or more</text>
+  <path class="p" d="M315,690 L315,640"/>
+  <rect class="pwr" x="215" y="692" width="200" height="62" rx="10"/>
+  <text class="t" x="315" y="719">Wall outlet</text>
+  <text class="s" x="315" y="740">100-240 V AC</text>
+
+  <!-- Power: ROCK 5B+ -->
+  <path class="p" d="M690,556 L690,456"/>
+  <text class="lp" x="758" y="505">USB-C cable</text>
+  <rect class="pwr" x="580" y="558" width="220" height="70" rx="10"/>
+  <text class="t" x="690" y="588">USB-C PD power adapter</text>
+  <text class="s" x="690" y="610">30 W or more</text>
+  <path class="p" d="M690,690 L690,640"/>
+  <rect class="pwr" x="580" y="692" width="220" height="62" rx="10"/>
+  <text class="t" x="690" y="719">Wall outlet</text>
+  <text class="s" x="690" y="740">100-240 V AC</text>
+
+  <!-- Legend -->
+  <rect x="930" y="600" width="240" height="100" fill="#f9fafb" stroke="#d1d5db" rx="8"/>
+  <text x="948" y="628" font-size="14" font-weight="bold" fill="#111827">Legend</text>
+  <line class="h" x1="948" y1="652" x2="998" y2="652"/>
+  <text x="1010" y="657" font-size="13" fill="#374151">HDMI video + audio</text>
+  <line class="p" x1="948" y1="680" x2="998" y2="680"/>
+  <text x="1010" y="685" font-size="13" fill="#374151">Power</text>
+
+  <!-- Arrowheads -->
+  <polygon points="235,225 224,219 224,231" fill="#2563eb"/>
+  <polygon points="462,225 451,219 451,231" fill="#2563eb"/>
+  <polygon points="315,132 309,143 321,143" fill="#2563eb"/>
+  <polygon points="980,225 969,219 969,231" fill="#2563eb"/>
+  <polygon points="315,272 309,283 321,283" fill="#c2410c"/>
+  <polygon points="315,630 309,641 321,641" fill="#c2410c"/>
+  <polygon points="690,446 684,457 696,457" fill="#c2410c"/>
+  <polygon points="690,630 684,641 696,641" fill="#c2410c"/>
+</svg>
