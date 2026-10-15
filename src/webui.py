@@ -2693,6 +2693,45 @@ class WebUI:
                 logger.error(f"Error disabling ASR: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
+        @self.app.route('/api/contribute/status', methods=['GET'])
+        def api_contribute_status():
+            """Anonymous ad-snapshot contribution (opt-in) — current state."""
+            try:
+                c = getattr(self.minus, 'contributor', None)
+                if c is None:
+                    return jsonify({'available': False, 'enabled': False})
+                return jsonify({'available': True, **c.status()})
+            except Exception as e:
+                logger.error(f"Error getting contribution status: {e}")
+                return jsonify({'available': False, 'enabled': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/contribute/enable', methods=['POST'])
+        def api_contribute_enable():
+            """Opt IN to anonymous ad-snapshot contribution. The request must
+            carry {"consent": true} — the UI only sends it after the user has
+            read and accepted what is shared, so nothing can opt a box in by
+            accident (a bare POST is refused)."""
+            try:
+                body = request.get_json(silent=True) or {}
+                if body.get('consent') is not True:
+                    return jsonify({'success': False,
+                                    'error': 'explicit consent required ({"consent": true})'}), 400
+                result = self.minus.set_contribute_snapshots(True)
+                return jsonify(result), (200 if result.get('success') else 500)
+            except Exception as e:
+                logger.error(f"Error enabling contribution: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/contribute/disable', methods=['POST'])
+        def api_contribute_disable():
+            """Opt OUT: stops uploads and deletes the local queue."""
+            try:
+                result = self.minus.set_contribute_snapshots(False)
+                return jsonify(result), (200 if result.get('success') else 500)
+            except Exception as e:
+                logger.error(f"Error disabling contribution: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
         @self.app.route('/api/asr/test', methods=['POST'])
         def api_asr_test():
             """Run a WAV through the live ASR worker end-to-end (transcribe →

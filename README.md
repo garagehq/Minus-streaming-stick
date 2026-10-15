@@ -7,7 +7,7 @@
 
 Minus is an open-source HDMI box that sits between your streaming device and your TV. It watches the video feed, detects ads with ML models running locally on its own NPUs, then mutes and covers them until your show comes back. Instead of the ad you get something useful, like a Spanish vocabulary card.
 
-Nothing leaves your living room. There is no cloud service, no subscription, and no account. The OCR, the vision model, and the speech recognition all run on the device.
+Nothing leaves your living room. There is no cloud service, no subscription, and no account. The OCR, the vision model, and the speech recognition all run on the device. The one exception is something you have to switch on yourself: you can choose to share anonymous snapshots of blocked ads to help train the next model. It's off by default; see [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ![Minus blocking an ad and showing a Spanish vocabulary card instead](docs/images/blocking-overlay.jpg)
 
@@ -159,6 +159,7 @@ Minus auto-detects the connected HDMI output, resolution, DRM plane, and audio d
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and data flow |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Setting up a new device from scratch |
 | [docs/API.md](docs/API.md) | Web UI REST API |
+| [docs/PRIVACY.md](docs/PRIVACY.md) | What stays on the box, and the opt-in anonymous ad-snapshot contribution |
 | [docs/ASR.md](docs/ASR.md) | Audio-based ad confirmation |
 | [docs/AUDIO.md](docs/AUDIO.md) | Audio passthrough pipeline |
 | [docs/AESTHETICS.md](docs/AESTHETICS.md) | Visual design guide |
