@@ -412,7 +412,8 @@ class TestThermalCaptureFps(unittest.TestCase):
         m.restarts = []
         done = threading.Event()
 
-        def fake_restart():
+        def fake_restart(even_without_display=False):
+            m.restart_kwargs = {'even_without_display': even_without_display}
             m.restarts.append(m._ustreamer_fps_args())   # what the new ustreamer gets
             done.set()
         m._restart_ustreamer = fake_restart
@@ -423,6 +424,38 @@ class TestThermalCaptureFps(unittest.TestCase):
         self.assertTrue(m._done.wait(2))
         m._done.clear()
         time.sleep(0.05)   # lock release after the restart
+
+    def test_switch_restarts_even_with_the_tv_off(self):
+        """With no display, ustreamer still encodes for OCR/VLM/preview, so the
+        cap must apply — _restart_ustreamer used to return early without a TV."""
+        m = self._make()
+        m._on_thermal_change(True, {})
+        self._wait(m)
+        self.assertEqual(m.restart_kwargs, {'even_without_display': True})
+
+    def test_restart_ustreamer_without_display_skips_only_the_display_pipeline(self):
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.display_connected = False
+        m.ustreamer_process = None
+        m.ad_blocker = MagicMock()
+        m.config = MagicMock(ustreamer_port=9090)
+        m.device = '/dev/video0'
+        m._detected_format = 'NV12'
+        m.thermal_degraded = True
+        m.THERMAL_CAPTURE_FPS = 30
+        m._init_v4l2_device = MagicMock()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        with patch('minus.subprocess.run'), patch('minus.time.sleep'), \
+             patch('minus.probe_v4l2_device', return_value={'width': 3840, 'height': 2160}), \
+             patch('minus.subprocess.Popen', return_value=proc) as popen:
+            m._restart_ustreamer()                         # default: still skipped without a TV
+            popen.assert_not_called()
+            m._restart_ustreamer(even_without_display=True)
+            cmd = popen.call_args[0][0]
+        self.assertIn('--desired-fps=30', cmd)
+        m.ad_blocker.restart.assert_not_called()           # no TV: display pipeline left alone
 
     def test_args_follow_thermal_state(self):
         m = self._make()

@@ -1269,7 +1269,7 @@ class Minus:
             try:
                 logger.warning(f"[Thermal] Capture rate {old or 'source'} -> {want or 'source'} fps "
                                f"(restarting ustreamer)")
-                self._restart_ustreamer()
+                self._restart_ustreamer(even_without_display=True)
             finally:
                 self._capture_fps_lock.release()
         threading.Thread(target=_do, name='capture-fps-switch', daemon=True).start()
@@ -1456,10 +1456,16 @@ class Minus:
 
         logger.info(f"[Recovery] Format change complete - now running at {new_format}")
 
-    def _restart_ustreamer(self):
-        """Restart ustreamer process."""
+    def _restart_ustreamer(self, even_without_display: bool = False):
+        """Restart ustreamer process.
+
+        even_without_display: restart even when no TV is attached (the
+        thermal capture-rate switch: with the TV off, ustreamer still captures
+        and encodes for OCR/VLM and the web preview, so the heat is the same).
+        The display pipeline is only restarted when a display is connected.
+        """
         # Skip if display is disconnected (retry loop handles reconnection)
-        if not self.display_connected:
+        if not self.display_connected and not even_without_display:
             logger.debug("[Recovery] Skipping ustreamer restart - display disconnected")
             return
 
@@ -1531,7 +1537,8 @@ class Minus:
             if self.ustreamer_process.poll() is None:
                 logger.info("[Recovery] ustreamer restarted successfully")
                 # Also restart video pipeline to reconnect to new ustreamer
-                if self.ad_blocker:
+                # (no display: the display retry loop starts it when one appears)
+                if self.ad_blocker and self.display_connected:
                     logger.info("[Recovery] Also restarting video pipeline...")
                     self.ad_blocker.restart()
             else:
