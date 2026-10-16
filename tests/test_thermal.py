@@ -575,6 +575,13 @@ class TestNoSignalRetryWithoutTv(unittest.TestCase):
     monitor used to re-trigger _on_hdmi_lost every 5 s forever (1,524x in 2 h on
     minus, each re-stopping audio and spamming the journal)."""
 
+    def setUp(self):
+        # tests/test_vlm_decision_sim.py freezes the GLOBAL time.time at import.
+        from datetime import datetime
+        p = patch('time.time', lambda: datetime.now().timestamp())
+        p.start()
+        self.addCleanup(p.stop)
+
     def _make(self, tv_connected):
         from health import HealthMonitor
         hm = HealthMonitor.__new__(HealthMonitor)
