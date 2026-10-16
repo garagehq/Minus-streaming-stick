@@ -255,11 +255,14 @@ except ImportError as e:
 
 # Import Health Monitor
 try:
-    from health import HealthMonitor
+    from health import HealthMonitor, hdmi_output_connected as _hdmi_output_connected
     HAS_HEALTH = True
 except ImportError as e:
     logger.warning(f"Health module not available: {e}")
     HAS_HEALTH = False
+
+    def _hdmi_output_connected():   # unknown without the health module: keep retrying
+        return True
 
 # Import Web UI
 try:
@@ -5172,8 +5175,12 @@ class Minus:
                     if poll_count % 15 == 0:  # Log every 30 seconds
                         logger.info("Still waiting for HDMI input...")
 
-                    # Retry no-signal display periodically if it failed initially
-                    if not no_signal_display_ok and self.ad_blocker and poll_count % 5 == 0:
+                    # Retry no-signal display periodically if it failed initially —
+                    # but only once a TV is connected: with none it can't start,
+                    # and retrying every 10 s logged 3 warnings each time (236x in
+                    # 40 min on minus with the source and the TV off, 2026-10-16).
+                    if (not no_signal_display_ok and self.ad_blocker and poll_count % 5 == 0
+                            and _hdmi_output_connected()):
                         no_signal_display_ok = self.ad_blocker.start_no_signal_mode()
                         if no_signal_display_ok:
                             logger.info("No-signal display now working")

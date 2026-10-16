@@ -626,5 +626,30 @@ class TestNoSignalRetryWithoutTv(unittest.TestCase):
         hm._on_hdmi_lost.assert_called_once()
 
 
+class TestStartupNoSignalRetryNeedsATv(unittest.TestCase):
+    """The startup wait loop (box booted with no input) also retried the NO
+    SIGNAL screen every 10 s with no TV: 236x in 40 min on minus."""
+
+    def test_retry_is_gated_on_a_connected_tv(self):
+        src = (Path(__file__).resolve().parent.parent / 'minus.py').read_text()
+        i = src.index('# Retry no-signal display periodically if it failed initially')
+        block = src[i:i + 700]
+        self.assertIn('_hdmi_output_connected()', block)
+        self.assertLess(block.index('_hdmi_output_connected()'), block.index('start_no_signal_mode()'))
+
+    def test_helper_reads_the_drm_connectors(self):
+        import tempfile
+        import health
+        with tempfile.TemporaryDirectory() as d:
+            for name, state in (('card0-HDMI-A-1', 'disconnected'), ('card0-HDMI-A-2', 'disconnected')):
+                Path(d, name).mkdir()
+                Path(d, name, 'status').write_text(state + '\n')
+            real = Path
+            with patch('pathlib.Path', side_effect=lambda p='.': real(d) if p == '/sys/class/drm' else real(p)):
+                self.assertFalse(health.hdmi_output_connected())
+                Path(d, 'card0-HDMI-A-2', 'status').write_text('connected\n')
+                self.assertTrue(health.hdmi_output_connected())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

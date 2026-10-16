@@ -50,6 +50,24 @@ class HealthStatus:
     output_fps: float = 0.0
 
 
+def hdmi_output_connected() -> bool:
+    """True if any HDMI-TX output (a TV) is connected, via sysfs.
+
+    Fast (no subprocess): reads /sys/class/drm/card0-HDMI-A-*/status and returns
+    True if at least one connector says 'connected'. Used to avoid retrying
+    displays that can't start with no TV attached.
+    """
+    try:
+        from pathlib import Path
+        for connector in Path('/sys/class/drm').glob('card0-HDMI-A-*'):
+            status_file = connector / 'status'
+            if status_file.exists() and status_file.read_text().strip() == 'connected':
+                return True
+        return False
+    except Exception:
+        return False
+
+
 class HealthMonitor:
     """
     Unified health monitor for Minus.
@@ -480,25 +498,8 @@ class HealthMonitor:
             return False
 
     def _check_hdmi_output_connected(self) -> bool:
-        """Check if any HDMI-TX output is connected via sysfs.
-
-        This is a fast check (no subprocess) that reads /sys/class/drm/card0-HDMI-A-*/status.
-        Returns True if at least one HDMI output shows 'connected'.
-        """
-        try:
-            from pathlib import Path
-            drm_path = Path('/sys/class/drm')
-
-            for connector in drm_path.glob('card0-HDMI-A-*'):
-                status_file = connector / 'status'
-                if status_file.exists():
-                    status = status_file.read_text().strip()
-                    if status == 'connected':
-                        return True
-
-            return False
-        except Exception:
-            return False
+        """Check if any HDMI-TX output is connected via sysfs (see hdmi_output_connected)."""
+        return hdmi_output_connected()
 
     def _force_hdmi_reinit(self):
         """Force HDMI PHY reinitialization via DPMS cycle.
