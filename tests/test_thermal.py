@@ -467,6 +467,30 @@ class TestThermalCaptureFps(unittest.TestCase):
             self.assertGreater(interval, (frames_per_pass - 1) / source + 0.004, (source, target))
             self.assertLess(interval, frames_per_pass / source - 0.004, (source, target))
 
+    def test_switch_tells_the_health_monitor_it_is_planned(self):
+        """ustreamer down for a planned restart read as 'HDMI signal LOST' and
+        paused audio (2026-10-16 on minus) — the switch must suppress that."""
+        m = self._make()
+        m.health_monitor = MagicMock()
+        m._on_thermal_change(True, {})
+        self._wait(m)
+        m.health_monitor.suppress_transitions.assert_called_once_with(20)
+
+    def test_health_monitor_suppression_window(self):
+        from health import HealthMonitor
+        hm = HealthMonitor.__new__(HealthMonitor)
+        hm._suppress_until = 0.0
+        hm._update_hdmi_tx_audio_link_cache = MagicMock()
+        hm.get_status = MagicMock(return_value=MagicMock(hdmi_signal=False))
+        hm._start_time = time.time() - 3600
+        hm.startup_grace_period = 30.0
+        hm._last_hdmi_signal = True
+        hm._on_hdmi_lost = MagicMock()
+        hm.suppress_transitions(20)
+        hm._check_and_recover()                 # ustreamer briefly down: ignored
+        hm._on_hdmi_lost.assert_not_called()
+        self.assertTrue(hm._last_hdmi_signal)   # nothing recorded meanwhile
+
     def test_args_follow_thermal_state(self):
         m = self._make()
         self.assertEqual(m._ustreamer_fps_args(), [])

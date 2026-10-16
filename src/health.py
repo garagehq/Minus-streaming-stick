@@ -75,6 +75,13 @@ class HealthMonitor:
         self._stop_event = threading.Event()
         self._start_time = time.time()
         self._last_hdmi_signal = None  # None = first check not done yet (avoids false "signal lost" on startup)
+        # Planned ustreamer restarts (e.g. the thermal capture-rate switch): the
+        # HDMI-signal check reads ustreamer's /state, so a deliberate restart
+        # looks like a 5 s signal loss and used to fire the whole lost/restored
+        # chain (NO SIGNAL screen, a second ustreamer restart, display rebuild,
+        # and with the TV off an audio pipeline left paused). While this is in
+        # the future the monitor neither acts nor records what it saw.
+        self._suppress_until = 0.0
         self._hdmi_lost_time = 0
         self._hdmi_fps_zero_since = 0  # When captured_fps first dropped to 0
         self._hdmi_signal_loss_threshold = 5.0  # Seconds of 0 FPS before signal is considered lost
@@ -198,6 +205,12 @@ class HealthMonitor:
 
         logger.debug("[HealthMonitor] Monitor loop stopped")
 
+    def suppress_transitions(self, seconds: float):
+        """Ignore signal/stall transitions for `seconds` (a planned ustreamer
+        restart). State seen meanwhile is not recorded, so a source that is
+        really gone afterwards is still caught on the first tick after."""
+        self._suppress_until = max(getattr(self, '_suppress_until', 0.0), time.time() + float(seconds))
+
     def _check_and_recover(self):
         """Check health and trigger recovery if needed."""
         # Refresh cached HDMI-TX audio link state before building status.
@@ -205,6 +218,9 @@ class HealthMonitor:
         self._update_hdmi_tx_audio_link_cache()
 
         status = self.get_status()
+
+        if time.time() < getattr(self, '_suppress_until', 0.0):
+            return   # planned ustreamer restart in progress — see suppress_transitions()
 
         # HDMI signal monitoring
         # Skip transition callbacks until we've completed startup grace period

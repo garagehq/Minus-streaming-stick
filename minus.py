@@ -1288,6 +1288,10 @@ class Minus:
             try:
                 logger.warning(f"[Thermal] Capture rate {old or 'source'} -> {want or 'source'} fps "
                                f"(restarting ustreamer)")
+                hm = getattr(self, 'health_monitor', None)
+                if hm is not None:
+                    # A deliberate restart must not look like the source vanishing.
+                    hm.suppress_transitions(20)
                 self._restart_ustreamer(even_without_display=True)
             finally:
                 self._capture_fps_lock.release()
