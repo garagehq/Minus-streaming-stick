@@ -1234,11 +1234,30 @@ class Minus:
             return cap
         return 0
 
+    @staticmethod
+    def _desired_fps_arg(target: int, source_fps: int = 60) -> int:
+        """The --desired-fps value that makes ustreamer actually send `target` fps.
+
+        ustreamer passes a frame once at least 1/desired_fps has elapsed since the
+        last one. Asking for exactly 30 on a 60 fps source puts that cutoff ON the
+        second frame (33.3 ms), and capture jitter pushes it to the third half the
+        time: measured 20.4 fps on minus (2026-10-16). To pass every k-th source
+        frame (k = source/target), put the cutoff half a frame early, at
+        (k - 0.5) source frames: 25 ms -> exactly 30 fps on a 60 fps source,
+        whatever the jitter. A source already at/below the target isn't limited.
+        """
+        if target <= 0:
+            return 0
+        k = max(1, round(source_fps / target))
+        if k == 1:
+            return int(target)
+        return int(round(source_fps / (k - 0.5)))
+
     def _ustreamer_fps_args(self) -> list:
         """--desired-fps for a ustreamer being (re)started now; records what it got."""
         want = self._wanted_capture_fps()
         self._capture_fps_cap = want
-        return [f'--desired-fps={want}'] if want > 0 else []
+        return [f'--desired-fps={self._desired_fps_arg(want)}'] if want > 0 else []
 
     def _maybe_switch_capture_fps(self, now=None):
         """Restart ustreamer at the capture rate the thermal state wants, if it

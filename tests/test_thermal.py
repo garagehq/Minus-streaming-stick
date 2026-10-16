@@ -454,21 +454,31 @@ class TestThermalCaptureFps(unittest.TestCase):
             popen.assert_not_called()
             m._restart_ustreamer(even_without_display=True)
             cmd = popen.call_args[0][0]
-        self.assertIn('--desired-fps=30', cmd)
+        self.assertIn('--desired-fps=40', cmd)
         m.ad_blocker.restart.assert_not_called()           # no TV: display pipeline left alone
+
+    def test_desired_fps_puts_the_cutoff_between_source_frames(self):
+        """--desired-fps=30 on a 60 fps source measured 20.4 fps (jitter on the
+        33.3 ms cutoff); the arg must sit between 1 and 2 source frame intervals."""
+        from minus import Minus
+        for source, target in ((60, 30), (50, 25), (60, 20), (60, 15)):
+            interval = 1.0 / Minus._desired_fps_arg(target, source)
+            frames_per_pass = round(source / target)
+            self.assertGreater(interval, (frames_per_pass - 1) / source + 0.004, (source, target))
+            self.assertLess(interval, frames_per_pass / source - 0.004, (source, target))
 
     def test_args_follow_thermal_state(self):
         m = self._make()
         self.assertEqual(m._ustreamer_fps_args(), [])
         m.thermal_degraded = True
-        self.assertEqual(m._ustreamer_fps_args(), ['--desired-fps=30'])
+        self.assertEqual(m._ustreamer_fps_args(), ['--desired-fps=40'])
         self.assertEqual(m._capture_fps_cap, 30)
 
     def test_degraded_restarts_ustreamer_at_30_and_back(self):
         m = self._make()
         m._on_thermal_change(True, {'temp_c': 85, 'throttled': True})
         self._wait(m)
-        self.assertEqual(m.restarts, [['--desired-fps=30']])
+        self.assertEqual(m.restarts, [['--desired-fps=40']])
         m._capture_fps_switch_at = 0.0                     # skip the rate limit
         m._on_thermal_change(False, {'temp_c': 70, 'throttled': False})
         self.assertEqual(len(m.restarts), 1)               # not yet: must stay cool first
