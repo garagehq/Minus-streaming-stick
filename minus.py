@@ -654,6 +654,28 @@ class Minus:
         # (hysteresis in ThermalGovernor).
         self.thermal_degraded = False
         self._thermal_saved_params = None
+        # Capture-rate cap under thermal throttle. The display frame gate only
+        # drops frames AFTER souphttpsrc/jpegparse — the CPU-bound half — so a
+        # throttled box kept receiving and parsing 60fps of 4K MJPEG while
+        # showing 30. It couldn't keep up: ~5 MB of unread frames sat in the
+        # socket (+~2.7 MB in ustreamer's send buffer), i.e. the picture ran a
+        # content-dependent fraction of a second late while audio stayed at its
+        # fixed ~0.5 s — the slow A/V drift owners reported (2026-10-15, 85°C).
+        # In degraded mode ustreamer itself is restarted with --desired-fps so
+        # it ENCODES and sends only what will be shown (less VPU + CPU work,
+        # nothing to back up); full rate comes back when the box cools.
+        # 0 disables (old behaviour: display gate only).
+        self.THERMAL_CAPTURE_FPS = int(os.environ.get('MINUS_THERMAL_CAPTURE_FPS', '30'))
+        self.CAPTURE_FPS_SWITCH_MIN_S = float(os.environ.get('MINUS_CAPTURE_FPS_SWITCH_MIN_S', '600'))
+        # Going back UP to the source rate waits until the box has been out of
+        # degraded mode this long: at 30fps a box often cools below the exit
+        # threshold within minutes, and restoring 60fps right away would just
+        # heat it back up (a picture blip every cycle).
+        self.CAPTURE_FPS_RESTORE_AFTER_S = float(os.environ.get('MINUS_CAPTURE_FPS_RESTORE_AFTER_S', '1800'))
+        self._thermal_normal_since = 0.0
+        self._capture_fps_cap = 0          # what the running ustreamer was started with (0 = source rate)
+        self._capture_fps_switch_at = 0.0
+        self._capture_fps_lock = threading.Lock()
         self.thermal_monitor = None
 
         # OCR transience guard. OCR is normally fast-fire (1 frame → block
@@ -1103,7 +1125,8 @@ class Minus:
         if os.environ.get('MINUS_THERMAL_DISABLE', '0') != '1':
             try:
                 from thermal import ThermalMonitor
-                self.thermal_monitor = ThermalMonitor(on_change=self._on_thermal_change)
+                self.thermal_monitor = ThermalMonitor(on_change=self._on_thermal_change,
+                                                      on_tick=self._maybe_switch_capture_fps)
                 self.thermal_monitor.start()
                 logger.info("Thermal monitor initialized")
             except Exception as e:
@@ -1176,6 +1199,7 @@ class Minus:
         """
         try:
             self.thermal_degraded = degraded
+            self._thermal_normal_since = 0.0 if degraded else time.time()
             if degraded:
                 if self._thermal_saved_params is None:
                     self._thermal_saved_params = {
@@ -1199,8 +1223,57 @@ class Minus:
                     f"(temp={snapshot.get('temp_c')})")
             if self.ad_blocker:
                 self.ad_blocker.set_thermal_fps_cap(degraded)
+            self._maybe_switch_capture_fps()
         except Exception as e:
             logger.error(f"[Thermal] Failed to apply mode change: {e}")
+
+    def _wanted_capture_fps(self) -> int:
+        """Capture cap the current thermal state calls for (0 = source rate)."""
+        cap = getattr(self, 'THERMAL_CAPTURE_FPS', 30)
+        if getattr(self, 'thermal_degraded', False) and cap > 0:
+            return cap
+        return 0
+
+    def _ustreamer_fps_args(self) -> list:
+        """--desired-fps for a ustreamer being (re)started now; records what it got."""
+        want = self._wanted_capture_fps()
+        self._capture_fps_cap = want
+        return [f'--desired-fps={want}'] if want > 0 else []
+
+    def _maybe_switch_capture_fps(self, now=None):
+        """Restart ustreamer at the capture rate the thermal state wants, if it
+        differs from what is running. Rate-limited (CAPTURE_FPS_SWITCH_MIN_S) so a
+        box hovering at the trip point can't flap; a skipped switch is retried
+        on the next thermal change or watchdog tick. Runs the restart off the
+        caller's thread (~3 s picture blip). Returns the action taken."""
+        now = time.time() if now is None else now
+        if not hasattr(self, '_capture_fps_lock'):    # partially built (tests)
+            return 'unavailable'
+        want = self._wanted_capture_fps()
+        if want == self._capture_fps_cap:
+            return 'unchanged'
+        if want == 0:   # restoring the source rate: only once the box has stayed cool
+            normal_since = getattr(self, '_thermal_normal_since', 0.0)
+            if not normal_since or now - normal_since < getattr(self, 'CAPTURE_FPS_RESTORE_AFTER_S', 1800.0):
+                return 'cooling'
+        if not self._is_ustreamer_running():
+            return 'not-running'       # the next (re)start picks up the right rate
+        if self._capture_fps_switch_at and now - self._capture_fps_switch_at < self.CAPTURE_FPS_SWITCH_MIN_S:
+            return 'rate-limited'
+        if not self._capture_fps_lock.acquire(blocking=False):
+            return 'busy'
+        self._capture_fps_switch_at = now
+        old = self._capture_fps_cap
+
+        def _do():
+            try:
+                logger.warning(f"[Thermal] Capture rate {old or 'source'} -> {want or 'source'} fps "
+                               f"(restarting ustreamer)")
+                self._restart_ustreamer()
+            finally:
+                self._capture_fps_lock.release()
+        threading.Thread(target=_do, name='capture-fps-switch', daemon=True).start()
+        return 'switching'
 
     def _set_led_state(self, state):
         """Forward a state change to the status-LED strip. No-op if disabled
@@ -1443,7 +1516,7 @@ class Minus:
                 '--workers=4',              # 4 parallel MPP encoders
                 '--buffers=5',
                 '--tcp-nodelay',           # Disable Nagle's algorithm for smoother streaming
-            ]
+            ] + self._ustreamer_fps_args()
 
             logger.info(f"[Recovery] Starting ustreamer: {' '.join(ustreamer_cmd)}")
 
@@ -2336,6 +2409,7 @@ class Minus:
             'hdmi_reconnect_grace': self.is_in_hdmi_reconnect_grace(),
             'hdmi_reconnect_grace_remaining': self.get_hdmi_reconnect_grace_remaining(),
             'thermal_degraded': self.thermal_degraded,
+            'capture_fps_cap': getattr(self, '_capture_fps_cap', 0) or None,   # None = source rate
             'ad_clock': self.ad_clock_snapshot(),
             'thermal': (self.thermal_monitor.get_status() if self.thermal_monitor
                         else {'degraded': False, 'temp_c': None,
@@ -3245,7 +3319,7 @@ class Minus:
             '--workers=4',              # 4 parallel MPP encoders
             '--buffers=5',
             '--tcp-nodelay',           # Disable Nagle's algorithm for smoother streaming
-        ]
+        ] + self._ustreamer_fps_args()
 
         logger.info(f"Starting ustreamer: {' '.join(ustreamer_cmd)}")
 

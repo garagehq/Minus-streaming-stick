@@ -12,6 +12,7 @@ Covers:
 """
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -367,6 +368,135 @@ class TestFramegate(unittest.TestCase):
         self.assertIn('identity name=framegate', launch)
         self.assertLess(launch.index('jpegparse'), launch.index('framegate'))
         self.assertLess(launch.index('framegate'), launch.index('mppjpegdec'))
+
+
+# =========================================================================
+# Capture-rate cap: ustreamer itself drops to 30fps while degraded
+# =========================================================================
+
+class TestThermalCaptureFps(unittest.TestCase):
+    """The display gate sits after the CPU-bound souphttpsrc/jpegparse, so a
+    throttled box kept parsing 60fps while showing 30 and built a socket
+    backlog (video drifting late against audio). Degraded mode now restarts
+    ustreamer with --desired-fps."""
+
+    def setUp(self):
+        # tests/test_vlm_decision_sim.py freezes the GLOBAL time.time at import;
+        # these tests need a moving clock.
+        from datetime import datetime
+        p = patch('time.time', lambda: datetime.now().timestamp())
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _make(self, running=True):
+        import threading
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.thermal_degraded = False
+        m._thermal_saved_params = None
+        m.ad_blocker = MagicMock()
+        m.OCR_STOP_THRESHOLD = 2
+        m.VLM_STOP_THRESHOLD = 2
+        m.MIN_BLOCKING_DURATION_BASE = 3.0
+        m.MIN_BLOCKING_DURATION_FLOOR_OCR = 1.0
+        m.MIN_BLOCKING_DURATION_FLOOR_BOTH = 1.5
+        m.MIN_BLOCKING_DURATION_FLOOR_VLM = 0.5
+        m.THERMAL_CAPTURE_FPS = 30
+        m.CAPTURE_FPS_SWITCH_MIN_S = 600.0
+        m.CAPTURE_FPS_RESTORE_AFTER_S = 1800.0
+        m._thermal_normal_since = 0.0
+        m._capture_fps_cap = 0
+        m._capture_fps_switch_at = 0.0
+        m._capture_fps_lock = threading.Lock()
+        m._is_ustreamer_running = lambda: running
+        m.restarts = []
+        done = threading.Event()
+
+        def fake_restart():
+            m.restarts.append(m._ustreamer_fps_args())   # what the new ustreamer gets
+            done.set()
+        m._restart_ustreamer = fake_restart
+        m._done = done
+        return m
+
+    def _wait(self, m):
+        self.assertTrue(m._done.wait(2))
+        m._done.clear()
+        time.sleep(0.05)   # lock release after the restart
+
+    def test_args_follow_thermal_state(self):
+        m = self._make()
+        self.assertEqual(m._ustreamer_fps_args(), [])
+        m.thermal_degraded = True
+        self.assertEqual(m._ustreamer_fps_args(), ['--desired-fps=30'])
+        self.assertEqual(m._capture_fps_cap, 30)
+
+    def test_degraded_restarts_ustreamer_at_30_and_back(self):
+        m = self._make()
+        m._on_thermal_change(True, {'temp_c': 85, 'throttled': True})
+        self._wait(m)
+        self.assertEqual(m.restarts, [['--desired-fps=30']])
+        m._capture_fps_switch_at = 0.0                     # skip the rate limit
+        m._on_thermal_change(False, {'temp_c': 70, 'throttled': False})
+        self.assertEqual(len(m.restarts), 1)               # not yet: must stay cool first
+        self.assertEqual(m._maybe_switch_capture_fps(), 'cooling')
+        later = m._thermal_normal_since + m.CAPTURE_FPS_RESTORE_AFTER_S + 1
+        self.assertEqual(m._maybe_switch_capture_fps(now=later), 'switching')
+        self._wait(m)
+        self.assertEqual(m.restarts[-1], [])               # back to source rate
+        self.assertEqual(m._capture_fps_cap, 0)
+
+    def test_reheating_while_cooling_keeps_30(self):
+        m = self._make()
+        m._on_thermal_change(True, {})
+        self._wait(m)
+        m._on_thermal_change(False, {})
+        m._on_thermal_change(True, {})                     # hot again before the restore
+        self.assertEqual(m._maybe_switch_capture_fps(now=time.time() + 99999), 'unchanged')
+        self.assertEqual(len(m.restarts), 1)
+
+    def test_rate_limited_switch_is_retried_on_a_later_tick(self):
+        m = self._make()
+        m._on_thermal_change(True, {})
+        self._wait(m)
+        m._on_thermal_change(False, {})
+        m._thermal_normal_since -= m.CAPTURE_FPS_RESTORE_AFTER_S + 1   # cool long enough...
+        m._capture_fps_switch_at = time.time()                          # ...but switched just now
+        self.assertEqual(len(m.restarts), 1)
+        self.assertEqual(m._maybe_switch_capture_fps(), 'rate-limited')
+        later = m._capture_fps_switch_at + m.CAPTURE_FPS_SWITCH_MIN_S + 1
+        self.assertEqual(m._maybe_switch_capture_fps(now=later), 'switching')
+        self._wait(m)
+        self.assertEqual(m.restarts[-1], [])
+
+    def test_no_switch_when_nothing_changes_or_ustreamer_down(self):
+        m = self._make()
+        self.assertEqual(m._maybe_switch_capture_fps(), 'unchanged')
+        m2 = self._make(running=False)
+        m2.thermal_degraded = True
+        self.assertEqual(m2._maybe_switch_capture_fps(), 'not-running')
+        self.assertEqual(m2.restarts, [])
+
+    def test_disabled_by_env_value_zero(self):
+        m = self._make()
+        m.THERMAL_CAPTURE_FPS = 0
+        m.thermal_degraded = True
+        self.assertEqual(m._ustreamer_fps_args(), [])
+        self.assertEqual(m._maybe_switch_capture_fps(), 'unchanged')
+
+    def test_monitor_calls_on_tick_every_sample(self):
+        from thermal import ThermalMonitor
+        ticks = []
+        mon = ThermalMonitor(on_tick=lambda: ticks.append(1))
+        with patch('thermal.read_max_temp_c', return_value=50.0), \
+             patch('thermal.read_cpu_throttled', return_value=False):
+            mon.check_now()
+            mon.check_now()
+        self.assertEqual(len(ticks), 2)
+
+    def test_both_ustreamer_launch_paths_pass_the_cap(self):
+        src = (Path(__file__).resolve().parent.parent / 'minus.py').read_text()
+        self.assertEqual(src.count('] + self._ustreamer_fps_args()'), 2)
 
 
 if __name__ == '__main__':
