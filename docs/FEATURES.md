@@ -194,6 +194,15 @@ Pausing ad-blocking during a VLM-only block tells Minus the VLM misclassified th
 - Undo support (Ctrl+Z)
 - Keyboard shortcuts (arrow keys, Escape)
 
+## Anonymous Ad-Snapshot Contribution (opt-in)
+
+Off by default. Settings → **Help Improve Minus** turns it on, after a consent dialog. The API refuses to enable it without `{"consent": true}`. It's the TV twin of the Chrome extension's "Contribute anonymous ad snapshots" and uses the same ingest server and dataset. Full details are in [PRIVACY.md](PRIVACY.md); the code is in `src/contribute.py`.
+- Only frames **blocked as ads**: up to 3 per ad, ≥ 8 s apart, dHash near-duplicates skipped, downscaled to 960 px
+- Payload = the extension's schema: `key` (random per frame), `img`, `p_ad` (VLM probability or null), `verdict: "ad"`, `host: "tv"`, `w`, `h`, `engine: "minus-tv/vlm|ocr"`. No device, network, app, time, text or audio data
+- 10-minute local cool-down. **Pausing blocking during that ad (or ≤ 60 s after it ends) deletes its queued frames**
+- Turning it off deletes the queue (`~/.minus_contrib_queue/`). The queue is capped at 200 frames / 7 days. Uploads back off from 20 s up to 6 h when the server is unreachable and never touch detection
+- Setting `contribute_snapshots` in `~/.minus_system_settings.json`; env `MINUS_INGEST_URL` / `MINUS_INGEST_KEY` / `MINUS_CONTRIB_QUEUE_DIR`
+
 ## Configuration
 
 **Command Line Options:**

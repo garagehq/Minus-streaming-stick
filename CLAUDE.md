@@ -104,6 +104,7 @@ See **[docs/AESTHETICS.md](docs/AESTHETICS.md)** for the complete visual design 
 | `src/config.py` | MinusConfig dataclass |
 | `src/capture.py` | UstreamerCapture class for snapshot capture |
 | `src/screenshots.py` | ScreenshotManager with dHash dedup + blank rejection |
+| `src/contribute.py` | **Opt-in, default-off** anonymous ad-snapshot contribution (same ingest server + dataset as the Chrome extension). Frames from blocked ads only, 10-min local cool-down, a user pause retracts that ad's frames, opt-out deletes the queue. See docs/PRIVACY.md |
 | `src/skip_detection.py` | Skip button detection (regex patterns) |
 | `test_fire_tv.py` | Fire TV controller test and interactive remote |
 | `ir_transmit.py` | Standalone CLI for the IR transmitter (`sudo python3 ir_transmit.py <button>`) |

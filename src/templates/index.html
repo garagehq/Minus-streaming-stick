@@ -687,6 +687,22 @@
                 <p class="help-text">Listens to the audio for marketing language to confirm or veto VLM-only ad blocks (e.g. a product placement in a show). Never blocks on its own and never affects OCR detection. Disabling stops the whisper worker and frees its memory.</p>
             </section>
 
+            <!-- Anonymous ad-snapshot contribution (opt-in, default off) -->
+            <section class="settings-section">
+                <h2>Help Improve Minus</h2>
+                <div class="setting-item">
+                    <span class="setting-label">Contribute anonymous ad snapshots</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="contribute-toggle" onchange="toggleContribution(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="vlm-status" id="contribute-status-info">
+                    <span class="status-text">Status: <span id="contribute-status-text">Loading...</span></span>
+                </div>
+                <p class="help-text"><strong>Off unless you turn it on.</strong> When on, Minus sends a small picture of TV frames it <em>blocked as ads</em> to help train the next model &mdash; nothing else: no device name, IP, account, app or channel, viewing times, text or audio, and no identifier of any kind. Each snapshot waits 10 minutes on this box first; if you pause blocking during that ad, its snapshots are deleted and never sent. Turning this off deletes anything still waiting. Same program as the Minus Chrome extension &mdash; details in <code>docs/PRIVACY.md</code>.</p>
+            </section>
+
             <!-- Blocking Optimizations -->
             <section class="settings-section">
                 <h2>Blocking Optimizations</h2>
@@ -994,6 +1010,23 @@
     </footer>
 
     <!-- WiFi Password Modal -->
+    <div id="contribute-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Contribute anonymous ad snapshots?</h3>
+            <p class="help-text" style="text-align:left">If you turn this on, Minus will upload:</p>
+            <ul class="help-text" style="text-align:left; margin: 0 0 0.5rem 1.2rem">
+                <li>a downscaled picture of TV frames it <strong>blocked as ads</strong> (at most 3 per ad),</li>
+                <li>the model's confidence and which detector fired (text or vision).</li>
+            </ul>
+            <p class="help-text" style="text-align:left">It will <strong>never</strong> send your device name, IP address, Wi-Fi, accounts, streaming app or channel, viewing times, on-screen text, audio, or any frame that wasn't blocked. No identifier links one snapshot to another or to you.</p>
+            <p class="help-text" style="text-align:left">Snapshots wait 10 minutes on this box. Pausing blocking during an ad deletes that ad's snapshots. They go to the Minus project's private training dataset (the same one the Chrome extension uses). You can turn this off at any time, which deletes anything not yet sent.</p>
+            <div class="modal-buttons">
+                <button onclick="closeContributeModal(false)" class="modal-btn cancel">No thanks</button>
+                <button onclick="closeContributeModal(true)" class="modal-btn confirm">Yes, contribute</button>
+            </div>
+        </div>
+    </div>
+
     <div id="wifi-modal" class="modal hidden">
         <div class="modal-content">
             <h3>Connect to <span id="wifi-modal-ssid"></span></h3>
@@ -1059,6 +1092,7 @@
             if (tabName === 'screenshots') {
                 loadScreenshots();
             } else if (tabName === 'settings') {
+                loadContribution();
                 loadWifiStatus();
                 loadWifiConnections();
                 loadAdbKeys();
@@ -1975,6 +2009,55 @@
                 console.error('VLM preload toggle error:', error);
                 document.getElementById('vlm-preload-toggle').checked = !enabled;
             }
+        }
+
+        async function loadContribution() {
+            try {
+                const r = await fetch('/api/contribute/status');
+                const d = await r.json();
+                const t = document.getElementById('contribute-toggle');
+                const s = document.getElementById('contribute-status-text');
+                if (t) { t.checked = !!d.enabled; t.disabled = !d.available; }
+                if (!s) return;
+                if (!d.available) { s.textContent = 'unavailable'; return; }
+                if (!d.enabled) { s.textContent = 'off - nothing is collected or sent'; return; }
+                const parts = ['on', (d.queued || 0) + ' waiting', (d.uploaded_this_session || 0) + ' sent since restart'];
+                if (d.retracted_this_session) parts.push(d.retracted_this_session + ' deleted by pause');
+                if (d.last_error) parts.push('server unreachable - will retry');
+                s.textContent = parts.join(' | ');
+            } catch (e) {
+                console.error('contribution status failed:', e);
+            }
+        }
+        function toggleContribution(enabled) {
+            const t = document.getElementById('contribute-toggle');
+            if (enabled) {
+                // Explicit opt-in: nothing changes until the user accepts the dialog.
+                if (t) t.checked = false;
+                document.getElementById('contribute-modal').classList.remove('hidden');
+                return;
+            }
+            setContribution(false);
+        }
+        function closeContributeModal(accepted) {
+            document.getElementById('contribute-modal').classList.add('hidden');
+            if (accepted) setContribution(true);
+        }
+        async function setContribution(enabled) {
+            const t = document.getElementById('contribute-toggle');
+            try {
+                const r = await fetch(enabled ? '/api/contribute/enable' : '/api/contribute/disable', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(enabled ? { consent: true } : {})
+                });
+                const d = await r.json();
+                if (!d.success) alert('Could not change contribution setting: ' + (d.error || 'unknown'));
+            } catch (e) {
+                console.error('contribution toggle error:', e);
+            }
+            if (t) t.checked = enabled;
+            loadContribution();
         }
 
         async function loadUnattendedUpgrades() {
@@ -3708,6 +3791,7 @@
         updateVLMStatus();
         loadVLMPreloadSetting();
         loadUnattendedUpgrades();
+        loadContribution();
         loadASRSetting();
         loadOptimizationSettings();
         loadIRStatus();

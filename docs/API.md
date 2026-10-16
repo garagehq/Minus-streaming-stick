@@ -354,6 +354,26 @@ Get/set debug overlay visibility.
 
 ---
 
+### GET /api/contribute/status
+### POST /api/contribute/enable
+### POST /api/contribute/disable
+
+Anonymous ad-snapshot contribution (opt-in, default off — see [PRIVACY.md](PRIVACY.md)).
+
+`enable` requires an explicit consent body; anything else is refused with 400:
+
+```bash
+curl -X POST http://minus.local/api/contribute/enable -H 'Content-Type: application/json' -d '{"consent": true}'
+```
+
+`disable` stops uploads and deletes the local queue. Status / response:
+
+```json
+{"available": true, "enabled": true, "queued": 2, "uploaded_this_session": 9,
+ "retracted_this_session": 1, "last_upload_at": 1760560000.0, "last_error": null,
+ "cooldown_minutes": 10.0, "endpoint": "https://minus-ingest-garage.fly.dev/ingest"}
+```
+
 ## Streaming
 
 ### GET /stream

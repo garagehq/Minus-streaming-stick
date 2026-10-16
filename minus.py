@@ -884,6 +884,17 @@ class Minus:
 
         # System settings (loaded from ~/.minus_system_settings.json)
         self._system_settings = self._load_system_settings()
+
+        # Anonymous ad-snapshot contribution — opt-in, default OFF. While off
+        # it queues and sends nothing (see src/contribute.py, docs/PRIVACY.md).
+        self.contributor = None
+        self._contrib_last_block = (None, 0.0)   # (block id, end time) of the last finished block
+        try:
+            from contribute import SnapshotContributor
+            self.contributor = SnapshotContributor(
+                enabled=bool(self._system_settings.get('contribute_snapshots', False)))
+        except Exception as e:
+            logger.warning(f"[Contribute] unavailable: {e}")
         # Reconcile apt's unattended-upgrades config with the persisted
         # setting (idempotent; root-only, no-op when not root or not installed).
         try:
@@ -2053,6 +2064,62 @@ class Minus:
 
     # ===== Web UI Methods =====
 
+    # ------------------------------------------------------------------
+    # Anonymous ad-snapshot contribution (opt-in) — src/contribute.py
+    # ------------------------------------------------------------------
+    def _contrib_offer(self, frame, source: str, p_ad=None):
+        """Offer a frame to the opt-in contributor — only while a block is
+        actually on screen (not paused, not suppressed, not test-disabled).
+        No-op when contribution is off. Never raises."""
+        c = getattr(self, 'contributor', None)
+        if c is None or not c.enabled:
+            return
+        try:
+            on_screen = (
+                self.ad_detected and self.blocking_source
+                and not self.is_blocking_paused()
+                and not self.static_blocking_suppressed
+                and not self.config.no_blocking
+            )
+            if not on_screen:
+                return
+            c.offer(frame, block_id=self.blocking_start_time, source=source, p_ad=p_ad)
+        except Exception as e:
+            logger.debug(f"[Contribute] offer skipped: {e}")
+
+    def _contrib_retract_on_pause(self):
+        """User paused: retract the current block's queued snapshots, or the
+        block that ended within RETRACT_AFTER_END_S (the pause was about it)."""
+        c = getattr(self, 'contributor', None)
+        if c is None or not c.enabled:
+            return
+        try:
+            from contribute import RETRACT_AFTER_END_S
+            if self.ad_detected:
+                c.retract_block(self.blocking_start_time)
+            block_id, ended = getattr(self, '_contrib_last_block', (None, 0.0))
+            if block_id is not None and time.time() - ended <= RETRACT_AFTER_END_S:
+                c.retract_block(block_id)
+        except Exception as e:
+            logger.debug(f"[Contribute] retract skipped: {e}")
+
+    @property
+    def contribute_snapshots_enabled(self) -> bool:
+        """Whether the user has opted in to anonymous ad-snapshot contribution."""
+        return bool(self._system_settings.get('contribute_snapshots', False))
+
+    def set_contribute_snapshots(self, enabled: bool) -> dict:
+        """Opt in or out of anonymous ad-snapshot contribution and persist it.
+        Opting out deletes the local queue immediately."""
+        enabled = bool(enabled)
+        self._system_settings['contribute_snapshots'] = enabled
+        self._save_system_settings()
+        if self.contributor is not None:
+            self.contributor.set_enabled(enabled)
+            return {'success': True, **self.contributor.status()}
+        return {'success': enabled is False, 'enabled': False,
+                'error': None if not enabled else 'contribution module unavailable'}
+
     def pause_blocking(self, duration_seconds: int = 120):
         """Pause ad blocking for specified duration.
 
@@ -2069,6 +2136,9 @@ class Minus:
         was_vlm_only_block = (
             self.ad_detected and self.blocking_source == "vlm"
         )
+        # A pause means the block was unwanted: delete any anonymous snapshots
+        # queued from it before they can upload (opt-in contribution only).
+        self._contrib_retract_on_pause()
 
         with self._state_lock:
             self.blocking_paused_until = time.time() + duration_seconds
@@ -2733,6 +2803,9 @@ class Minus:
             # list rather than a dict so the web UI can just toggle checkboxes.
             # Valid kinds: 'vocab', 'fact', 'photos'.
             'replacement_modes': ['vocab', 'fact'],
+            # Anonymous ad-snapshot contribution (src/contribute.py). OPT-IN:
+            # off until the user turns it on in Settings -> Help improve Minus.
+            'contribute_snapshots': False,
         }
         try:
             if SYSTEM_SETTINGS_FILE.exists():
@@ -4006,6 +4079,7 @@ class Minus:
                 if should_stop:
                     self.ad_detected = False
                     source_was = self.blocking_source
+                    self._contrib_last_block = (self.blocking_start_time, time.time())
                     self.blocking_source = None
                     self.blocking_asr_confirmed = False
                     # Clear the OCR snippet so the next block starts fresh
@@ -4655,6 +4729,7 @@ class Minus:
                             f"{keywords_found})")
                     logger.info(f"OCR detected ad keywords: {keywords_found}")
                     self.screenshot_manager.save_ad_screenshot(frame, matched_keywords, all_texts)
+                    self._contrib_offer(frame, 'ocr')
                     self.add_detection('OCR', all_texts, matched_keywords)
                 else:
                     # Suppressed (home/weak-sponsored) OR no ad keyword at all.
@@ -4817,6 +4892,7 @@ class Minus:
                     with self._state_lock:
                         self.last_vlm_ad_frame = frame.copy()
                         self.last_vlm_ad_frame_time = now
+                    self._contrib_offer(frame, 'vlm', confidence)
 
                 # Track state changes for waffle detection and logging
                 current_state = 'ad' if is_ad else 'no-ad'
@@ -5228,6 +5304,9 @@ class Minus:
         """Stop everything."""
         logger.info("Stopping...")
         self.running = False
+
+        if getattr(self, 'contributor', None) is not None:
+            self.contributor.stop()
 
         # Stop WiFi manager
         if hasattr(self, 'wifi_manager') and self.wifi_manager:
