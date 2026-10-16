@@ -566,5 +566,58 @@ class TestThermalCaptureFps(unittest.TestCase):
         self.assertEqual(src.count('] + self._ustreamer_fps_args()'), 2)
 
 
+# =========================================================================
+# NO SIGNAL re-trigger while no TV is connected (health.py)
+# =========================================================================
+
+class TestNoSignalRetryWithoutTv(unittest.TestCase):
+    """With the source AND the TV off, the NO SIGNAL screen can't start, and the
+    monitor used to re-trigger _on_hdmi_lost every 5 s forever (1,524x in 2 h on
+    minus, each re-stopping audio and spamming the journal)."""
+
+    def _make(self, tv_connected):
+        from health import HealthMonitor
+        hm = HealthMonitor.__new__(HealthMonitor)
+        hm._suppress_until = 0.0
+        hm._update_hdmi_tx_audio_link_cache = MagicMock()
+        hm.get_status = MagicMock(return_value=MagicMock(hdmi_signal=False, hdmi_format=None,
+                                                         ustreamer_alive=False, ustreamer_responding=False))
+        hm._start_time = time.time() - 3600
+        hm.startup_grace_period = 30.0
+        hm._last_hdmi_signal = False
+        hm._hdmi_lost_time = 0
+        hm._last_no_signal_trigger = 0
+        hm._no_signal_retry_interval = 0.0
+        hm._last_hdmi_output_connected = tv_connected
+        hm._last_hdmi_format = None
+        hm._is_no_signal_mode_active = MagicMock(return_value=False)
+        hm._check_hdmi_output_connected = MagicMock(return_value=tv_connected)
+        hm._on_hdmi_lost = MagicMock()
+        hm._on_ustreamer_stall = None
+        hm.minus = None
+        return hm
+
+    def _ticks(self, hm, n=5):
+        for _ in range(n):
+            try:
+                hm._check_and_recover()
+            except AttributeError:
+                pass   # later sections need attributes this stub doesn't set
+
+    def test_no_retries_without_a_tv(self):
+        hm = self._make(tv_connected=False)
+        self._ticks(hm)
+        hm._on_hdmi_lost.assert_not_called()
+        self.assertGreater(hm._hdmi_lost_time, 0)   # restore path still armed
+
+    def test_screen_comes_up_once_a_tv_is_connected(self):
+        hm = self._make(tv_connected=False)
+        self._ticks(hm, 2)
+        hm._check_hdmi_output_connected.return_value = True
+        hm._last_hdmi_output_connected = True
+        self._ticks(hm, 1)
+        hm._on_hdmi_lost.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

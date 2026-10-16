@@ -258,6 +258,23 @@ class HealthMonitor:
             now = time.time()
             no_signal_active = self._is_no_signal_mode_active()
 
+            # With no TV connected either, the NO SIGNAL screen can never start
+            # (no DRM output), so retrying every few seconds only spammed the
+            # journal and re-stopped the audio pipeline each time: 1,524 times
+            # in 2 h on minus with the source and the TV both off (2026-10-16).
+            # Wait for a TV instead; the first tick after one is connected
+            # brings the screen up as before.
+            if not no_signal_active and not self._check_hdmi_output_connected():
+                if not getattr(self, '_no_signal_waiting_for_tv', False):
+                    self._no_signal_waiting_for_tv = True
+                    logger.info("[HealthMonitor] No input and no TV connected — "
+                                "NO SIGNAL screen will start when a TV is connected")
+                if self._hdmi_lost_time == 0:
+                    self._hdmi_lost_time = now   # see the comment below
+                no_signal_active = True          # nothing to (re)trigger
+            else:
+                self._no_signal_waiting_for_tv = False
+
             if not no_signal_active:
                 # NO SIGNAL mode is not active but should be
                 time_since_last_trigger = now - self._last_no_signal_trigger
