@@ -58,7 +58,6 @@ def hdmi_output_connected() -> bool:
     displays that can't start with no TV attached.
     """
     try:
-        from pathlib import Path
         for connector in Path('/sys/class/drm').glob('card0-HDMI-A-*'):
             status_file = connector / 'status'
             if status_file.exists() and status_file.read_text().strip() == 'connected':

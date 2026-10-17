@@ -1291,6 +1291,14 @@ class Minus:
                 return 'cooling'
         if not self._is_ustreamer_running():
             return 'not-running'       # the next (re)start picks up the right rate
+        # No input (NO SIGNAL / loading screen up): there's nothing to encode, so
+        # nothing to save — and _restart_ustreamer() would rebuild the video
+        # pipeline over the NO SIGNAL screen (the health monitor would still
+        # think it was showing). Retried on the next tick once a picture is back.
+        ab = getattr(self, 'ad_blocker', None)
+        if getattr(self, '_hdmi_signal_lost', False) or \
+                (ab is not None and getattr(ab, 'current_source', None) in ('no_hdmi_device', 'loading')):
+            return 'no-signal'
         if self._capture_fps_switch_at and now - self._capture_fps_switch_at < self.CAPTURE_FPS_SWITCH_MIN_S:
             return 'rate-limited'
         if not self._capture_fps_lock.acquire(blocking=False):

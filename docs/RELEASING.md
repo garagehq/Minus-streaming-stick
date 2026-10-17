@@ -40,7 +40,7 @@ It needs the GitHub CLI (`gh`) logged in with push access.
 
 On each box, "Update now" pulls the code first, then runs the rest of the update
 with the **new** code, which sees the new model isn't installed, downloads it
-(checksums verified), and restarts on it. If Minus doesn't come back up, the code
+(checksums verified), and restarts on it. If Minus doesn't come back up and stay up with the model loaded, the code
 and model roll back. Boxes running from source get it the same way from `main`.
 
 ## What boxes do with releases

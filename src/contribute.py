@@ -42,7 +42,6 @@ import base64
 import json
 import logging
 import os
-import shutil
 import threading
 import time
 import urllib.error
@@ -271,10 +270,19 @@ class SnapshotContributor:
                 pass
 
     def _clear_queue(self) -> int:
+        """Delete what the queue wrote — only its own files — then the directory
+        if that leaves it empty. (MINUS_CONTRIB_QUEUE_DIR is configurable; an
+        rmtree would wipe whatever else lives there.)"""
         n = len(self._queued())
         try:
             if self.queue_dir.exists():
-                shutil.rmtree(self.queue_dir, ignore_errors=True)
+                for pat in ('*.png', '*.json', '.*.tmp'):
+                    for p in self.queue_dir.glob(pat):
+                        p.unlink(missing_ok=True)
+                try:
+                    self.queue_dir.rmdir()
+                except OSError:
+                    pass        # not empty: other files we didn't write stay
         except Exception:
             pass
         return n
@@ -315,6 +323,8 @@ class SnapshotContributor:
             headers = {"Content-Type": "application/json", "User-Agent": "Minus-TV"}
             if self.ingest_key:
                 headers["x-minus-key"] = self.ingest_key
+            if not self._enabled:          # opted out while we were preparing the batch
+                return 0
             req = urllib.request.Request(self.ingest_url, data=body, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=UPLOAD_TIMEOUT_S) as resp:
                 if not (200 <= resp.status < 300):

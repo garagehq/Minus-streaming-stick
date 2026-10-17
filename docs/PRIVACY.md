@@ -33,8 +33,10 @@ then:
   streaming-device type, accounts, the app or channel you're watching, when
   you watch, on-screen text, audio, or any frame that wasn't blocked as an
   ad. No cookies and no identifier of any kind.
-- Turning it **off** stops uploads at once and **deletes everything still
-  waiting** in the local queue (`~/.minus_contrib_queue/`).
+- Turning it **off** stops uploads and **deletes everything still waiting**
+  in the local queue (`~/.minus_contrib_queue/`). The only thing that can still
+  arrive is a batch that was already being sent at that moment (at most 3
+  frames that had passed their 10-minute wait).
 
 The queue is capped at 200 frames and 7 days, so a box that is offline or
 behind a firewall never fills its disk. If the server can't be reached,

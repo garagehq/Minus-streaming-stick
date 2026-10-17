@@ -645,7 +645,7 @@ class TestStartupNoSignalRetryNeedsATv(unittest.TestCase):
                 Path(d, name).mkdir()
                 Path(d, name, 'status').write_text(state + '\n')
             real = Path
-            with patch('pathlib.Path', side_effect=lambda p='.': real(d) if p == '/sys/class/drm' else real(p)):
+            with patch('health.Path', side_effect=lambda p='.': real(d) if p == '/sys/class/drm' else real(p)):
                 self.assertFalse(health.hdmi_output_connected())
                 Path(d, 'card0-HDMI-A-2', 'status').write_text('connected\n')
                 self.assertTrue(health.hdmi_output_connected())
@@ -653,3 +653,36 @@ class TestStartupNoSignalRetryNeedsATv(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestCaptureSwitchWaitsForASignal(unittest.TestCase):
+    """With no input the switch rebuilt the video pipeline over the NO SIGNAL
+    screen (review finding, 2026-10-17); it now waits for a picture."""
+
+    def _make(self, **kw):
+        import threading
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.thermal_degraded = True
+        m.THERMAL_CAPTURE_FPS = 30
+        m.CAPTURE_FPS_SWITCH_MIN_S = 600.0
+        m.CAPTURE_FPS_RESTORE_AFTER_S = 1800.0
+        m._thermal_normal_since = 0.0
+        m._capture_fps_cap = 0
+        m._capture_fps_switch_at = 0.0
+        m._capture_fps_lock = threading.Lock()
+        m._is_ustreamer_running = lambda: True
+        m._hdmi_signal_lost = kw.get('lost', False)
+        m.ad_blocker = MagicMock(current_source=kw.get('source', 'stream'))
+        m._restart_ustreamer = MagicMock()
+        return m
+
+    def test_no_switch_while_the_signal_is_lost(self):
+        self.assertEqual(self._make(lost=True)._maybe_switch_capture_fps(), 'no-signal')
+
+    def test_no_switch_over_the_no_signal_screen(self):
+        for src in ('no_hdmi_device', 'loading'):
+            self.assertEqual(self._make(source=src)._maybe_switch_capture_fps(), 'no-signal')
+
+    def test_switches_once_the_picture_is_back(self):
+        self.assertEqual(self._make()._maybe_switch_capture_fps(), 'switching')

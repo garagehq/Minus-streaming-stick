@@ -1017,7 +1017,7 @@
 
     <!-- System Footer -->
     <footer class="system-footer">
-        <span class="footer-item" id="footer-version">MINUS v1.0</span>
+        <span class="footer-item" id="footer-version">MINUS</span>
         <span class="footer-separator">|</span>
         <span class="footer-item" id="footer-host">--</span>
         <span class="footer-separator">|</span>
@@ -2076,6 +2076,12 @@
             loadContribution();
         }
 
+        function loadVersion() {
+            fetch('/api/version').then(r => r.json()).then(d => {
+                document.getElementById('footer-version').textContent = 'MINUS ' + (d.version || '');
+            }).catch(() => {});
+        }
+
         let updatesPoll = null;
         function fmtComponent(c) {
             const esc = (t) => String(t).replace(/[&<>]/g, (m) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[m]));
@@ -2110,11 +2116,15 @@
                 const run = d.run, res = d.result;
                 if (res && list) list.innerHTML = res.components.map(fmtComponent).join('');
                 const running = !!run && (run.state === 'running' || run.state === 'starting');
+                if (window._updRunning && !running) loadVersion();   // an update just finished
+                window._updRunning = running;
                 if (s) {
                     if (running) s.textContent = 'updating...';
                     else if (!res) s.textContent = d.checking ? 'checking...' : 'not checked yet';
-                    else s.textContent = (res.up_to_date ? 'up to date'
-                            : (res.updatable ? 'updates available' : "behind, but can't update automatically (see notes)")) +
+                    else s.textContent = (res.updatable ? 'updates available'
+                            : res.up_to_date === true ? 'up to date'
+                            : res.up_to_date === null ? "couldn't check everything (see errors above)"
+                            : "behind, but can't update automatically (see notes)") +
                         ' | checked ' + new Date(res.checked_at * 1000).toLocaleString() + (d.checking ? ' (re-checking...)' : '');
                 }
                 if (btn) btn.disabled = !(res && res.updatable) || running;
@@ -3851,6 +3861,9 @@
 
         notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true';
         document.getElementById('notifications-toggle').checked = notificationsEnabled;
+
+        // Footer version: the real installed version (release tag, or tag+commits from source)
+        loadVersion();
 
         // Initialize footer hostname
         fetch('/api/network').then(r => r.json()).then(data => {

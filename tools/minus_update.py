@@ -42,6 +42,10 @@ import updates  # noqa: E402
 USTREAMER_BIN = Path(os.environ.get('MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-patched'))
 WEB_PORT = int(os.environ.get('MINUS_WEB_PORT', '80'))
 HEALTH_S = float(os.environ.get('MINUS_UPDATE_HEALTH_S', '240'))
+# After the web UI first answers, Minus must keep running (same process, not
+# failed) this long: code that crashes a few seconds after the UI is up would
+# otherwise pass the health check and then crash-loop on the new version.
+STABLE_S = float(os.environ.get('MINUS_UPDATE_STABLE_S', '30'))
 SERVICE = os.environ.get('MINUS_SERVICE_NAME', 'minus')
 
 
@@ -68,8 +72,8 @@ class Run:
         self.log(msg)
 
 
-def sh(*cmd, cwd=None, timeout=1800):
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+def sh(*cmd, cwd=None, timeout=1800, **kw):
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, **kw)
     if r.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd)} failed: {(r.stderr or r.stdout).strip()[-400:]}")
     return r.stdout
@@ -90,25 +94,63 @@ def service_failed():
                           timeout=30).returncode == 0
 
 
-def wait_healthy(timeout_s):
-    """True once the web UI answers; False on timeout or if systemd gives up
-    on the unit (a crash loop — no point waiting the full timeout)."""
+def main_pid():
+    r = subprocess.run(['systemctl', 'show', '-p', 'MainPID', '--value', SERVICE],
+                       capture_output=True, text=True, timeout=30)
+    return (r.stdout or '').strip()
+
+
+def wait_healthy(timeout_s, need_vlm=False):
+    """True once Minus is really back: the web UI answers, then the same process
+    stays up for STABLE_S, and — if the vision model was loaded before the
+    update — it is loaded again (a model that fails to load leaves the UI up but
+    the box OCR-only). False on timeout, or as soon as systemd gives up on the
+    unit (a crash loop: no point waiting the full timeout)."""
     deadline = time.time() + timeout_s
+    pid = None
+    up_since = None
     while time.time() < deadline:
         time.sleep(5)
-        if web_ok():
-            return True
         if service_failed():
             return False
+        st = status_json()
+        if st is None:
+            pid, up_since = None, None
+            continue
+        cur = main_pid()
+        if pid != cur:
+            pid, up_since = cur, time.time()      # (re)started: the stability clock restarts
+        if time.time() - up_since < STABLE_S:
+            continue
+        if need_vlm and not st.get('vlm_ready'):
+            continue
+        return True
     return False
 
 
-def web_ok():
+def status_json():
     try:
         with urllib.request.urlopen(f'http://127.0.0.1:{WEB_PORT}/api/status', timeout=5) as r:
-            return r.status == 200
+            return json.loads(r.read().decode()) if r.status == 200 else None
     except Exception:
+        return None
+
+
+def web_ok():
+    return status_json() is not None
+
+
+def vlm_must_come_back():
+    """Was the vision model loaded before the update (and will it load on a
+    restart without waiting for an HDMI signal)? Then it must be loaded after."""
+    st = status_json() or {}
+    if not st.get('vlm_ready'):
         return False
+    try:
+        with urllib.request.urlopen(f'http://127.0.0.1:{WEB_PORT}/api/settings/vlm-preload', timeout=5) as r:
+            return bool(json.loads(r.read().decode()).get('vlm_preload', True))
+    except Exception:
+        return True
 
 
 def comp(status, name):
@@ -126,6 +168,7 @@ def phase1(run, dry):
         return
     run.log(f"Updating: {', '.join(todo)}")
     rollback = run.state.setdefault('rollback', {})
+    run.state['vlm_must_come_back'] = vlm_must_come_back()
 
     us = comp(status, 'ustreamer')
     if us and us.get('updatable'):
@@ -135,8 +178,8 @@ def phase1(run, dry):
             rollback['ustreamer_commit'] = old
             try:
                 run.log('ustreamer: building (make WITH_MPP=1)...')
-                sh(*updates._as_owner(updates.USTREAMER_DIR), 'make', 'WITH_MPP=1', f'-j{os.cpu_count() or 4}',
-                   cwd=updates.USTREAMER_DIR, timeout=3600)
+                sh('make', 'WITH_MPP=1', f'-j{os.cpu_count() or 4}', cwd=updates.USTREAMER_DIR,
+                   timeout=3600, **updates._owner_kwargs(updates.USTREAMER_DIR))
                 run.state['ustreamer_built'] = True
             except Exception as e:
                 updates._git(updates.USTREAMER_DIR, 'reset', '--hard', '--quiet', old)
@@ -154,17 +197,32 @@ def phase1(run, dry):
             if req_after != req_before:
                 run.log('requirements.txt changed: installing Python packages...')
                 try:
-                    sh(sys.executable, '-m', 'pip', 'install', '--break-system-packages', '-q',
-                       '-r', str(REPO_DIR / 'requirements.txt'), timeout=1800)
+                    # Into the checkout owner's user site-packages: minus.service
+                    # puts that FIRST on PYTHONPATH, so a root install into
+                    # /usr/local would be shadowed by the older user-site copy.
+                    sh(sys.executable, '-m', 'pip', 'install', '--user', '--break-system-packages',
+                       '-q', '-r', str(REPO_DIR / 'requirements.txt'), timeout=1800,
+                       **updates._owner_kwargs(REPO_DIR))
+                    run.state['pip_installed'] = True
                 except Exception as e:
                     run.log(f'pip install failed (continuing; the health check decides): {e}')
     run.save()
     if dry:
         run.finish('done', 'Dry run: nothing changed.')
         return
-    # Phase 2 with the code we just installed.
-    os.execv(sys.executable, [sys.executable, str(REPO_DIR / 'tools' / 'minus_update.py'),
-                              '--status-file', str(run.path), '--phase2'])
+    # Phase 2 with the code we just installed, as a child: if the new updater
+    # can't even start (import error in the new code), this — the old, working
+    # code — notices and rolls back instead of leaving a half-updated box.
+    r = subprocess.run([sys.executable, str(REPO_DIR / 'tools' / 'minus_update.py'),
+                        '--status-file', str(run.path), '--phase2'])
+    try:
+        after = json.loads(run.path.read_text())
+    except Exception:
+        after = run.state
+    if after.get('state') == 'running':
+        run.state = after
+        run.state.setdefault('rollback', rollback)
+        undo(run, f'the new updater stopped before finishing (exit {r.returncode})')
 
 
 # ----------------------------------------------------------------- phase 2
@@ -200,13 +258,18 @@ def phase2(run):
         undo(run, f'restart failed: {e}')
         return
     run.save()
-    if wait_healthy(HEALTH_S):
+    if wait_healthy(HEALTH_S, need_vlm=run.state.get('vlm_must_come_back', False)):
         after = updates.UpdateChecker().check(force=True)
         run.state['after'] = after
         run.finish('done', f'Update complete — {SERVICE} is running the new version.')
         return
-    why = ('it kept crashing' if service_failed()
-           else f'it did not answer within {HEALTH_S:.0f} s')
+    if service_failed():
+        why = 'it kept crashing'
+    elif web_ok() and run.state.get('vlm_must_come_back'):
+        why = 'the vision model did not load'
+    else:
+        why = f'it did not come up and stay up within {HEALTH_S:.0f} s'
+
     undo(run, f'{SERVICE} failed to come up after the update ({why})')
 
 
@@ -237,9 +300,25 @@ def undo(run, why, restart=True):
                 run.finish('failed', f'Rolled back ({why}), but {SERVICE} is not answering on the '
                                      f'previous version either — check the box.')
                 return
-        run.finish('rolled_back', f'Rolled back to the previous version ({why}).')
+        note = (' Python packages installed by the update were not reverted.'
+                if run.state.get('pip_installed') else '')
+        run.finish('rolled_back', f'Rolled back to the previous version ({why}).{note}')
     except Exception as e:
         run.finish('failed', f'Rollback incomplete ({why}; {e}) — check the box by hand.')
+
+
+def acquire_lock(path):
+    """Exclusive lock for the whole run (phase 2 runs under its parent's).
+    Returns the open fd (keep it), or None if another updater holds it."""
+    import fcntl
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
 
 
 def install_model():
@@ -272,6 +351,11 @@ def main():
             prev = json.loads(Path(a.status_file).read_text())
         except Exception:
             prev = None
+    if not a.phase2:
+        lock = acquire_lock(Path(a.status_file).with_suffix('.lock'))
+        if lock is None:
+            print('another update is already running')
+            sys.exit(1)
     run = Run(a.status_file, prev)
     try:
         if a.phase2:

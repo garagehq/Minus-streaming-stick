@@ -53,25 +53,31 @@ GITHUB_API = os.environ.get('MINUS_GITHUB_API', 'https://api.github.com')
 CHECK_CACHE_S = float(os.environ.get('MINUS_UPDATE_CHECK_INTERVAL_S', '3600'))
 HTTP_TIMEOUT = 20
 RELEASE_TAG_RE = re.compile(r'^v\d')
+START_GRACE_S = 120     # a launched updater must take its lock within this
 
 
 # ----------------------------------------------------------------------- git
-def _as_owner(path):
-    """Prefix that runs a command as the owner of `path` when we are root and
-    they aren't. Minus runs as root but the checkouts belong to the user who
-    cloned them: as root git refuses them ("dubious ownership"), root has no
-    GitHub SSH key for `git@github.com:` remotes, and files git writes would end
-    up root-owned. Running git as the owner avoids all three."""
+def _owner_kwargs(path):
+    """subprocess.run kwargs that run a command as the owner of `path` when we
+    are root and they aren't. Minus runs as root but the checkouts belong to the
+    user who cloned them: as root git refuses them ("dubious ownership"), root
+    has no GitHub SSH key for `git@github.com:` remotes, and files git writes
+    would end up root-owned. Switching uid/gid directly (no `runuser`/`su`)
+    avoids a PAM login session per command — runuser logged two journal lines
+    for every git call, ~140 per update check (seen on minus, 2026-10-17)."""
     try:
         if os.geteuid() != 0:
-            return []
+            return {}
         import pwd
-        uid = Path(path).stat().st_uid
-        if uid == 0:
-            return []
-        return ['runuser', '-u', pwd.getpwuid(uid).pw_name, '--']
+        st = Path(path).stat()
+        if st.st_uid == 0:
+            return {}
+        pw = pwd.getpwuid(st.st_uid)
+        env = dict(os.environ, HOME=pw.pw_dir, USER=pw.pw_name, LOGNAME=pw.pw_name)
+        return {'user': pw.pw_uid, 'group': pw.pw_gid,
+                'extra_groups': os.getgrouplist(pw.pw_name, pw.pw_gid), 'env': env}
     except Exception:
-        return []
+        return {}
 
 
 def _chown_like_parent(path):
@@ -88,9 +94,33 @@ def _chown_like_parent(path):
         logger.debug(f'chown {path}: {e}')
 
 
+def _mkdirs_owned(path):
+    """mkdir -p, giving every directory we create to the owner of the nearest
+    directory that already existed. As root on a fresh box,
+    /home/radxa/axera_models doesn't exist yet: plain mkdir made it root-owned,
+    and everything chowned "like its parent" then stayed root-owned too."""
+    path = Path(path)
+    anc = path
+    while not anc.exists() and anc != anc.parent:
+        anc = anc.parent
+    created = []
+    p = path
+    while not p.exists():
+        created.append(p)
+        p = p.parent
+    path.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        try:
+            st = anc.stat()
+            for d in created:
+                os.chown(d, st.st_uid, st.st_gid)
+        except Exception as e:
+            logger.debug(f'chown {path}: {e}')
+
+
 def _git(repo, *args, timeout=60, check=True, rc=False):
-    r = subprocess.run([*_as_owner(repo), 'git', '-C', str(repo), *args],
-                       capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True,
+                       timeout=timeout, **_owner_kwargs(repo))
     if rc:
         return r.returncode
     if check and r.returncode != 0:
@@ -145,12 +175,20 @@ def check_git_repo(repo, name, default_branch='main', fetch=True):
         branch = _git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')
         st['branch'] = None if branch == 'HEAD' else branch
         tag = _git(repo, 'describe', '--tags', '--exact-match', 'HEAD', check=False)
-        st['tag'] = tag if RELEASE_TAG_RE.match(tag or '') else None
+        # Release mode = a checkout of a release tag (detached HEAD). A box on a
+        # branch is running from source even when its HEAD happens to be the
+        # commit a release was cut from (release.sh tags origin/main's HEAD, so
+        # every box on main sits exactly on the new tag right after a release):
+        # it keeps following its branch.
+        st['tag'] = tag if (RELEASE_TAG_RE.match(tag or '') and not st['branch']) else None
+        st['on_release_tag'] = tag if RELEASE_TAG_RE.match(tag or '') else None
         dirty = _git(repo, 'status', '--porcelain', '--untracked-files=no')
         st['local_changes'] = bool(dirty)
 
         if fetch:
-            _git(repo, 'fetch', '--quiet', '--tags', 'origin', timeout=120)
+            # --force: a tag moved upstream (re-published release) would otherwise
+            # make every fetch fail with "would clobber existing tag".
+            _git(repo, 'fetch', '--quiet', '--tags', '--force', 'origin', timeout=120)
 
         slug = _github_slug(repo)
         st['github'] = slug
@@ -220,11 +258,24 @@ def update_git_repo(repo, status):
     old = _git(repo, 'rev-parse', 'HEAD')
     if status.get('mode') == 'release':
         tag = status['latest']
-        _git(repo, 'fetch', '--quiet', '--tags', 'origin', timeout=120)
+        _git(repo, 'fetch', '--quiet', '--tags', '--force', 'origin', timeout=120)
         _git(repo, 'checkout', '--quiet', tag)
     else:
         _git(repo, 'merge', '--ff-only', '--quiet', status['target'])
     return old, _git(repo, 'rev-parse', 'HEAD')
+
+
+def installed_version(repo=None):
+    """What this box is running, for display: the release tag on a release
+    ('v0.1.0'), tag + commits past it from source ('v0.1.0-18-g8c8b124'), or
+    the short commit when there are no tags yet. Never raises."""
+    repo = Path(repo or REPO_DIR)
+    try:
+        v = _git(repo, 'describe', '--tags', '--match', 'v[0-9]*', '--always', '--abbrev=7',
+                 '--dirty=+', timeout=10)
+        return v or 'unknown'
+    except Exception:
+        return 'unknown'
 
 
 # --------------------------------------------------------------------- model
@@ -379,7 +430,7 @@ def update_model(manifest=None, remote=None, log=print):
     prev = local.with_name(local.name + '.prev')
     if stage.exists():
         shutil.rmtree(stage)
-    stage.mkdir(parents=True)
+    _mkdirs_owned(stage)
     prefix = (manifest['subfolder'].strip('/') + '/') if manifest['subfolder'] else ''
     total = sum((w.get('size') or 0) for w in files.values())
     done = [0]
@@ -447,7 +498,12 @@ class UpdateChecker:
             result = {
                 'checked_at': time.time(),
                 'components': comps,
-                'up_to_date': all(c.get('up_to_date') is not False for c in comps),
+                # True only if every component is known to be current; None
+                # ("couldn't tell") if any check failed — never "up to date"
+                # because the checks errored (e.g. offline).
+                'up_to_date': (False if any(c.get('up_to_date') is False for c in comps)
+                               else True if all(c.get('up_to_date') is True for c in comps)
+                               else None),
                 'updatable': any(c.get('updatable') for c in comps),
                 'errors': [f"{c['name']}: {c['error']}" for c in comps if c.get('error')],
             }
@@ -465,29 +521,77 @@ class UpdateChecker:
     def last(self):
         return self._result
 
-    def run_status(self):
+    @property
+    def lock_file(self):
+        return self.status_file.with_suffix('.lock')
+
+    def updater_running(self):
+        """True while tools/minus_update.py holds its lock (the whole run, both
+        phases). Held by the kernel, so a crashed or killed updater can't leave
+        it set."""
+        import fcntl
         try:
-            return json.loads(self.status_file.read_text())
+            fd = os.open(self.lock_file, os.O_RDONLY | os.O_CREAT, 0o644)
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return False
+        except OSError:
+            return True
+        finally:
+            os.close(fd)
+
+    def run_status(self):
+        """The current/last update run. A run that says starting/running but
+        whose updater is gone (power cut, crash, failed launch) is reported as
+        'interrupted', so the UI doesn't wait on it forever."""
+        try:
+            st = json.loads(self.status_file.read_text())
         except Exception:
             return None
+        if st.get('state') in ('starting', 'running') and not self.updater_running():
+            age = time.time() - st.get('updated_at', 0)
+            grace = START_GRACE_S if st.get('state') == 'starting' else 15
+            if age > grace:
+                st['state'] = 'interrupted'
+                st.setdefault('steps', []).append(
+                    {'t': time.time(), 'msg': 'The updater stopped before finishing — check the box, '
+                                              'then Check now / Update now again.'})
+        return st
+
+    def busy(self):
+        st = self.run_status()
+        return self.updater_running() or (st or {}).get('state') in ('starting', 'running')
 
     def start_update(self):
         """Launch tools/minus_update.py detached from this process (it restarts
         Minus, which kills this web server). systemd-run when available, so it
         survives the service restart; a new session otherwise."""
-        st = self.run_status()
-        if st and st.get('state') == 'running' and time.time() - st.get('updated_at', 0) < 1800:
+        if self.busy():
             return {'success': False, 'error': 'an update is already running'}
         script = self.repo_dir / 'tools' / 'minus_update.py'
         cmd = ['/usr/bin/python3', str(script), '--status-file', str(self.status_file)]
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
         self.status_file.write_text(json.dumps({'state': 'starting', 'updated_at': time.time(),
-                                                'steps': []}))
-        if shutil.which('systemd-run') and os.geteuid() == 0:
-            unit = f'minus-update-{int(time.time())}'
-            subprocess.run(['systemd-run', '--unit', unit, '--collect', '--quiet', *cmd],
-                           check=True, timeout=20)
-        else:
-            subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+                                                'started_at': time.time(), 'steps': []}))
+        try:
+            if shutil.which('systemd-run') and os.geteuid() == 0:
+                import uuid
+                unit = f'minus-update-{int(time.time())}-{uuid.uuid4().hex[:6]}'
+                # A transient unit starts with a clean environment: pass on the
+                # service's overrides (model dir, ustreamer paths, PYTHONPATH…)
+                # so the updater acts on the same files Minus uses.
+                env = [f'--setenv={k}={v}' for k, v in os.environ.items()
+                       if k.startswith('MINUS_') or k == 'PYTHONPATH']
+                subprocess.run(['systemd-run', '--unit', unit, '--collect', '--quiet', *env, *cmd],
+                               check=True, timeout=20, capture_output=True)
+            else:
+                subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self.status_file.write_text(json.dumps({
+                'state': 'failed', 'updated_at': time.time(), 'started_at': time.time(),
+                'steps': [{'t': time.time(), 'msg': f'Could not start the updater: {e}'}]}))
+            return {'success': False, 'error': f'could not start the updater: {e}'}
         return {'success': True}

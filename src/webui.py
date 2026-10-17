@@ -2925,6 +2925,11 @@ class WebUI:
                 logger.error(f"Error getting update status: {e}")
                 return jsonify({'error': str(e)}), 500
 
+        @self.app.route('/api/version', methods=['GET'])
+        def api_version():
+            """The installed Minus version (git describe) for the footer."""
+            return jsonify({'version': updates_mod.installed_version()})
+
         @self.app.route('/api/updates/check', methods=['POST'])
         def api_updates_check():
             """Check now (git fetch, latest release, model files on Hugging Face)."""

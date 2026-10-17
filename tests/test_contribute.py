@@ -331,3 +331,26 @@ def test_settings_page_has_the_consent_dialog():
     # the toggle starts unchecked and only the dialog's accept button sends consent
     assert 'id="contribute-toggle" onchange' in html and 'id="contribute-toggle" checked' not in html
     assert "JSON.stringify(enabled ? { consent: true } : {})" in html
+
+
+def test_opt_out_only_deletes_the_queues_own_files(tmp_path, ingest):
+    """MINUS_CONTRIB_QUEUE_DIR is configurable; opting out used to rmtree it."""
+    c = make(tmp_path, ingest.url, cooldown=600)
+    assert c.offer(frame(1), block_id=1.0, source='vlm')
+    (tmp_path / 'q' / 'someone-elses-file.txt').write_text('keep me')
+    c.set_enabled(False)
+    assert (tmp_path / 'q' / 'someone-elses-file.txt').read_text() == 'keep me'
+    assert not list((tmp_path / 'q').glob('*.png')) and not list((tmp_path / 'q').glob('*.json'))
+
+
+def test_opt_out_mid_batch_sends_nothing(tmp_path, ingest, monkeypatch):
+    c = make(tmp_path, ingest.url)
+    assert c.offer(frame(1), block_id=1.0, source='vlm')
+    real_queued = c._queued
+
+    def queued_then_opt_out():
+        q = real_queued()
+        c._enabled = False                  # user flips the switch while the batch is built
+        return q
+    monkeypatch.setattr(c, '_queued', queued_then_opt_out)
+    assert c.upload_due() == 0 and ingest.posts == []

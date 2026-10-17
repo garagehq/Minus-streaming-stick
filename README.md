@@ -149,9 +149,12 @@ updates it with one button:
 **Update now** pulls what's new (fast-forward only — it never overwrites local
 changes; a branch with local commits or no upstream is reported but left alone),
 rebuilds ustreamer if needed, downloads the model if needed, and restarts Minus,
-about a minute without picture. If Minus doesn't come back up within four
-minutes, the code, ustreamer and model are all rolled back and it restarts on the
-previous version. The previous model is kept next to the new one as
+about a minute without picture. Minus has to come back up within four minutes
+and *stay* up (30 seconds on the same process, so a crash loop doesn't pass), and
+if the vision model was loaded before the update it has to load again; otherwise
+the code, ustreamer and model are all rolled back and it restarts on the previous
+version. Only one update can run at a time, and an update that was cut off (power
+cut) shows as *interrupted* instead of blocking the button. The previous model is kept next to the new one as
 `<model dir>.prev`. A check runs five minutes after startup and at most hourly
 after that while the page is open; nothing updates without the button. From a
 shell: `sudo python3 tools/minus_update.py` does the same thing.
