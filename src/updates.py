@@ -88,9 +88,11 @@ def _chown_like_parent(path):
         logger.debug(f'chown {path}: {e}')
 
 
-def _git(repo, *args, timeout=60, check=True):
+def _git(repo, *args, timeout=60, check=True, rc=False):
     r = subprocess.run([*_as_owner(repo), 'git', '-C', str(repo), *args],
                        capture_output=True, text=True, timeout=timeout)
+    if rc:
+        return r.returncode
     if check and r.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}")
     return r.stdout.strip()
@@ -162,17 +164,25 @@ def check_git_repo(repo, name, default_branch='main', fetch=True):
         st['latest_release'] = release
 
         if st['tag']:
-            # A published release: is there a newer one?
+            # A published release: is there a NEWER one? Only a release that
+            # contains what is installed counts — a newer commit is always
+            # better than an older release, so we never move backwards (e.g.
+            # a re-published or back-ported older tag).
             st['mode'] = 'release'
-            if release and release['tag']:
-                st['latest'] = release['tag']
-                st['up_to_date'] = (release['tag'] == st['tag'])
-                st['updatable'] = not st['up_to_date'] and not st['local_changes']
-                if st['local_changes'] and not st['up_to_date']:
-                    st['reason'] = 'local changes to tracked files'
-            else:
-                st['latest'] = st['tag']
-                st['up_to_date'] = True
+            st['latest'] = st['tag']
+            st['up_to_date'] = True
+            if release and release['tag'] and release['tag'] != st['tag']:
+                newer = _git(repo, 'merge-base', '--is-ancestor', 'HEAD',
+                             f"refs/tags/{release['tag']}", check=False, rc=True) == 0
+                if newer:
+                    st['latest'] = release['tag']
+                    st['up_to_date'] = False
+                    st['updatable'] = not st['local_changes']
+                    if st['local_changes']:
+                        st['reason'] = 'local changes to tracked files'
+                else:
+                    st['reason'] = (f"latest release {release['tag']} is not newer than "
+                                    f"{st['tag']} — staying on {st['tag']}")
             return st
 
         st['mode'] = 'source'
