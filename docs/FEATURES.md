@@ -202,6 +202,16 @@ Off by default. Settings → **Help Improve Minus** turns it on, after a consent
 - 10-minute local cool-down. **Pausing blocking during that ad (or ≤ 60 s after it ends) deletes its queued frames**
 - Turning it off deletes the queue (`~/.minus_contrib_queue/`). The queue is capped at 200 frames / 7 days. Uploads back off from 20 s up to 6 h when the server is unreachable and never touch detection
 - Setting `contribute_snapshots` in `~/.minus_system_settings.json`; env `MINUS_INGEST_URL` / `MINUS_INGEST_KEY` / `MINUS_CONTRIB_QUEUE_DIR`
+## Release Checks and Updates
+
+Settings → **Minus Updates** (`src/updates.py`, `tools/minus_update.py`):
+- **Minus code** — on a `v*` release tag: compared with the latest GitHub release; from source: `git fetch` + commits behind the branch's upstream (a branch with no upstream is info-only)
+- **ustreamer** — its checkout against its upstream branch; rebuilt (`make WITH_MPP=1`) on update
+- **VLM model** — `models/vlm_model.json` names the Hugging Face repo/subfolder/local dir; installed files are compared with HF by sha256 (README edits on HF aren't updates). A new model (e.g. Minus v0.2) is a manifest change: the code update brings the manifest, phase 2 of the updater (running the NEW code) downloads it
+- **Update now** — detached systemd unit; fast-forward only, refuses local changes; downloads to a staging dir, verifies, swaps (old model kept as `<dir>.prev`); restarts Minus and waits up to `MINUS_UPDATE_HEALTH_S` (240 s) for the web UI, otherwise rolls back code, ustreamer binary and model and restarts again
+- git runs as the checkout's owner (`runuser`), so a root service can use the owner's GitHub SSH key and files stay owned by them
+- First check 5 min after startup (`MINUS_UPDATE_FIRST_CHECK_S`), cached 1 h (`MINUS_UPDATE_CHECK_INTERVAL_S`); never updates without the button
+- `install.sh` step 13 and `tools/minus_update.py --install-model` install the model from the same manifest
 
 ## Configuration
 
