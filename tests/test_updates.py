@@ -365,3 +365,52 @@ def test_web_routes_exist():
         assert route in src
     html = (ROOT / 'src' / 'templates' / 'index.html').read_text()
     assert 'id="updates-apply-btn"' in html and 'function applyUpdates' in html
+
+
+# --------------------------------------------------------- rollback behaviour
+def _updater(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import importlib
+    mu = importlib.import_module('minus_update')
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+    monkeypatch.setattr(mu.subprocess, 'run', fake_run)
+    monkeypatch.setattr(mu.time, 'sleep', lambda s: None)
+    return mu, calls
+
+
+def test_service_start_clears_the_start_limit_first(monkeypatch, tmp_path):
+    """A crash-looping build leaves the unit 'failed'; restart is refused until
+    reset-failed (the live rollback test on minus left it down, 2026-10-17)."""
+    mu, calls = _updater(monkeypatch, tmp_path)
+    mu.service('restart')
+    assert calls[0] == ['systemctl', 'reset-failed', mu.SERVICE]
+    assert calls[1] == ['systemctl', 'restart', mu.SERVICE]
+
+
+def test_crash_loop_ends_the_wait_early(monkeypatch, tmp_path):
+    mu, calls = _updater(monkeypatch, tmp_path)
+    monkeypatch.setattr(mu, 'web_ok', lambda: False)
+    monkeypatch.setattr(mu, 'service_failed', lambda: True)
+    t = [0.0]
+    monkeypatch.setattr(mu.time, 'time', lambda: t.__setitem__(0, t[0] + 1) or t[0])
+    assert mu.wait_healthy(240) is False
+    assert t[0] < 10                     # gave up on the first failed probe, not after 240 s
+
+
+def test_rollback_that_does_not_come_up_is_reported_failed(monkeypatch, tmp_path):
+    mu, calls = _updater(monkeypatch, tmp_path)
+    monkeypatch.setattr(mu, 'wait_healthy', lambda s: False)
+    monkeypatch.setattr(updates, '_git', lambda *a, **k: '')
+    run = mu.Run(tmp_path / 's.json')
+    run.state['rollback'] = {'minus_commit': 'abc'}
+    mu.undo(run, 'test')
+    assert json.loads((tmp_path / 's.json').read_text())['state'] == 'failed'
+    monkeypatch.setattr(mu, 'wait_healthy', lambda s: True)
+    run = mu.Run(tmp_path / 's.json')
+    run.state['rollback'] = {'minus_commit': 'abc'}
+    mu.undo(run, 'test')
+    assert json.loads((tmp_path / 's.json').read_text())['state'] == 'rolled_back'

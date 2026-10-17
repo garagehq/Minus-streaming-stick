@@ -76,7 +76,31 @@ def sh(*cmd, cwd=None, timeout=1800):
 
 
 def service(action):
+    # A crash-looping build can hit systemd's start limit, after which the unit
+    # is "failed" and start/restart are refused ("Start request repeated too
+    # quickly") — seen in the rollback test on minus, 2026-10-17. Clear it first.
+    if action in ('start', 'restart'):
+        subprocess.run(['systemctl', 'reset-failed', SERVICE], timeout=60,
+                       capture_output=True)
     sh('systemctl', action, SERVICE, timeout=180)
+
+
+def service_failed():
+    return subprocess.run(['systemctl', 'is-failed', '--quiet', SERVICE],
+                          timeout=30).returncode == 0
+
+
+def wait_healthy(timeout_s):
+    """True once the web UI answers; False on timeout or if systemd gives up
+    on the unit (a crash loop — no point waiting the full timeout)."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        time.sleep(5)
+        if web_ok():
+            return True
+        if service_failed():
+            return False
+    return False
 
 
 def web_ok():
@@ -176,15 +200,14 @@ def phase2(run):
         undo(run, f'restart failed: {e}')
         return
     run.save()
-    deadline = time.time() + HEALTH_S
-    while time.time() < deadline:
-        time.sleep(5)
-        if web_ok():
-            after = updates.UpdateChecker().check(force=True)
-            run.state['after'] = after
-            run.finish('done', f'Update complete — {SERVICE} is running the new version.')
-            return
-    undo(run, f'{SERVICE} did not answer within {HEALTH_S:.0f} s after the update')
+    if wait_healthy(HEALTH_S):
+        after = updates.UpdateChecker().check(force=True)
+        run.state['after'] = after
+        run.finish('done', f'Update complete — {SERVICE} is running the new version.')
+        return
+    why = ('it kept crashing' if service_failed()
+           else f'it did not answer within {HEALTH_S:.0f} s')
+    undo(run, f'{SERVICE} failed to come up after the update ({why})')
 
 
 def undo(run, why, restart=True):
@@ -192,7 +215,7 @@ def undo(run, why, restart=True):
     run.log(f'Rolling back: {why}')
     try:
         if restart:
-            subprocess.run(['systemctl', 'stop', SERVICE], timeout=180)
+            subprocess.run(['systemctl', 'stop', SERVICE], timeout=180, capture_output=True)
         if rb.get('minus_commit'):
             updates._git(REPO_DIR, 'reset', '--hard', '--quiet', rb['minus_commit'])
         if rb.get('ustreamer_commit'):
@@ -209,7 +232,11 @@ def undo(run, why, restart=True):
                 os.replace(local, failed)
                 os.replace(prev, local)
         if restart:
-            subprocess.run(['systemctl', 'restart', SERVICE], timeout=180)
+            service('restart')
+            if not wait_healthy(HEALTH_S):
+                run.finish('failed', f'Rolled back ({why}), but {SERVICE} is not answering on the '
+                                     f'previous version either — check the box.')
+                return
         run.finish('rolled_back', f'Rolled back to the previous version ({why}).')
     except Exception as e:
         run.finish('failed', f'Rollback incomplete ({why}; {e}) — check the box by hand.')
