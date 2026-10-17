@@ -414,3 +414,37 @@ def test_rollback_that_does_not_come_up_is_reported_failed(monkeypatch, tmp_path
     run.state['rollback'] = {'minus_commit': 'abc'}
     mu.undo(run, 'test')
     assert json.loads((tmp_path / 's.json').read_text())['state'] == 'rolled_back'
+
+
+def test_never_downgrades_to_an_older_release(repos, monkeypatch):
+    """A newer commit always beats an older release: on v0.2.0 with GitHub's
+    'latest' pointing at the older v0.1.0 (re-published/back-ported), stay."""
+    _, seed, box = repos
+    git(seed, 'tag', 'v0.1.0')
+    push_commit(seed, 'newer work')
+    git(seed, 'tag', 'v0.2.0')
+    git(seed, 'push', '-q', 'origin', '--tags')
+    git(box, 'fetch', '-q', '--tags')
+    git(box, 'checkout', '-q', 'v0.2.0')
+    monkeypatch.setattr(updates, '_github_slug', lambda repo: 'garagehq/Minus')
+    monkeypatch.setattr(updates, 'latest_github_release',
+                        lambda slug: {'tag': 'v0.1.0', 'name': 'old', 'url': 'u', 'published_at': 'x'})
+    st = updates.check_git_repo(box, 'Minus')
+    assert st['mode'] == 'release' and st['up_to_date'] is True and st['updatable'] is False
+    assert st['latest'] == 'v0.2.0' and 'not newer' in st['reason']
+
+
+def test_source_box_ahead_of_the_latest_release_stays_on_its_branch(repos, monkeypatch):
+    """Running from source past the latest release: compared with the branch,
+    never offered the (older) release."""
+    _, seed, box = repos
+    git(seed, 'tag', 'v0.1.0')
+    git(seed, 'push', '-q', 'origin', 'v0.1.0')
+    push_commit(seed, 'after the release')
+    git(box, 'pull', '-q')
+    monkeypatch.setattr(updates, '_github_slug', lambda repo: 'garagehq/Minus')
+    monkeypatch.setattr(updates, 'latest_github_release',
+                        lambda slug: {'tag': 'v0.1.0', 'name': 'x', 'url': 'u', 'published_at': 'x'})
+    st = updates.check_git_repo(box, 'Minus')
+    assert st['mode'] == 'source' and st['up_to_date'] is True and st['updatable'] is False
+    assert st['latest_release']['tag'] == 'v0.1.0'
