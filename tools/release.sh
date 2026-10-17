@@ -80,10 +80,12 @@ fi
 NOTES="$(mktemp)"
 trap 'rm -f "$NOTES"' EXIT
 {
-    echo "$MODEL_LINE"
-    echo
-    echo "Update a box from the web UI (Settings -> Minus Updates -> Update now), or from a shell:"
-    echo '`sudo python3 tools/minus_update.py`'
+    [ -n "$MODEL_LINE" ] && { echo "$MODEL_LINE"; echo; }
+    # Only releases that contain the updater can be updated from the web UI.
+    if git cat-file -e "HEAD:tools/minus_update.py" 2>/dev/null; then
+        echo "Update a box from the web UI (Settings -> Minus Updates -> Update now), or from a shell:"
+        echo '`sudo python3 tools/minus_update.py`'
+    fi
 } > "$NOTES"
 
 echo "Releasing $VERSION at $(git rev-parse --short HEAD) (previous: ${PREV:-none})"
