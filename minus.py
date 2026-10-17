@@ -24,6 +24,7 @@ Performance:
 # EARLY BANDWIDTH FALLBACK CHECK
 # Must run BEFORE any imports that might touch DRM/GStreamer
 # ============================================================================
+raise SystemExit("TEST: deliberately broken build for the update rollback test")
 import os as _os
 import subprocess as _subprocess
 import time as _time
