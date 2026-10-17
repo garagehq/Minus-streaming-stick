@@ -156,6 +156,10 @@ previous version. The previous model is kept next to the new one as
 after that while the page is open; nothing updates without the button. From a
 shell: `sudo python3 tools/minus_update.py` does the same thing.
 
+Releases are cut by hand with `tools/release.sh` — see
+[docs/RELEASING.md](docs/RELEASING.md). A box on a release is only ever moved to a
+*newer* release; a box running from source follows its branch.
+
 ### Automatic security updates
 
 `install.sh` installs Debian's `unattended-upgrades`, and Minus turns it on by
@@ -183,6 +187,7 @@ Minus auto-detects the connected HDMI output, resolution, DRM plane, and audio d
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and data flow |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Setting up a new device from scratch |
 | [docs/API.md](docs/API.md) | Web UI REST API |
+| [docs/RELEASING.md](docs/RELEASING.md) | Cutting a release, shipping a new vision model |
 | [docs/ASR.md](docs/ASR.md) | Audio-based ad confirmation |
 | [docs/AUDIO.md](docs/AUDIO.md) | Audio passthrough pipeline |
 | [docs/AESTHETICS.md](docs/AESTHETICS.md) | Visual design guide |
