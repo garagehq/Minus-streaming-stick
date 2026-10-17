@@ -26,6 +26,11 @@ except ImportError:
     print("WARNING: playwright not installed, skipping UI tests")
 
 BASE_URL = "http://localhost:80"
+
+# Live test: only with MINUS_LIVE_UI_TESTS=1 (tests/live_guard.py explains why).
+sys.path.insert(0, str(Path(__file__).parent))
+from live_guard import require_live_opt_in  # noqa: E402
+require_live_opt_in('test_status_leds_ui.py (drives the real status LEDs)')
 SCREENSHOT_DIR = Path(__file__).parent / "screenshots" / "test_outputs"
 
 

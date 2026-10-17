@@ -25,8 +25,33 @@ except ImportError:
     HAS_PLAYWRIGHT = False
     print("WARNING: playwright not installed, skipping UI tests")
 
-BASE_URL = "http://localhost:80"
-WIFI_SETUP_URL = f"{BASE_URL}/wifi-setup"
+# Never the live web UI. These tests click real-looking networks and submit
+# passwords; pointed at localhost:80 on a Minus box they drove the REAL radio
+# (2026-10-15: the box joined a neighbour's open smart-plug network and stayed
+# offline). setUpModule starts tests/portal_test_server.py — the real routes
+# and page on a random 127.0.0.1 port with a fake Wi-Fi manager — and sets
+# these.
+BASE_URL = None
+WIFI_SETUP_URL = None
+_SERVER = None
+
+
+def setUpModule():
+    global BASE_URL, WIFI_SETUP_URL, _SERVER
+    sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+    sys.path.insert(0, str(Path(__file__).parent))
+    from portal_test_server import PortalTestServer
+    _SERVER = PortalTestServer().start()
+    BASE_URL = _SERVER.base_url
+    WIFI_SETUP_URL = f"{BASE_URL}/wifi-setup"
+    assert not BASE_URL.endswith(':80'), 'portal tests must never run against a real web UI'
+
+
+def tearDownModule():
+    if _SERVER is not None:
+        # Nothing the tests did may have reached a real radio: the fake only
+        # records attempts.
+        _SERVER.stop()
 SCREENSHOT_DIR = Path(__file__).parent / "screenshots" / "wifi_portal"
 
 # Common mobile viewport sizes
@@ -853,3 +878,34 @@ if __name__ == '__main__':
         sys.exit(1)
 
     unittest.main(verbosity=2)
+
+
+class TestPortalServerIsIsolated(unittest.TestCase):
+    """The portal tests must only ever talk to the throwaway server."""
+
+    def test_not_the_live_web_ui(self):
+        sys.path.insert(0, str(Path(__file__).parent))
+        from live_guard import targets_live_web_ui
+        self.assertFalse(targets_live_web_ui(BASE_URL))
+        self.assertTrue(BASE_URL.startswith('http://127.0.0.1:'))
+
+    def test_only_portal_routes_are_served(self):
+        import urllib.error
+        import urllib.request
+        for path in ('/api/status', '/api/wifi/disconnect', '/api/wifi/ap/start', '/api/test/trigger-block'):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(urllib.request.Request(f'{BASE_URL}{path}', method='POST', data=b'{}'))
+            self.assertEqual(ctx.exception.code, 403, path)
+
+    def test_connect_never_reaches_a_radio(self):
+        import urllib.request
+        req = urllib.request.Request(f'{BASE_URL}/api/wifi/connect', method='POST',
+                                     data=json.dumps({'ssid': 'CoffeeShop', 'password': 'x' * 8}).encode(),
+                                     headers={'Content-Type': 'application/json'})
+        try:
+            urllib.request.urlopen(req)
+        except Exception:
+            pass   # the fake answers 400 "Incorrect password"
+        self.assertIn(('CoffeeShop', 'x' * 8), _SERVER.wifi.connect_attempts)
+        with self.assertRaises(AssertionError):
+            _SERVER.wifi.disconnect_network()     # any other radio action is refused

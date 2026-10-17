@@ -146,16 +146,19 @@ class ThermalMonitor:
     """Background thread sampling sysfs and driving the governor.
 
     on_change(degraded: bool, status: dict) fires on every transition.
+    on_tick() (optional) runs after every sample — for follow-up work that
+    may have to wait, e.g. a rate-limited capture-rate switch.
     `force` (True/False/None) pins the mode for testing via
     POST /api/test/thermal; None resumes normal governing.
     """
 
-    def __init__(self, on_change=None):
+    def __init__(self, on_change=None, on_tick=None):
         self.governor = ThermalGovernor()
         self.force = None
         self.last_temp_c = None
         self.last_throttled = False
         self._on_change = on_change
+        self._on_tick = on_tick
         self._running = False
         self._thread = None
 
@@ -214,6 +217,11 @@ class ThermalMonitor:
                     self._on_change(self.governor.degraded, self.get_status())
                 except Exception as e:
                     logger.error(f"[Thermal] on_change callback failed: {e}")
+        if self._on_tick:
+            try:
+                self._on_tick()
+            except Exception as e:
+                logger.error(f"[Thermal] on_tick callback failed: {e}")
 
     def _loop(self):
         while self._running:

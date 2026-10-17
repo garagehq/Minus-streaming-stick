@@ -255,11 +255,14 @@ except ImportError as e:
 
 # Import Health Monitor
 try:
-    from health import HealthMonitor
+    from health import HealthMonitor, hdmi_output_connected as _hdmi_output_connected
     HAS_HEALTH = True
 except ImportError as e:
     logger.warning(f"Health module not available: {e}")
     HAS_HEALTH = False
+
+    def _hdmi_output_connected():   # unknown without the health module: keep retrying
+        return True
 
 # Import Web UI
 try:
@@ -654,6 +657,28 @@ class Minus:
         # (hysteresis in ThermalGovernor).
         self.thermal_degraded = False
         self._thermal_saved_params = None
+        # Capture-rate cap under thermal throttle. The display frame gate only
+        # drops frames AFTER souphttpsrc/jpegparse — the CPU-bound half — so a
+        # throttled box kept receiving and parsing 60fps of 4K MJPEG while
+        # showing 30. It couldn't keep up: ~5 MB of unread frames sat in the
+        # socket (+~2.7 MB in ustreamer's send buffer), i.e. the picture ran a
+        # content-dependent fraction of a second late while audio stayed at its
+        # fixed ~0.5 s — the slow A/V drift owners reported (2026-10-15, 85°C).
+        # In degraded mode ustreamer itself is restarted with --desired-fps so
+        # it ENCODES and sends only what will be shown (less VPU + CPU work,
+        # nothing to back up); full rate comes back when the box cools.
+        # 0 disables (old behaviour: display gate only).
+        self.THERMAL_CAPTURE_FPS = int(os.environ.get('MINUS_THERMAL_CAPTURE_FPS', '30'))
+        self.CAPTURE_FPS_SWITCH_MIN_S = float(os.environ.get('MINUS_CAPTURE_FPS_SWITCH_MIN_S', '600'))
+        # Going back UP to the source rate waits until the box has been out of
+        # degraded mode this long: at 30fps a box often cools below the exit
+        # threshold within minutes, and restoring 60fps right away would just
+        # heat it back up (a picture blip every cycle).
+        self.CAPTURE_FPS_RESTORE_AFTER_S = float(os.environ.get('MINUS_CAPTURE_FPS_RESTORE_AFTER_S', '1800'))
+        self._thermal_normal_since = 0.0
+        self._capture_fps_cap = 0          # what the running ustreamer was started with (0 = source rate)
+        self._capture_fps_switch_at = 0.0
+        self._capture_fps_lock = threading.Lock()
         self.thermal_monitor = None
 
         # OCR transience guard. OCR is normally fast-fire (1 frame → block
@@ -884,6 +909,17 @@ class Minus:
 
         # System settings (loaded from ~/.minus_system_settings.json)
         self._system_settings = self._load_system_settings()
+
+        # Anonymous ad-snapshot contribution — opt-in, default OFF. While off
+        # it queues and sends nothing (see src/contribute.py, docs/PRIVACY.md).
+        self.contributor = None
+        self._contrib_last_block = (None, 0.0)   # (block id, end time) of the last finished block
+        try:
+            from contribute import SnapshotContributor
+            self.contributor = SnapshotContributor(
+                enabled=bool(self._system_settings.get('contribute_snapshots', False)))
+        except Exception as e:
+            logger.warning(f"[Contribute] unavailable: {e}")
         # Reconcile apt's unattended-upgrades config with the persisted
         # setting (idempotent; root-only, no-op when not root or not installed).
         try:
@@ -1103,7 +1139,8 @@ class Minus:
         if os.environ.get('MINUS_THERMAL_DISABLE', '0') != '1':
             try:
                 from thermal import ThermalMonitor
-                self.thermal_monitor = ThermalMonitor(on_change=self._on_thermal_change)
+                self.thermal_monitor = ThermalMonitor(on_change=self._on_thermal_change,
+                                                      on_tick=self._maybe_switch_capture_fps)
                 self.thermal_monitor.start()
                 logger.info("Thermal monitor initialized")
             except Exception as e:
@@ -1176,6 +1213,7 @@ class Minus:
         """
         try:
             self.thermal_degraded = degraded
+            self._thermal_normal_since = 0.0 if degraded else time.time()
             if degraded:
                 if self._thermal_saved_params is None:
                     self._thermal_saved_params = {
@@ -1199,8 +1237,88 @@ class Minus:
                     f"(temp={snapshot.get('temp_c')})")
             if self.ad_blocker:
                 self.ad_blocker.set_thermal_fps_cap(degraded)
+            self._maybe_switch_capture_fps()
         except Exception as e:
             logger.error(f"[Thermal] Failed to apply mode change: {e}")
+
+    def _wanted_capture_fps(self) -> int:
+        """Capture cap the current thermal state calls for (0 = source rate)."""
+        cap = getattr(self, 'THERMAL_CAPTURE_FPS', 30)
+        if getattr(self, 'thermal_degraded', False) and cap > 0:
+            return cap
+        return 0
+
+    @staticmethod
+    def _desired_fps_arg(target: int, source_fps: int = 60) -> int:
+        """The --desired-fps value that makes ustreamer actually send `target` fps.
+
+        ustreamer passes a frame once at least 1/desired_fps has elapsed since the
+        last one. Asking for exactly 30 on a 60 fps source puts that cutoff ON the
+        second frame (33.3 ms), and capture jitter pushes it to the third half the
+        time: measured 20.4 fps on minus (2026-10-16). To pass every k-th source
+        frame (k = source/target), put the cutoff half a frame early, at
+        (k - 0.5) source frames: 25 ms -> exactly 30 fps on a 60 fps source,
+        whatever the jitter. A source already at/below the target isn't limited.
+        """
+        if target <= 0:
+            return 0
+        k = max(1, round(source_fps / target))
+        if k == 1:
+            return int(target)
+        return int(round(source_fps / (k - 0.5)))
+
+    def _ustreamer_fps_args(self) -> list:
+        """--desired-fps for a ustreamer being (re)started now; records what it got."""
+        want = self._wanted_capture_fps()
+        self._capture_fps_cap = want
+        return [f'--desired-fps={self._desired_fps_arg(want)}'] if want > 0 else []
+
+    def _maybe_switch_capture_fps(self, now=None):
+        """Restart ustreamer at the capture rate the thermal state wants, if it
+        differs from what is running. Rate-limited (CAPTURE_FPS_SWITCH_MIN_S) so a
+        box hovering at the trip point can't flap; a skipped switch is retried
+        on the next thermal change or watchdog tick. Runs the restart off the
+        caller's thread (~3 s picture blip). Returns the action taken."""
+        now = time.time() if now is None else now
+        if not hasattr(self, '_capture_fps_lock'):    # partially built (tests)
+            return 'unavailable'
+        want = self._wanted_capture_fps()
+        if want == self._capture_fps_cap:
+            return 'unchanged'
+        if want == 0:   # restoring the source rate: only once the box has stayed cool
+            normal_since = getattr(self, '_thermal_normal_since', 0.0)
+            if not normal_since or now - normal_since < getattr(self, 'CAPTURE_FPS_RESTORE_AFTER_S', 1800.0):
+                return 'cooling'
+        if not self._is_ustreamer_running():
+            return 'not-running'       # the next (re)start picks up the right rate
+        # No input (NO SIGNAL / loading screen up): there's nothing to encode, so
+        # nothing to save — and _restart_ustreamer() would rebuild the video
+        # pipeline over the NO SIGNAL screen (the health monitor would still
+        # think it was showing). Retried on the next tick once a picture is back.
+        ab = getattr(self, 'ad_blocker', None)
+        if getattr(self, '_hdmi_signal_lost', False) or \
+                (ab is not None and getattr(ab, 'current_source', None) in ('no_hdmi_device', 'loading')):
+            return 'no-signal'
+        if self._capture_fps_switch_at and now - self._capture_fps_switch_at < self.CAPTURE_FPS_SWITCH_MIN_S:
+            return 'rate-limited'
+        if not self._capture_fps_lock.acquire(blocking=False):
+            return 'busy'
+        self._capture_fps_switch_at = now
+        old = self._capture_fps_cap
+
+        def _do():
+            try:
+                logger.warning(f"[Thermal] Capture rate {old or 'source'} -> {want or 'source'} fps "
+                               f"(restarting ustreamer)")
+                hm = getattr(self, 'health_monitor', None)
+                if hm is not None:
+                    # A deliberate restart must not look like the source vanishing.
+                    hm.suppress_transitions(20)
+                self._restart_ustreamer(even_without_display=True)
+            finally:
+                self._capture_fps_lock.release()
+        threading.Thread(target=_do, name='capture-fps-switch', daemon=True).start()
+        return 'switching'
 
     def _set_led_state(self, state):
         """Forward a state change to the status-LED strip. No-op if disabled
@@ -1383,10 +1501,16 @@ class Minus:
 
         logger.info(f"[Recovery] Format change complete - now running at {new_format}")
 
-    def _restart_ustreamer(self):
-        """Restart ustreamer process."""
+    def _restart_ustreamer(self, even_without_display: bool = False):
+        """Restart ustreamer process.
+
+        even_without_display: restart even when no TV is attached (the
+        thermal capture-rate switch: with the TV off, ustreamer still captures
+        and encodes for OCR/VLM and the web preview, so the heat is the same).
+        The display pipeline is only restarted when a display is connected.
+        """
         # Skip if display is disconnected (retry loop handles reconnection)
-        if not self.display_connected:
+        if not self.display_connected and not even_without_display:
             logger.debug("[Recovery] Skipping ustreamer restart - display disconnected")
             return
 
@@ -1443,7 +1567,7 @@ class Minus:
                 '--workers=4',              # 4 parallel MPP encoders
                 '--buffers=5',
                 '--tcp-nodelay',           # Disable Nagle's algorithm for smoother streaming
-            ]
+            ] + self._ustreamer_fps_args()
 
             logger.info(f"[Recovery] Starting ustreamer: {' '.join(ustreamer_cmd)}")
 
@@ -1458,7 +1582,8 @@ class Minus:
             if self.ustreamer_process.poll() is None:
                 logger.info("[Recovery] ustreamer restarted successfully")
                 # Also restart video pipeline to reconnect to new ustreamer
-                if self.ad_blocker:
+                # (no display: the display retry loop starts it when one appears)
+                if self.ad_blocker and self.display_connected:
                     logger.info("[Recovery] Also restarting video pipeline...")
                     self.ad_blocker.restart()
             else:
@@ -2053,6 +2178,62 @@ class Minus:
 
     # ===== Web UI Methods =====
 
+    # ------------------------------------------------------------------
+    # Anonymous ad-snapshot contribution (opt-in) — src/contribute.py
+    # ------------------------------------------------------------------
+    def _contrib_offer(self, frame, source: str, p_ad=None):
+        """Offer a frame to the opt-in contributor — only while a block is
+        actually on screen (not paused, not suppressed, not test-disabled).
+        No-op when contribution is off. Never raises."""
+        c = getattr(self, 'contributor', None)
+        if c is None or not c.enabled:
+            return
+        try:
+            on_screen = (
+                self.ad_detected and self.blocking_source
+                and not self.is_blocking_paused()
+                and not self.static_blocking_suppressed
+                and not self.config.no_blocking
+            )
+            if not on_screen:
+                return
+            c.offer(frame, block_id=self.blocking_start_time, source=source, p_ad=p_ad)
+        except Exception as e:
+            logger.debug(f"[Contribute] offer skipped: {e}")
+
+    def _contrib_retract_on_pause(self):
+        """User paused: retract the current block's queued snapshots, or the
+        block that ended within RETRACT_AFTER_END_S (the pause was about it)."""
+        c = getattr(self, 'contributor', None)
+        if c is None or not c.enabled:
+            return
+        try:
+            from contribute import RETRACT_AFTER_END_S
+            if self.ad_detected:
+                c.retract_block(self.blocking_start_time)
+            block_id, ended = getattr(self, '_contrib_last_block', (None, 0.0))
+            if block_id is not None and time.time() - ended <= RETRACT_AFTER_END_S:
+                c.retract_block(block_id)
+        except Exception as e:
+            logger.debug(f"[Contribute] retract skipped: {e}")
+
+    @property
+    def contribute_snapshots_enabled(self) -> bool:
+        """Whether the user has opted in to anonymous ad-snapshot contribution."""
+        return bool(self._system_settings.get('contribute_snapshots', False))
+
+    def set_contribute_snapshots(self, enabled: bool) -> dict:
+        """Opt in or out of anonymous ad-snapshot contribution and persist it.
+        Opting out deletes the local queue immediately."""
+        enabled = bool(enabled)
+        self._system_settings['contribute_snapshots'] = enabled
+        self._save_system_settings()
+        if self.contributor is not None:
+            self.contributor.set_enabled(enabled)
+            return {'success': True, **self.contributor.status()}
+        return {'success': enabled is False, 'enabled': False,
+                'error': None if not enabled else 'contribution module unavailable'}
+
     def pause_blocking(self, duration_seconds: int = 120):
         """Pause ad blocking for specified duration.
 
@@ -2069,6 +2250,9 @@ class Minus:
         was_vlm_only_block = (
             self.ad_detected and self.blocking_source == "vlm"
         )
+        # A pause means the block was unwanted: delete any anonymous snapshots
+        # queued from it before they can upload (opt-in contribution only).
+        self._contrib_retract_on_pause()
 
         with self._state_lock:
             self.blocking_paused_until = time.time() + duration_seconds
@@ -2336,6 +2520,7 @@ class Minus:
             'hdmi_reconnect_grace': self.is_in_hdmi_reconnect_grace(),
             'hdmi_reconnect_grace_remaining': self.get_hdmi_reconnect_grace_remaining(),
             'thermal_degraded': self.thermal_degraded,
+            'capture_fps_cap': getattr(self, '_capture_fps_cap', 0) or None,   # None = source rate
             'ad_clock': self.ad_clock_snapshot(),
             'thermal': (self.thermal_monitor.get_status() if self.thermal_monitor
                         else {'degraded': False, 'temp_c': None,
@@ -2733,6 +2918,9 @@ class Minus:
             # list rather than a dict so the web UI can just toggle checkboxes.
             # Valid kinds: 'vocab', 'fact', 'photos'.
             'replacement_modes': ['vocab', 'fact'],
+            # Anonymous ad-snapshot contribution (src/contribute.py). OPT-IN:
+            # off until the user turns it on in Settings -> Help improve Minus.
+            'contribute_snapshots': False,
         }
         try:
             if SYSTEM_SETTINGS_FILE.exists():
@@ -3245,7 +3433,7 @@ class Minus:
             '--workers=4',              # 4 parallel MPP encoders
             '--buffers=5',
             '--tcp-nodelay',           # Disable Nagle's algorithm for smoother streaming
-        ]
+        ] + self._ustreamer_fps_args()
 
         logger.info(f"Starting ustreamer: {' '.join(ustreamer_cmd)}")
 
@@ -4006,6 +4194,7 @@ class Minus:
                 if should_stop:
                     self.ad_detected = False
                     source_was = self.blocking_source
+                    self._contrib_last_block = (self.blocking_start_time, time.time())
                     self.blocking_source = None
                     self.blocking_asr_confirmed = False
                     # Clear the OCR snippet so the next block starts fresh
@@ -4655,6 +4844,7 @@ class Minus:
                             f"{keywords_found})")
                     logger.info(f"OCR detected ad keywords: {keywords_found}")
                     self.screenshot_manager.save_ad_screenshot(frame, matched_keywords, all_texts)
+                    self._contrib_offer(frame, 'ocr')
                     self.add_detection('OCR', all_texts, matched_keywords)
                 else:
                     # Suppressed (home/weak-sponsored) OR no ad keyword at all.
@@ -4817,6 +5007,7 @@ class Minus:
                     with self._state_lock:
                         self.last_vlm_ad_frame = frame.copy()
                         self.last_vlm_ad_frame_time = now
+                    self._contrib_offer(frame, 'vlm', confidence)
 
                 # Track state changes for waffle detection and logging
                 current_state = 'ad' if is_ad else 'no-ad'
@@ -5068,8 +5259,12 @@ class Minus:
                     if poll_count % 15 == 0:  # Log every 30 seconds
                         logger.info("Still waiting for HDMI input...")
 
-                    # Retry no-signal display periodically if it failed initially
-                    if not no_signal_display_ok and self.ad_blocker and poll_count % 5 == 0:
+                    # Retry no-signal display periodically if it failed initially —
+                    # but only once a TV is connected: with none it can't start,
+                    # and retrying every 10 s logged 3 warnings each time (236x in
+                    # 40 min on minus with the source and the TV off, 2026-10-16).
+                    if (not no_signal_display_ok and self.ad_blocker and poll_count % 5 == 0
+                            and _hdmi_output_connected()):
                         no_signal_display_ok = self.ad_blocker.start_no_signal_mode()
                         if no_signal_display_ok:
                             logger.info("No-signal display now working")
@@ -5229,6 +5424,9 @@ class Minus:
         logger.info("Stopping...")
         self.running = False
 
+        if getattr(self, 'contributor', None) is not None:
+            self.contributor.stop()
+
         # Stop WiFi manager
         if hasattr(self, 'wifi_manager') and self.wifi_manager:
             self.wifi_manager.stop_monitor()
@@ -5308,6 +5506,41 @@ class Minus:
         restore_console()
 
         logger.info("Stopped")
+
+
+def _install_shutdown_handlers(minus, timeout_s=None):
+    """SIGTERM/SIGINT -> minus.stop() -> exit, made robust.
+
+    `systemctl stop` delivers SIGTERM twice (the unit's ExecStop `kill -TERM`
+    and then systemd's own), and the second one used to re-enter stop() while
+    the first was still running. On 2026-10-17 a stop during an update never
+    finished: 'Stopping...' logged twice, no 'Stopped', and systemd only got
+    the box back with SIGKILL after its 90 s stop timeout. Now a second signal
+    is ignored, and if stopping takes longer than MINUS_SHUTDOWN_TIMEOUT_S the
+    process exits anyway (SIGKILL would have come later regardless)."""
+    if timeout_s is None:
+        timeout_s = float(os.environ.get('MINUS_SHUTDOWN_TIMEOUT_S', '20'))
+    stopping = threading.Event()
+
+    def force_exit():
+        time.sleep(timeout_s)
+        logger.warning(f"Shutdown still running after {timeout_s:.0f}s - exiting anyway")
+        logging.shutdown()
+        os._exit(0)
+
+    def signal_handler(sig, frame):
+        if stopping.is_set():
+            logger.info("Shutdown already in progress - ignoring repeated signal")
+            return
+        stopping.set()
+        logger.info("Shutting down...")
+        threading.Thread(target=force_exit, name='shutdown-timeout', daemon=True).start()
+        minus.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    return signal_handler
 
 
 def main():
@@ -5405,13 +5638,7 @@ def main():
             print("No HDMI signal detected")
             sys.exit(1)
 
-    def signal_handler(sig, frame):
-        logger.info("Shutting down...")
-        minus.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    _install_shutdown_handlers(minus)
 
     minus.run()
 

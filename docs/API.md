@@ -354,6 +354,63 @@ Get/set debug overlay visibility.
 
 ---
 
+### GET /api/contribute/status
+### POST /api/contribute/enable
+### POST /api/contribute/disable
+
+Anonymous ad-snapshot contribution (opt-in, default off — see [PRIVACY.md](PRIVACY.md)).
+
+`enable` requires an explicit consent body; anything else is refused with 400:
+
+```bash
+curl -X POST http://minus.local/api/contribute/enable -H 'Content-Type: application/json' -d '{"consent": true}'
+```
+
+`disable` stops uploads and deletes the local queue. Status / response:
+
+```json
+{"available": true, "enabled": true, "queued": 2, "uploaded_this_session": 9,
+ "retracted_this_session": 1, "last_upload_at": 1760560000.0, "last_error": null,
+ "cooldown_minutes": 10.0, "endpoint": "https://minus-ingest-garage.fly.dev/ingest"}
+```
+
+## Updates
+
+### GET /api/updates
+Cached status of the Minus code, ustreamer and the VLM model, plus the progress
+of a running or the last update. A stale result (older than 1 h) refreshes in
+the background (`checking: true`).
+
+```json
+{"result": {"checked_at": 1760700000.0, "up_to_date": false, "updatable": true, "errors": [],
+            "components": [
+              {"name": "Minus", "kind": "git", "mode": "source", "branch": "main", "commit": "5d93584",
+               "target": "origin/main", "latest": "a1b2c3d", "behind": 2, "ahead": 0,
+               "up_to_date": false, "updatable": true, "reason": null},
+              {"name": "ustreamer", "kind": "git", "mode": "source", "upstream": "origin/master", "behind": 0,
+               "up_to_date": true, "updatable": false},
+              {"name": "VLM model", "kind": "model", "model": "minus-v0.1", "installed": "minus-v0.1",
+               "changed_files": [], "download_bytes": 0, "up_to_date": true, "updatable": false}]},
+ "checking": false,
+ "run": {"state": "done", "steps": [{"t": 1760700100.0, "msg": "Update complete ..."}]}}
+```
+
+`mode` is `release` when the checkout sits on a published `v*` release tag
+(compared with the latest GitHub release), `source` otherwise (compared with the
+branch's upstream; a branch without one is compared with `origin/main` for
+information only and is never updated automatically). `reason` explains why
+something that is behind isn't `updatable` (local changes, diverged, no upstream).
+
+### POST /api/updates/check
+Re-check now (git fetch, GitHub latest release, model files on Hugging Face).
+
+### POST /api/updates/apply
+Run `tools/minus_update.py` detached (systemd-run): update ustreamer (build),
+Minus (fast-forward / newer release tag), the VLM model, restart, wait for the
+web UI; roll everything back if it doesn't come up. Poll `GET /api/updates`
+(`run.state`: `starting` → `running` → `done` | `rolled_back` | `failed`). 400
+if the last check found nothing updatable.
+
 ## Streaming
 
 ### GET /stream

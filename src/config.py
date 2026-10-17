@@ -113,8 +113,20 @@ USTREAMER_PATH = _get_env_path('MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-pa
 # Published at https://huggingface.co/TheGarageDev/Minus-v0.1
 # (benchmarks: ~/axera_models/BENCHMARKS.md). detect_ad AND autonomous-mode
 # query_image both share this single model — there is no FastVLM dependency
-# anymore. Override with MINUS_VLM_MODEL_DIR.
-VLM_MODEL_DIR = _get_env_path('MINUS_VLM_MODEL_DIR', '/home/radxa/axera_models/minus-v0.1')
+# anymore. Which model (and where it lives) comes from models/vlm_model.json, so
+# moving to a new model (e.g. Minus v0.2) is a manifest change that the
+# Settings -> Updates check then offers to download (src/updates.py). Override
+# with MINUS_VLM_MODEL_DIR.
+def _manifest_model_dir(default='/home/radxa/axera_models/minus-v0.1'):
+    try:
+        import json as _json
+        manifest = Path(__file__).resolve().parent.parent / 'models' / 'vlm_model.json'
+        return _json.loads(manifest.read_text()).get('local_dir') or default
+    except Exception:
+        return default
+
+
+VLM_MODEL_DIR = _get_env_path('MINUS_VLM_MODEL_DIR', _manifest_model_dir())
 # PaddleOCR det/rec RKNN models. They ship in the repository
 # (models/paddleocr/, see its README) so a fresh clone needs no download;
 # the legacy rknn-llm demo path is only used when the repo copy is absent.

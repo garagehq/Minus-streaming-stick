@@ -194,6 +194,25 @@ Pausing ad-blocking during a VLM-only block tells Minus the VLM misclassified th
 - Undo support (Ctrl+Z)
 - Keyboard shortcuts (arrow keys, Escape)
 
+## Anonymous Ad-Snapshot Contribution (opt-in)
+
+Off by default. Settings → **Help Improve Minus** turns it on, after a consent dialog. The API refuses to enable it without `{"consent": true}`. It's the TV twin of the Chrome extension's "Contribute anonymous ad snapshots" and uses the same ingest server and dataset. Full details are in [PRIVACY.md](PRIVACY.md); the code is in `src/contribute.py`.
+- Only frames **blocked as ads**: up to 3 per ad, ≥ 8 s apart, dHash near-duplicates skipped, downscaled to 960 px
+- Payload = the extension's schema: `key` (random per frame), `img`, `p_ad` (VLM probability or null), `verdict: "ad"`, `host: "tv"`, `w`, `h`, `engine: "minus-tv/vlm|ocr"`. No device, network, app, time, text or audio data
+- 10-minute local cool-down. **Pausing blocking during that ad (or ≤ 60 s after it ends) deletes its queued frames**
+- Turning it off deletes the queue (`~/.minus_contrib_queue/`). The queue is capped at 200 frames / 7 days. Uploads back off from 20 s up to 6 h when the server is unreachable and never touch detection
+- Setting `contribute_snapshots` in `~/.minus_system_settings.json`; env `MINUS_INGEST_URL` / `MINUS_INGEST_KEY` / `MINUS_CONTRIB_QUEUE_DIR`
+## Release Checks and Updates
+
+Settings → **Minus Updates** (`src/updates.py`, `tools/minus_update.py`):
+- **Minus code** — on a `v*` release tag: compared with the latest GitHub release; from source: `git fetch` + commits behind the branch's upstream (a branch with no upstream is info-only)
+- **ustreamer** — its checkout against its upstream branch; rebuilt (`make WITH_MPP=1`) on update
+- **VLM model** — `models/vlm_model.json` names the Hugging Face repo/subfolder/local dir; installed files are compared with HF by sha256 (README edits on HF aren't updates). A new model (e.g. Minus v0.2) is a manifest change: the code update brings the manifest, phase 2 of the updater (running the NEW code) downloads it
+- **Update now** — detached systemd unit; fast-forward only, refuses local changes; downloads to a staging dir, verifies, swaps (old model kept as `<dir>.prev`); restarts Minus and waits up to `MINUS_UPDATE_HEALTH_S` (240 s) for the web UI to answer, the same process to stay up `MINUS_UPDATE_STABLE_S` (30 s) and — if it was loaded before — the VLM to load again; otherwise rolls back code, ustreamer binary and model and restarts again. Phase 2 runs as a child of phase 1, so a new updater that can't start is rolled back by the old one. One run at a time (`flock` on `update_status.lock`); a run whose updater is gone shows as `interrupted`. Python requirement changes install with `pip --user` as the checkout owner (the service's PYTHONPATH puts that site first); they aren't reverted on rollback
+- git (and the ustreamer build) run as the checkout's owner — the root service switches uid/gid for the subprocess (no PAM session), so it uses the owner's GitHub SSH key and files stay owned by them
+- First check 5 min after startup (`MINUS_UPDATE_FIRST_CHECK_S`), cached 1 h (`MINUS_UPDATE_CHECK_INTERVAL_S`); never updates without the button
+- `install.sh` step 13 and `tools/minus_update.py --install-model` install the model from the same manifest
+
 ## Configuration
 
 **Command Line Options:**

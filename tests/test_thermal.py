@@ -12,6 +12,7 @@ Covers:
 """
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -369,5 +370,319 @@ class TestFramegate(unittest.TestCase):
         self.assertLess(launch.index('framegate'), launch.index('mppjpegdec'))
 
 
+# =========================================================================
+# Capture-rate cap: ustreamer itself drops to 30fps while degraded
+# =========================================================================
+
+class TestThermalCaptureFps(unittest.TestCase):
+    """The display gate sits after the CPU-bound souphttpsrc/jpegparse, so a
+    throttled box kept parsing 60fps while showing 30 and built a socket
+    backlog (video drifting late against audio). Degraded mode now restarts
+    ustreamer with --desired-fps."""
+
+    def setUp(self):
+        # tests/test_vlm_decision_sim.py freezes the GLOBAL time.time at import;
+        # these tests need a moving clock.
+        from datetime import datetime
+        p = patch('time.time', lambda: datetime.now().timestamp())
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _make(self, running=True):
+        import threading
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.thermal_degraded = False
+        m._thermal_saved_params = None
+        m.ad_blocker = MagicMock()
+        m.OCR_STOP_THRESHOLD = 2
+        m.VLM_STOP_THRESHOLD = 2
+        m.MIN_BLOCKING_DURATION_BASE = 3.0
+        m.MIN_BLOCKING_DURATION_FLOOR_OCR = 1.0
+        m.MIN_BLOCKING_DURATION_FLOOR_BOTH = 1.5
+        m.MIN_BLOCKING_DURATION_FLOOR_VLM = 0.5
+        m.THERMAL_CAPTURE_FPS = 30
+        m.CAPTURE_FPS_SWITCH_MIN_S = 600.0
+        m.CAPTURE_FPS_RESTORE_AFTER_S = 1800.0
+        m._thermal_normal_since = 0.0
+        m._capture_fps_cap = 0
+        m._capture_fps_switch_at = 0.0
+        m._capture_fps_lock = threading.Lock()
+        m._is_ustreamer_running = lambda: running
+        m.restarts = []
+        done = threading.Event()
+
+        def fake_restart(even_without_display=False):
+            m.restart_kwargs = {'even_without_display': even_without_display}
+            m.restarts.append(m._ustreamer_fps_args())   # what the new ustreamer gets
+            done.set()
+        m._restart_ustreamer = fake_restart
+        m._done = done
+        return m
+
+    def _wait(self, m):
+        self.assertTrue(m._done.wait(2))
+        m._done.clear()
+        time.sleep(0.05)   # lock release after the restart
+
+    def test_switch_restarts_even_with_the_tv_off(self):
+        """With no display, ustreamer still encodes for OCR/VLM/preview, so the
+        cap must apply — _restart_ustreamer used to return early without a TV."""
+        m = self._make()
+        m._on_thermal_change(True, {})
+        self._wait(m)
+        self.assertEqual(m.restart_kwargs, {'even_without_display': True})
+
+    def test_restart_ustreamer_without_display_skips_only_the_display_pipeline(self):
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.display_connected = False
+        m.ustreamer_process = None
+        m.ad_blocker = MagicMock()
+        m.config = MagicMock(ustreamer_port=9090)
+        m.device = '/dev/video0'
+        m._detected_format = 'NV12'
+        m.thermal_degraded = True
+        m.THERMAL_CAPTURE_FPS = 30
+        m._init_v4l2_device = MagicMock()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        with patch('minus.subprocess.run'), patch('minus.time.sleep'), \
+             patch('minus.probe_v4l2_device', return_value={'width': 3840, 'height': 2160}), \
+             patch('minus.subprocess.Popen', return_value=proc) as popen:
+            m._restart_ustreamer()                         # default: still skipped without a TV
+            popen.assert_not_called()
+            m._restart_ustreamer(even_without_display=True)
+            cmd = popen.call_args[0][0]
+        self.assertIn('--desired-fps=40', cmd)
+        m.ad_blocker.restart.assert_not_called()           # no TV: display pipeline left alone
+
+    def test_desired_fps_puts_the_cutoff_between_source_frames(self):
+        """--desired-fps=30 on a 60 fps source measured 20.4 fps (jitter on the
+        33.3 ms cutoff); the arg must sit between 1 and 2 source frame intervals."""
+        from minus import Minus
+        for source, target in ((60, 30), (50, 25), (60, 20), (60, 15)):
+            interval = 1.0 / Minus._desired_fps_arg(target, source)
+            frames_per_pass = round(source / target)
+            self.assertGreater(interval, (frames_per_pass - 1) / source + 0.004, (source, target))
+            self.assertLess(interval, frames_per_pass / source - 0.004, (source, target))
+
+    def test_switch_tells_the_health_monitor_it_is_planned(self):
+        """ustreamer down for a planned restart read as 'HDMI signal LOST' and
+        paused audio (2026-10-16 on minus) — the switch must suppress that."""
+        m = self._make()
+        m.health_monitor = MagicMock()
+        m._on_thermal_change(True, {})
+        self._wait(m)
+        m.health_monitor.suppress_transitions.assert_called_once_with(20)
+
+    def test_health_monitor_suppression_window(self):
+        from health import HealthMonitor
+        hm = HealthMonitor.__new__(HealthMonitor)
+        hm._suppress_until = 0.0
+        hm._update_hdmi_tx_audio_link_cache = MagicMock()
+        hm.get_status = MagicMock(return_value=MagicMock(hdmi_signal=False))
+        hm._start_time = time.time() - 3600
+        hm.startup_grace_period = 30.0
+        hm._last_hdmi_signal = True
+        hm._on_hdmi_lost = MagicMock()
+        hm.suppress_transitions(20)
+        hm._check_and_recover()                 # ustreamer briefly down: ignored
+        hm._on_hdmi_lost.assert_not_called()
+        self.assertTrue(hm._last_hdmi_signal)   # nothing recorded meanwhile
+
+    def test_args_follow_thermal_state(self):
+        m = self._make()
+        self.assertEqual(m._ustreamer_fps_args(), [])
+        m.thermal_degraded = True
+        self.assertEqual(m._ustreamer_fps_args(), ['--desired-fps=40'])
+        self.assertEqual(m._capture_fps_cap, 30)
+
+    def test_degraded_restarts_ustreamer_at_30_and_back(self):
+        m = self._make()
+        m._on_thermal_change(True, {'temp_c': 85, 'throttled': True})
+        self._wait(m)
+        self.assertEqual(m.restarts, [['--desired-fps=40']])
+        m._capture_fps_switch_at = 0.0                     # skip the rate limit
+        m._on_thermal_change(False, {'temp_c': 70, 'throttled': False})
+        self.assertEqual(len(m.restarts), 1)               # not yet: must stay cool first
+        self.assertEqual(m._maybe_switch_capture_fps(), 'cooling')
+        later = m._thermal_normal_since + m.CAPTURE_FPS_RESTORE_AFTER_S + 1
+        self.assertEqual(m._maybe_switch_capture_fps(now=later), 'switching')
+        self._wait(m)
+        self.assertEqual(m.restarts[-1], [])               # back to source rate
+        self.assertEqual(m._capture_fps_cap, 0)
+
+    def test_reheating_while_cooling_keeps_30(self):
+        m = self._make()
+        m._on_thermal_change(True, {})
+        self._wait(m)
+        m._on_thermal_change(False, {})
+        m._on_thermal_change(True, {})                     # hot again before the restore
+        self.assertEqual(m._maybe_switch_capture_fps(now=time.time() + 99999), 'unchanged')
+        self.assertEqual(len(m.restarts), 1)
+
+    def test_rate_limited_switch_is_retried_on_a_later_tick(self):
+        m = self._make()
+        m._on_thermal_change(True, {})
+        self._wait(m)
+        m._on_thermal_change(False, {})
+        m._thermal_normal_since -= m.CAPTURE_FPS_RESTORE_AFTER_S + 1   # cool long enough...
+        m._capture_fps_switch_at = time.time()                          # ...but switched just now
+        self.assertEqual(len(m.restarts), 1)
+        self.assertEqual(m._maybe_switch_capture_fps(), 'rate-limited')
+        later = m._capture_fps_switch_at + m.CAPTURE_FPS_SWITCH_MIN_S + 1
+        self.assertEqual(m._maybe_switch_capture_fps(now=later), 'switching')
+        self._wait(m)
+        self.assertEqual(m.restarts[-1], [])
+
+    def test_no_switch_when_nothing_changes_or_ustreamer_down(self):
+        m = self._make()
+        self.assertEqual(m._maybe_switch_capture_fps(), 'unchanged')
+        m2 = self._make(running=False)
+        m2.thermal_degraded = True
+        self.assertEqual(m2._maybe_switch_capture_fps(), 'not-running')
+        self.assertEqual(m2.restarts, [])
+
+    def test_disabled_by_env_value_zero(self):
+        m = self._make()
+        m.THERMAL_CAPTURE_FPS = 0
+        m.thermal_degraded = True
+        self.assertEqual(m._ustreamer_fps_args(), [])
+        self.assertEqual(m._maybe_switch_capture_fps(), 'unchanged')
+
+    def test_monitor_calls_on_tick_every_sample(self):
+        from thermal import ThermalMonitor
+        ticks = []
+        mon = ThermalMonitor(on_tick=lambda: ticks.append(1))
+        with patch('thermal.read_max_temp_c', return_value=50.0), \
+             patch('thermal.read_cpu_throttled', return_value=False):
+            mon.check_now()
+            mon.check_now()
+        self.assertEqual(len(ticks), 2)
+
+    def test_both_ustreamer_launch_paths_pass_the_cap(self):
+        src = (Path(__file__).resolve().parent.parent / 'minus.py').read_text()
+        self.assertEqual(src.count('] + self._ustreamer_fps_args()'), 2)
+
+
+# =========================================================================
+# NO SIGNAL re-trigger while no TV is connected (health.py)
+# =========================================================================
+
+class TestNoSignalRetryWithoutTv(unittest.TestCase):
+    """With the source AND the TV off, the NO SIGNAL screen can't start, and the
+    monitor used to re-trigger _on_hdmi_lost every 5 s forever (1,524x in 2 h on
+    minus, each re-stopping audio and spamming the journal)."""
+
+    def setUp(self):
+        # tests/test_vlm_decision_sim.py freezes the GLOBAL time.time at import.
+        from datetime import datetime
+        p = patch('time.time', lambda: datetime.now().timestamp())
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _make(self, tv_connected):
+        from health import HealthMonitor
+        hm = HealthMonitor.__new__(HealthMonitor)
+        hm._suppress_until = 0.0
+        hm._update_hdmi_tx_audio_link_cache = MagicMock()
+        hm.get_status = MagicMock(return_value=MagicMock(hdmi_signal=False, hdmi_format=None,
+                                                         ustreamer_alive=False, ustreamer_responding=False))
+        hm._start_time = time.time() - 3600
+        hm.startup_grace_period = 30.0
+        hm._last_hdmi_signal = False
+        hm._hdmi_lost_time = 0
+        hm._last_no_signal_trigger = 0
+        hm._no_signal_retry_interval = 0.0
+        hm._last_hdmi_output_connected = tv_connected
+        hm._last_hdmi_format = None
+        hm._is_no_signal_mode_active = MagicMock(return_value=False)
+        hm._check_hdmi_output_connected = MagicMock(return_value=tv_connected)
+        hm._on_hdmi_lost = MagicMock()
+        hm._on_ustreamer_stall = None
+        hm.minus = None
+        return hm
+
+    def _ticks(self, hm, n=5):
+        for _ in range(n):
+            try:
+                hm._check_and_recover()
+            except AttributeError:
+                pass   # later sections need attributes this stub doesn't set
+
+    def test_no_retries_without_a_tv(self):
+        hm = self._make(tv_connected=False)
+        self._ticks(hm)
+        hm._on_hdmi_lost.assert_not_called()
+        self.assertGreater(hm._hdmi_lost_time, 0)   # restore path still armed
+
+    def test_screen_comes_up_once_a_tv_is_connected(self):
+        hm = self._make(tv_connected=False)
+        self._ticks(hm, 2)
+        hm._check_hdmi_output_connected.return_value = True
+        hm._last_hdmi_output_connected = True
+        self._ticks(hm, 1)
+        hm._on_hdmi_lost.assert_called_once()
+
+
+class TestStartupNoSignalRetryNeedsATv(unittest.TestCase):
+    """The startup wait loop (box booted with no input) also retried the NO
+    SIGNAL screen every 10 s with no TV: 236x in 40 min on minus."""
+
+    def test_retry_is_gated_on_a_connected_tv(self):
+        src = (Path(__file__).resolve().parent.parent / 'minus.py').read_text()
+        i = src.index('# Retry no-signal display periodically if it failed initially')
+        block = src[i:i + 700]
+        self.assertIn('_hdmi_output_connected()', block)
+        self.assertLess(block.index('_hdmi_output_connected()'), block.index('start_no_signal_mode()'))
+
+    def test_helper_reads_the_drm_connectors(self):
+        import tempfile
+        import health
+        with tempfile.TemporaryDirectory() as d:
+            for name, state in (('card0-HDMI-A-1', 'disconnected'), ('card0-HDMI-A-2', 'disconnected')):
+                Path(d, name).mkdir()
+                Path(d, name, 'status').write_text(state + '\n')
+            real = Path
+            with patch('health.Path', side_effect=lambda p='.': real(d) if p == '/sys/class/drm' else real(p)):
+                self.assertFalse(health.hdmi_output_connected())
+                Path(d, 'card0-HDMI-A-2', 'status').write_text('connected\n')
+                self.assertTrue(health.hdmi_output_connected())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestCaptureSwitchWaitsForASignal(unittest.TestCase):
+    """With no input the switch rebuilt the video pipeline over the NO SIGNAL
+    screen (review finding, 2026-10-17); it now waits for a picture."""
+
+    def _make(self, **kw):
+        import threading
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.thermal_degraded = True
+        m.THERMAL_CAPTURE_FPS = 30
+        m.CAPTURE_FPS_SWITCH_MIN_S = 600.0
+        m.CAPTURE_FPS_RESTORE_AFTER_S = 1800.0
+        m._thermal_normal_since = 0.0
+        m._capture_fps_cap = 0
+        m._capture_fps_switch_at = 0.0
+        m._capture_fps_lock = threading.Lock()
+        m._is_ustreamer_running = lambda: True
+        m._hdmi_signal_lost = kw.get('lost', False)
+        m.ad_blocker = MagicMock(current_source=kw.get('source', 'stream'))
+        m._restart_ustreamer = MagicMock()
+        return m
+
+    def test_no_switch_while_the_signal_is_lost(self):
+        self.assertEqual(self._make(lost=True)._maybe_switch_capture_fps(), 'no-signal')
+
+    def test_no_switch_over_the_no_signal_screen(self):
+        for src in ('no_hdmi_device', 'loading'):
+            self.assertEqual(self._make(source=src)._maybe_switch_capture_fps(), 'no-signal')
+
+    def test_switches_once_the_picture_is_back(self):
+        self.assertEqual(self._make()._maybe_switch_capture_fps(), 'switching')
