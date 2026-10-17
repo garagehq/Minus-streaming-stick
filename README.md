@@ -66,7 +66,7 @@ The two models are distributed differently, which trips people up when setting u
 | Model | Runs on | Where it comes from |
 |---|---|---|
 | PaddleOCR PP-OCRv6 detection + recognition (default), plus PP-OCRv3 as a rollback | RK3588 NPU | **In this repository**, [`models/paddleocr/`](models/paddleocr/). ~17 MB for both generations, nothing to download. |
-| minus-v0.1 (450M VLM) | Axera AX-M1 | [Hugging Face](https://huggingface.co/TheGarageDev/Minus-v0.1), ~300 MB, into `/home/radxa/axera_models/minus-v0.1/` |
+| minus-v0.1 (450M VLM) | Axera AX-M1 | [Hugging Face](https://huggingface.co/TheGarageDev/Minus-v0.1), the `axera/` folder (~740 MB). `install.sh` downloads it into `/home/radxa/axera_models/minus-v0.1/`; which model and where are set in [`models/vlm_model.json`](models/vlm_model.json) |
 
 OCR needs three files per generation, all present in the repo: a detection model that finds text regions, a recognition model that reads each region, and the character dictionary the output is decoded through. Each generation has its own dictionary, and the two are not interchangeable. `MINUS_OCR_MODEL_VERSION` picks one: `v6` (the default) or `v3`. The loader keeps each model paired with its own dictionary and thresholds, so they can't be mixed up. v6 was chosen on latency: 183ms p50 and 274ms p90 in production, and a tighter tail that keeps text-heavy ad frames under the hard timeout. A rotated-text classifier is also included, but Minus doesn't load it, since TV overlay text is never upside down. [`models/paddleocr/README.md`](models/paddleocr/README.md) has the details and checksums.
 
@@ -121,16 +121,40 @@ git clone https://github.com/garagehq/ustreamer.git /home/radxa/ustreamer-garage
 cd /home/radxa/ustreamer-garagehq && make WITH_MPP=1
 cp ustreamer /home/radxa/ustreamer-patched
 
-# Download the vision model (the OCR models already ship in this repo)
-# → https://huggingface.co/TheGarageDev/Minus-v0.1
-#   into /home/radxa/axera_models/minus-v0.1/
+# Install as a service that starts on boot. This also downloads the vision
+# model (~740 MB from Hugging Face; the OCR models already ship in this repo):
+cd /home/radxa/Minus && sudo ./install.sh
 
-# Run directly:
-cd /home/radxa/Minus && sudo python3 minus.py
-
-# ...or install as a service that starts on boot:
-sudo ./install.sh
+# ...or run directly (fetch the model first if install.sh hasn't):
+sudo python3 tools/minus_update.py --install-model
+sudo python3 minus.py
 ```
+
+### Staying up to date
+
+Settings → **Minus Updates** in the web UI shows whether this box is current and
+updates it with one button:
+
+- **Minus** — on a published release, compared with the latest
+  [GitHub release](https://github.com/garagehq/Minus-streaming-stick/releases);
+  running from source, compared with the latest commit on your branch (normally
+  `main`).
+- **ustreamer** — the `/home/radxa/ustreamer-garagehq` checkout against its
+  branch; rebuilt when it changes.
+- **Vision model** — the files in `/home/radxa/axera_models/` against the model
+  the code asks for on Hugging Face ([`models/vlm_model.json`](models/vlm_model.json)).
+  A new model (for example Minus v0.2) arrives the same way: after the code
+  update, the new model is downloaded, checked and swapped in.
+
+**Update now** pulls what's new (fast-forward only — it never overwrites local
+changes; a branch with local commits or no upstream is reported but left alone),
+rebuilds ustreamer if needed, downloads the model if needed, and restarts Minus,
+about a minute without picture. If Minus doesn't come back up within four
+minutes, the code, ustreamer and model are all rolled back and it restarts on the
+previous version. The previous model is kept next to the new one as
+`<model dir>.prev`. A check runs five minutes after startup and at most hourly
+after that while the page is open; nothing updates without the button. From a
+shell: `sudo python3 tools/minus_update.py` does the same thing.
 
 ### Automatic security updates
 

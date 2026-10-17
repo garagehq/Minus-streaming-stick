@@ -105,6 +105,8 @@ See **[docs/AESTHETICS.md](docs/AESTHETICS.md)** for the complete visual design 
 | `src/capture.py` | UstreamerCapture class for snapshot capture |
 | `src/screenshots.py` | ScreenshotManager with dHash dedup + blank rejection |
 | `src/contribute.py` | **Opt-in, default-off** anonymous ad-snapshot contribution (same ingest server + dataset as the Chrome extension). Frames from blocked ads only, 10-min local cool-down, a user pause retracts that ad's frames, opt-out deletes the queue. See docs/PRIVACY.md |
+| `src/updates.py` | Release checks (Settings → Minus Updates): code vs GitHub release / upstream branch, ustreamer, VLM model vs Hugging Face (`models/vlm_model.json`) |
+| `tools/minus_update.py` | The updater behind "Update now" and `install.sh` step 13 (`--install-model`): two phases (new code handles the model), restart, rollback |
 | `src/skip_detection.py` | Skip button detection (regex patterns) |
 | `test_fire_tv.py` | Fire TV controller test and interactive remote |
 | `ir_transmit.py` | Standalone CLI for the IR transmitter (`sudo python3 ir_transmit.py <button>`) |
