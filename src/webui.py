@@ -81,6 +81,7 @@ def get_axera_metrics():
     return metrics
 
 from src.wifi_manager import get_wifi_manager
+from src import updates as updates_mod
 
 # Reviewed screenshots tracking
 REVIEWED_FILE = Path("/home/radxa/.minus_reviewed_screenshots.json")
@@ -2867,6 +2868,48 @@ class WebUI:
                 logger.error(f"Error in photo detail {photo_id}: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
+        # ── Release / update checks (src/updates.py) ───────────────────────
+        @self.app.route('/api/updates', methods=['GET'])
+        def api_updates():
+            """Cached update status for code, ustreamer and the VLM model, plus
+            the progress of a running/last update. A stale cache refreshes in
+            the background (the first check runs ~5 min after startup)."""
+            try:
+                uc = self._update_checker()
+                res = uc.last()
+                stale = res is None or time.time() - res.get('checked_at', 0) > updates_mod.CHECK_CACHE_S
+                if stale:
+                    uc.check_in_background()
+                return jsonify({'result': res, 'checking': uc._checking or stale,
+                                'run': uc.run_status()})
+            except Exception as e:
+                logger.error(f"Error getting update status: {e}")
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/updates/check', methods=['POST'])
+        def api_updates_check():
+            """Check now (git fetch, latest release, model files on Hugging Face)."""
+            try:
+                self._update_checker().check_in_background(force=True)
+                return jsonify({'success': True, 'checking': True})
+            except Exception as e:
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @self.app.route('/api/updates/apply', methods=['POST'])
+        def api_updates_apply():
+            """Pull the latest code/ustreamer/model and restart Minus (detached:
+            tools/minus_update.py, rolls back if Minus doesn't come back up)."""
+            try:
+                uc = self._update_checker()
+                res = uc.last()
+                if not res or not res.get('updatable'):
+                    return jsonify({'success': False,
+                                    'error': 'nothing to update (check first)'}), 400
+                return jsonify(uc.start_update())
+            except Exception as e:
+                logger.error(f"Error starting update: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
         @self.app.route('/api/settings/unattended-upgrades', methods=['GET', 'POST'])
         def api_unattended_upgrades():
             """Unattended Debian security upgrades on/off + status.
@@ -3421,6 +3464,12 @@ class WebUI:
                 logger.error(f"Error setting autonomous mode schedule: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
+    def _update_checker(self):
+        uc = getattr(self, '_updates', None)
+        if uc is None:
+            uc = self._updates = updates_mod.UpdateChecker()
+        return uc
+
     def _load_reviewed(self):
         """Load reviewed screenshots set from disk."""
         try:
@@ -3454,6 +3503,13 @@ class WebUI:
             return
 
         self.running = True
+
+        # First update check a few minutes after startup (not at boot: the
+        # git fetch + Hugging Face lookup shouldn't compete with model loading).
+        t = threading.Timer(float(os.environ.get('MINUS_UPDATE_FIRST_CHECK_S', '300')),
+                            lambda: self._update_checker().check_in_background())
+        t.daemon = True
+        t.start()
 
         def run_server():
             logger.info(f"[WebUI] Starting on http://0.0.0.0:{self.port}")

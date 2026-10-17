@@ -637,6 +637,21 @@
                 <p class="help-text">If audio is out of sync with video, click to reset. Causes ~300ms audio dropout.</p>
             </section>
 
+            <!-- Release checks: code, ustreamer, VLM model (src/updates.py) -->
+            <section class="settings-section">
+                <h2>Minus Updates</h2>
+                <div id="updates-list" class="updates-list"><span class="status-text">Checking...</span></div>
+                <div class="vlm-status" id="updates-status-info">
+                    <span class="status-text">Status: <span id="updates-status-text">Loading...</span></span>
+                </div>
+                <div class="setting-item" style="margin-top: 0.75rem; gap: 0.5rem; justify-content: flex-start;">
+                    <button class="asr-live-btn" id="updates-check-btn" onclick="checkUpdates()">Check now</button>
+                    <button class="asr-live-btn" id="updates-apply-btn" onclick="applyUpdates()" disabled>Update now</button>
+                </div>
+                <div id="updates-run" class="asr-live-transcript hidden" style="margin-top: 0.5rem; white-space: pre-line;"></div>
+                <p class="help-text">Compares this box with the latest published release on GitHub (or, when running from source, the latest commit on its branch), and the vision model with the version the code asks for on Hugging Face. <strong>Update now</strong> pulls what's new, rebuilds ustreamer if needed, downloads the new model if needed, and restarts Minus (about a minute without picture). If Minus doesn't come back up, everything is rolled back automatically. It never overwrites local changes.</p>
+            </section>
+
             <!-- Detection Settings -->
             <section class="settings-section">
                 <h2>System Updates</h2>
@@ -1059,6 +1074,7 @@
             if (tabName === 'screenshots') {
                 loadScreenshots();
             } else if (tabName === 'settings') {
+                loadUpdates();
                 loadWifiStatus();
                 loadWifiConnections();
                 loadAdbKeys();
@@ -1975,6 +1991,75 @@
                 console.error('VLM preload toggle error:', error);
                 document.getElementById('vlm-preload-toggle').checked = !enabled;
             }
+        }
+
+        let updatesPoll = null;
+        function fmtComponent(c) {
+            const esc = (t) => String(t).replace(/[&<>]/g, (m) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[m]));
+            const ok = c.up_to_date === true, err = c.error;
+            const badge = err ? '<span class="update-badge err">error</span>'
+                : ok ? '<span class="update-badge ok">up to date</span>'
+                : c.up_to_date === false ? '<span class="update-badge new">update available</span>'
+                : '<span class="update-badge">unknown</span>';
+            let now = '', latest = '';
+            if (c.kind === 'model') {
+                now = c.installed ? c.installed + (c.installed_commit ? ' @' + c.installed_commit : '') : 'not installed';
+                latest = (c.model || '?') + (c.latest ? ' @' + c.latest : '') +
+                    (c.up_to_date === false && c.changed_files ? ' — ' + c.changed_files.length + ' files, ' + Math.round((c.download_bytes || 0) / 1e6) + ' MB' : '');
+            } else {
+                now = c.tag || ((c.branch || 'detached') + ' @' + (c.commit || '?'));
+                latest = c.mode === 'release' ? 'release ' + (c.latest || '?')
+                    : (c.target || '') + ' @' + (c.latest || '?') +
+                      (c.behind ? ' — ' + c.behind + ' commit' + (c.behind === 1 ? '' : 's') + ' behind' : '');
+            }
+            const note = err ? err : (c.reason || '');
+            return '<div class="update-row"><div class="update-name">' + esc(c.name) + ' ' + badge + '</div>' +
+                '<div class="update-detail">installed: ' + esc(now) + '<br>latest: ' + esc(latest) +
+                (note ? '<br><span class="update-note">' + esc(note) + '</span>' : '') + '</div></div>';
+        }
+        async function loadUpdates() {
+            try {
+                const r = await fetch('/api/updates');
+                const d = await r.json();
+                const list = document.getElementById('updates-list');
+                const s = document.getElementById('updates-status-text');
+                const btn = document.getElementById('updates-apply-btn');
+                const run = d.run, res = d.result;
+                if (res && list) list.innerHTML = res.components.map(fmtComponent).join('');
+                const running = !!run && (run.state === 'running' || run.state === 'starting');
+                if (s) {
+                    if (running) s.textContent = 'updating...';
+                    else if (!res) s.textContent = d.checking ? 'checking...' : 'not checked yet';
+                    else s.textContent = (res.up_to_date ? 'up to date'
+                            : (res.updatable ? 'updates available' : "behind, but can't update automatically (see notes)")) +
+                        ' | checked ' + new Date(res.checked_at * 1000).toLocaleString() + (d.checking ? ' (re-checking...)' : '');
+                }
+                if (btn) btn.disabled = !(res && res.updatable) || running;
+                const box = document.getElementById('updates-run');
+                if (run && box && run.steps && run.steps.length) {
+                    box.classList.remove('hidden');
+                    box.textContent = 'Last update: ' + run.state + '\n' +
+                        run.steps.slice(-8).map((x) => new Date(x.t * 1000).toLocaleTimeString() + '  ' + x.msg).join('\n');
+                }
+                clearTimeout(updatesPoll);
+                if (running || d.checking) updatesPoll = setTimeout(loadUpdates, 3000);
+            } catch (e) {
+                // Minus restarting during an update: keep polling until it's back.
+                clearTimeout(updatesPoll);
+                updatesPoll = setTimeout(loadUpdates, 4000);
+            }
+        }
+        async function checkUpdates() {
+            document.getElementById('updates-status-text').textContent = 'checking...';
+            await fetch('/api/updates/check', { method: 'POST' });
+            setTimeout(loadUpdates, 1500);
+        }
+        async function applyUpdates() {
+            if (!confirm("Update Minus now? It will restart (about a minute without picture), and roll back automatically if it doesn't come back up.")) return;
+            const r = await fetch('/api/updates/apply', { method: 'POST' });
+            const d = await r.json();
+            if (!d.success) { alert('Could not start the update: ' + (d.error || 'unknown')); return; }
+            loadUpdates();
         }
 
         async function loadUnattendedUpgrades() {
@@ -3708,6 +3793,7 @@
         updateVLMStatus();
         loadVLMPreloadSetting();
         loadUnattendedUpgrades();
+        loadUpdates();
         loadASRSetting();
         loadOptimizationSettings();
         loadIRStatus();

@@ -3228,3 +3228,14 @@ input:checked + .toggle-slider:before {
     border: 1px solid var(--warning);
     color: var(--warning);
 }
+
+/* Minus Updates (Settings) */
+.updates-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.update-row { border: 1px solid rgba(0, 255, 65, 0.2); padding: 0.5rem 0.75rem; }
+.update-name { font-weight: bold; margin-bottom: 0.25rem; }
+.update-detail { font-size: 0.85rem; opacity: 0.85; line-height: 1.4; word-break: break-word; }
+.update-note { opacity: 0.75; font-style: italic; }
+.update-badge { font-size: 0.75rem; padding: 0 0.4rem; margin-left: 0.4rem; border: 1px solid currentColor; }
+.update-badge.ok { color: #00ff41; }
+.update-badge.new { color: #ffb000; }
+.update-badge.err { color: #ff3b3b; }
