@@ -400,10 +400,12 @@ def update_model(manifest=None, remote=None, log=print):
     _chown_like_parent(stage)
     if prev.exists():
         shutil.rmtree(prev)
-    if local.exists():
+    had_previous = local.exists()
+    if had_previous:
         os.replace(local, prev)
     os.replace(stage, local)
-    log(f'model {manifest["name"]} installed at {local} (previous copy kept at {prev})')
+    log(f'model {manifest["name"]} installed at {local}' +
+        (f' (previous copy kept at {prev})' if had_previous else ''))
     return {'commit': sha, 'bytes': total}
 
 
