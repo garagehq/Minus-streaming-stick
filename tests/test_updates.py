@@ -656,3 +656,53 @@ def test_phase2_that_dies_is_rolled_back_by_phase1(repos, tmp_path, monkeypatch,
     assert undone and 'new updater stopped' in undone[0]
     assert git(box, 'rev-parse', 'HEAD') == before
     assert json.loads((tmp_path / 'status.json').read_text())['state'] == 'rolled_back'
+
+
+# ------------------------------------------------------------ shutdown
+_SHUTDOWN_CHILD = r'''
+import os, signal, sys, time, threading
+sys.path.insert(0, {root!r}); sys.path.insert(0, {src!r})
+import minus as M
+class Fake:
+    def __init__(self): self.stops = 0
+    def stop(self):
+        self.stops += 1
+        print('stop', self.stops, flush=True)
+        if {hang}:
+            time.sleep(3600)           # a stop that never finishes
+fake = Fake()
+M._install_shutdown_handlers(fake, timeout_s=1.0)
+os.kill(os.getpid(), signal.SIGTERM)
+os.kill(os.getpid(), signal.SIGTERM)  # systemctl stop: ExecStop kill + systemd's own
+time.sleep(30)
+print('not exited', flush=True)
+'''
+
+
+def _run_shutdown_child(hang):
+    code = _SHUTDOWN_CHILD.format(root=str(ROOT), src=str(ROOT / 'src'), hang=hang)
+    t0 = __import__('time').monotonic()
+    r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=60)
+    return r, __import__('time').monotonic() - t0
+
+
+@pytest.fixture
+def minus_importable():
+    try:
+        import minus  # noqa: F401
+    except Exception as e:
+        pytest.skip(f'minus.py not importable here: {e}')
+
+
+def test_shutdown_ignores_a_second_sigterm_and_is_bounded(minus_importable):
+    """A stop during an update hung until systemd's 90 s SIGKILL after a second
+    SIGTERM re-entered stop() (minus, 2026-10-17)."""
+    r, took = _run_shutdown_child(hang=True)
+    assert 'not exited' not in r.stdout
+    assert r.stdout.count('stop ') == 1          # the repeated signal didn't re-enter stop()
+    assert took < 15                             # bounded by the timeout, not by a SIGKILL
+
+
+def test_normal_shutdown_still_exits_cleanly(minus_importable):
+    r, took = _run_shutdown_child(hang=False)
+    assert r.returncode == 0 and r.stdout.count('stop ') == 1 and 'not exited' not in r.stdout

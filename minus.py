@@ -5508,6 +5508,41 @@ class Minus:
         logger.info("Stopped")
 
 
+def _install_shutdown_handlers(minus, timeout_s=None):
+    """SIGTERM/SIGINT -> minus.stop() -> exit, made robust.
+
+    `systemctl stop` delivers SIGTERM twice (the unit's ExecStop `kill -TERM`
+    and then systemd's own), and the second one used to re-enter stop() while
+    the first was still running. On 2026-10-17 a stop during an update never
+    finished: 'Stopping...' logged twice, no 'Stopped', and systemd only got
+    the box back with SIGKILL after its 90 s stop timeout. Now a second signal
+    is ignored, and if stopping takes longer than MINUS_SHUTDOWN_TIMEOUT_S the
+    process exits anyway (SIGKILL would have come later regardless)."""
+    if timeout_s is None:
+        timeout_s = float(os.environ.get('MINUS_SHUTDOWN_TIMEOUT_S', '20'))
+    stopping = threading.Event()
+
+    def force_exit():
+        time.sleep(timeout_s)
+        logger.warning(f"Shutdown still running after {timeout_s:.0f}s - exiting anyway")
+        logging.shutdown()
+        os._exit(0)
+
+    def signal_handler(sig, frame):
+        if stopping.is_set():
+            logger.info("Shutdown already in progress - ignoring repeated signal")
+            return
+        stopping.set()
+        logger.info("Shutting down...")
+        threading.Thread(target=force_exit, name='shutdown-timeout', daemon=True).start()
+        minus.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    return signal_handler
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Minus - HDMI passthrough with ML-based ad detection'
@@ -5603,13 +5638,7 @@ def main():
             print("No HDMI signal detected")
             sys.exit(1)
 
-    def signal_handler(sig, frame):
-        logger.info("Shutting down...")
-        minus.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    _install_shutdown_handlers(minus)
 
     minus.run()
 
