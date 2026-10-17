@@ -50,6 +50,24 @@ class HealthStatus:
     output_fps: float = 0.0
 
 
+def hdmi_output_connected() -> bool:
+    """True if any HDMI-TX output (a TV) is connected, via sysfs.
+
+    Fast (no subprocess): reads /sys/class/drm/card0-HDMI-A-*/status and returns
+    True if at least one connector says 'connected'. Used to avoid retrying
+    displays that can't start with no TV attached.
+    """
+    try:
+        from pathlib import Path
+        for connector in Path('/sys/class/drm').glob('card0-HDMI-A-*'):
+            status_file = connector / 'status'
+            if status_file.exists() and status_file.read_text().strip() == 'connected':
+                return True
+        return False
+    except Exception:
+        return False
+
+
 class HealthMonitor:
     """
     Unified health monitor for Minus.
@@ -75,6 +93,13 @@ class HealthMonitor:
         self._stop_event = threading.Event()
         self._start_time = time.time()
         self._last_hdmi_signal = None  # None = first check not done yet (avoids false "signal lost" on startup)
+        # Planned ustreamer restarts (e.g. the thermal capture-rate switch): the
+        # HDMI-signal check reads ustreamer's /state, so a deliberate restart
+        # looks like a 5 s signal loss and used to fire the whole lost/restored
+        # chain (NO SIGNAL screen, a second ustreamer restart, display rebuild,
+        # and with the TV off an audio pipeline left paused). While this is in
+        # the future the monitor neither acts nor records what it saw.
+        self._suppress_until = 0.0
         self._hdmi_lost_time = 0
         self._hdmi_fps_zero_since = 0  # When captured_fps first dropped to 0
         self._hdmi_signal_loss_threshold = 5.0  # Seconds of 0 FPS before signal is considered lost
@@ -198,6 +223,12 @@ class HealthMonitor:
 
         logger.debug("[HealthMonitor] Monitor loop stopped")
 
+    def suppress_transitions(self, seconds: float):
+        """Ignore signal/stall transitions for `seconds` (a planned ustreamer
+        restart). State seen meanwhile is not recorded, so a source that is
+        really gone afterwards is still caught on the first tick after."""
+        self._suppress_until = max(getattr(self, '_suppress_until', 0.0), time.time() + float(seconds))
+
     def _check_and_recover(self):
         """Check health and trigger recovery if needed."""
         # Refresh cached HDMI-TX audio link state before building status.
@@ -205,6 +236,9 @@ class HealthMonitor:
         self._update_hdmi_tx_audio_link_cache()
 
         status = self.get_status()
+
+        if time.time() < getattr(self, '_suppress_until', 0.0):
+            return   # planned ustreamer restart in progress — see suppress_transitions()
 
         # HDMI signal monitoring
         # Skip transition callbacks until we've completed startup grace period
@@ -241,6 +275,23 @@ class HealthMonitor:
         if not status.hdmi_signal and uptime > self.startup_grace_period:
             now = time.time()
             no_signal_active = self._is_no_signal_mode_active()
+
+            # With no TV connected either, the NO SIGNAL screen can never start
+            # (no DRM output), so retrying every few seconds only spammed the
+            # journal and re-stopped the audio pipeline each time: 1,524 times
+            # in 2 h on minus with the source and the TV both off (2026-10-16).
+            # Wait for a TV instead; the first tick after one is connected
+            # brings the screen up as before.
+            if not no_signal_active and not self._check_hdmi_output_connected():
+                if not getattr(self, '_no_signal_waiting_for_tv', False):
+                    self._no_signal_waiting_for_tv = True
+                    logger.info("[HealthMonitor] No input and no TV connected — "
+                                "NO SIGNAL screen will start when a TV is connected")
+                if self._hdmi_lost_time == 0:
+                    self._hdmi_lost_time = now   # see the comment below
+                no_signal_active = True          # nothing to (re)trigger
+            else:
+                self._no_signal_waiting_for_tv = False
 
             if not no_signal_active:
                 # NO SIGNAL mode is not active but should be
@@ -447,25 +498,8 @@ class HealthMonitor:
             return False
 
     def _check_hdmi_output_connected(self) -> bool:
-        """Check if any HDMI-TX output is connected via sysfs.
-
-        This is a fast check (no subprocess) that reads /sys/class/drm/card0-HDMI-A-*/status.
-        Returns True if at least one HDMI output shows 'connected'.
-        """
-        try:
-            from pathlib import Path
-            drm_path = Path('/sys/class/drm')
-
-            for connector in drm_path.glob('card0-HDMI-A-*'):
-                status_file = connector / 'status'
-                if status_file.exists():
-                    status = status_file.read_text().strip()
-                    if status == 'connected':
-                        return True
-
-            return False
-        except Exception:
-            return False
+        """Check if any HDMI-TX output is connected via sysfs (see hdmi_output_connected)."""
+        return hdmi_output_connected()
 
     def _force_hdmi_reinit(self):
         """Force HDMI PHY reinitialization via DPMS cycle.
