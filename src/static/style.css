@@ -3239,3 +3239,9 @@ input:checked + .toggle-slider:before {
 .update-badge.ok { color: #00ff41; }
 .update-badge.new { color: #ffb000; }
 .update-badge.err { color: #ff3b3b; }
+
+/* Contribution consent dialog: what is shared must be easy to read */
+.consent-text { color: #d8d8d8; font-size: 0.9rem; line-height: 1.5; text-align: left; margin: 0 0 0.75rem 0; }
+ul.consent-text { margin-left: 1.2rem; }
+#contribute-modal .modal-buttons { margin-top: 1.25rem; }
+[data-theme="light"] .consent-text { color: #222; }

@@ -1028,13 +1028,13 @@
     <div id="contribute-modal" class="modal hidden">
         <div class="modal-content">
             <h3>Contribute anonymous ad snapshots?</h3>
-            <p class="help-text" style="text-align:left">If you turn this on, Minus will upload:</p>
-            <ul class="help-text" style="text-align:left; margin: 0 0 0.5rem 1.2rem">
+            <p class="consent-text" style="text-align:left">If you turn this on, Minus will upload:</p>
+            <ul class="consent-text" style="text-align:left; margin: 0 0 0.5rem 1.2rem">
                 <li>a downscaled picture of TV frames it <strong>blocked as ads</strong> (at most 3 per ad),</li>
                 <li>the model's confidence and which detector fired (text or vision).</li>
             </ul>
-            <p class="help-text" style="text-align:left">It will <strong>never</strong> send your device name, IP address, Wi-Fi, accounts, streaming app or channel, viewing times, on-screen text, audio, or any frame that wasn't blocked. No identifier links one snapshot to another or to you.</p>
-            <p class="help-text" style="text-align:left">Snapshots wait 10 minutes on this box. Pausing blocking during an ad deletes that ad's snapshots. They go to the Minus project's private training dataset (the same one the Chrome extension uses). You can turn this off at any time, which deletes anything not yet sent.</p>
+            <p class="consent-text" style="text-align:left">It will <strong>never</strong> send your device name, IP address, Wi-Fi, accounts, streaming app or channel, viewing times, on-screen text, audio, or any frame that wasn't blocked. No identifier links one snapshot to another or to you.</p>
+            <p class="consent-text" style="text-align:left">Snapshots wait 10 minutes on this box. Pausing blocking during an ad deletes that ad's snapshots. They go to the Minus project's private training dataset (the same one the Chrome extension uses). You can turn this off at any time, which deletes anything not yet sent.</p>
             <div class="modal-buttons">
                 <button onclick="closeContributeModal(false)" class="modal-btn cancel">No thanks</button>
                 <button onclick="closeContributeModal(true)" class="modal-btn confirm">Yes, contribute</button>
@@ -2129,10 +2129,15 @@
                 }
                 if (btn) btn.disabled = !(res && res.updatable) || running;
                 const box = document.getElementById('updates-run');
-                if (run && box && run.steps && run.steps.length) {
+                if (run && box) {
+                    // Always show the CURRENT run: a just-started update has no
+                    // steps yet, and the panel used to keep showing the previous
+                    // run's log under "Last update: done" while it ran.
+                    const steps = (run.steps || []).slice(-8)
+                        .map((x) => new Date(x.t * 1000).toLocaleTimeString() + '  ' + x.msg);
                     box.classList.remove('hidden');
-                    box.textContent = 'Last update: ' + run.state + '\n' +
-                        run.steps.slice(-8).map((x) => new Date(x.t * 1000).toLocaleTimeString() + '  ' + x.msg).join('\n');
+                    box.textContent = (running ? 'Updating...' : 'Last update: ' + run.state) + '\n' +
+                        (steps.length ? steps.join('\n') : 'starting...');
                 }
                 clearTimeout(updatesPoll);
                 if (running || d.checking) updatesPoll = setTimeout(loadUpdates, 3000);

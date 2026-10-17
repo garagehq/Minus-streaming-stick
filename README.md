@@ -135,6 +135,8 @@ sudo python3 minus.py
 Settings → **Minus Updates** in the web UI shows whether this box is current and
 updates it with one button:
 
+![Settings → Minus Updates on a box: Minus, ustreamer and the vision model, all up to date after an update](docs/images/settings-updates-done.png)
+
 - **Minus** — on a published release, compared with the latest
   [GitHub release](https://github.com/garagehq/Minus-streaming-stick/releases);
   running from source, compared with the latest commit on your branch (normally
