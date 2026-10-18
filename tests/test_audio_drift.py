@@ -437,3 +437,38 @@ class TestLiveDelay(unittest.TestCase):
         src = (Path(__file__).resolve().parent.parent / 'src' / 'audio.py').read_text()
         self.assertIn('min-threshold-time={int(self.SYNC_BASELINE_MS * 1e6)}', src)
         self.assertNotIn('min-threshold-time=300000000', src)
+
+
+class TestAvSettingsSurviveRestart(unittest.TestCase):
+    """_load_system_settings used to keep only keys it had defaults for, so
+    the A/V trim (and anything newer) vanished on every restart (10-18)."""
+
+    def test_unknown_and_av_keys_round_trip(self):
+        import json, tempfile
+        import minus as m
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d, 'settings.json')
+            f.write_text(json.dumps({'av_sync_offsets': {'3e8d7c0004000000': 259.0},
+                                     'av_sync_last_delay_ms': 362.7,
+                                     'some_future_key': 'kept', 'vlm_preload': False}))
+            with patch.object(m, 'SYSTEM_SETTINGS_FILE', f):
+                obj = m.Minus.__new__(m.Minus)
+                st = obj._load_system_settings()
+        self.assertEqual(st['av_sync_offsets'], {'3e8d7c0004000000': 259.0})
+        self.assertEqual(st['av_sync_last_delay_ms'], 362.7)
+        self.assertEqual(st['some_future_key'], 'kept')
+        self.assertFalse(st['vlm_preload'])
+        self.assertEqual(st['capture_fps'], 30)          # default for a new key
+
+    def test_restart_starts_from_the_saved_delay_and_offset(self):
+        import minus as m
+        obj = m.Minus.__new__(m.Minus)
+        obj._system_settings = {'av_sync_offsets': {'opt': 259.0}, 'av_sync_last_delay_ms': 362.7}
+        obj.audio = make_calibratable(level_ms=0.0, aq_ms=0.0)
+        obj._init_av_sync()
+        self.assertEqual(obj.audio.SYNC_BASELINE_MS, 362.7)
+        self.assertEqual(obj.audio.sync_offsets, {'opt': 259.0})
+        obj.audio.video_latency_fn = lambda: obj.audio.m
+        obj.audio.calibrate_sync('start')
+        # 16.7 + 38 + 28 + 72 - 55 + 259 = 358.7: stays where the owner set it
+        self.assertAlmostEqual(obj.audio.SYNC_BASELINE_MS, 358.7, places=1)

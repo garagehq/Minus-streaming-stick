@@ -3026,15 +3026,24 @@ class Minus:
             # Anonymous ad-snapshot contribution (src/contribute.py). OPT-IN:
             # off until the user turns it on in Settings -> Help improve Minus.
             'contribute_snapshots': False,
+            # Capture rate ustreamer runs at; 0 = source rate with the thermal
+            # 30 fps cap (see _wanted_capture_fps).
+            'capture_fps': 30,
+            # Lip sync (av_sync.py): learned offset per display (EDID id) and
+            # the last delay that was right, so a restart starts there.
+            'av_sync_offsets': {},
+            'av_sync_last_delay_ms': None,
         }
         try:
             if SYSTEM_SETTINGS_FILE.exists():
                 with open(SYSTEM_SETTINGS_FILE) as f:
                     saved = json.load(f)
-                    # Merge with defaults
-                    for key in defaults:
-                        if key in saved:
-                            defaults[key] = saved[key]
+                # Keep EVERY saved key, not just the ones listed above. Only
+                # copying known keys silently dropped anything newer: the A/V
+                # trim set in Settings vanished on the next restart and the
+                # sound went out of sync again (minus, 2026-10-18).
+                if isinstance(saved, dict):
+                    defaults.update(saved)
                     logger.info(
                         f"Loaded system settings: vlm_preload={defaults['vlm_preload']}, "
                         f"block_falloff={defaults['block_falloff']}, "
