@@ -59,6 +59,10 @@ class DRMAdBlocker:
     All overlay compositing (background, preview, text) done in ustreamer's MPP encoder.
     """
 
+    # Fallback for objects made without __init__ (tests); __init__ sets a
+    # per-instance lock.
+    _build_lock = threading.RLock()
+
     def __init__(self, connector_id=215, plane_id=72, minus_instance=None, ustreamer_port=9090,
                  output_width=1920, output_height=1080, config=None):
         self.is_visible = False
@@ -656,7 +660,21 @@ class DRMAdBlocker:
             logger.error(f"[DRMAdBlocker] Error setting color: {e}")
             return {'success': False, 'error': str(e)}
 
+    # _switch_lock_note: every switch of self.pipeline (normal start, NO SIGNAL,
+    # loading, watchdog restart) holds _build_lock. They used to run unlocked
+    # from several threads at once: when a TV came on, the health monitor's
+    # re-trigger, its reconnect handler and the startup wait loop each started
+    # the NO SIGNAL screen within a second. Two builds interleaved, one pipeline
+    # was dropped from self.pipeline without being stopped, and it kept the DRM
+    # plane: a NO SIGNAL frozen mid-screen, then a video pipeline that stalled
+    # on every restart because the screen still showed videotestsrc
+    # (minus, 2026-10-18).
     def start(self):
+        """Serialised: see _switch_lock_note."""
+        with self._build_lock:
+            return self._start_locked()
+
+    def _start_locked(self):
         # Stop any animations before starting normal pipeline
         self._stop_loading_animation()
         self._stop_no_signal_animation()
@@ -931,15 +949,19 @@ class DRMAdBlocker:
                 delay = 0.0
             logger.warning(f"[DRMAdBlocker] Restarting pipeline (attempt {self._restart_count}, delay {delay:.1f}s, hdmi_reconnect={hdmi_reconnect}, penalize={penalize})")
 
-            if self.pipeline:
-                try:
-                    if self.bus:
-                        self.bus.remove_signal_watch()
-                        self.bus = None
-                    self.pipeline.set_state(Gst.State.NULL)
-                except Exception as e:
-                    logger.debug(f"[DRMAdBlocker] Error during pipeline cleanup: {e}")
-                self.pipeline = None
+            with self._build_lock:
+                if self.current_source in ('loading', 'no_hdmi_device'):
+                    logger.info(f"[DRMAdBlocker] Restart skipped - {self.current_source} screen is up")
+                    return
+                if self.pipeline:
+                    try:
+                        if self.bus:
+                            self.bus.remove_signal_watch()
+                            self.bus = None
+                        self.pipeline.set_state(Gst.State.NULL)
+                    except Exception as e:
+                        logger.debug(f"[DRMAdBlocker] Error during pipeline cleanup: {e}")
+                    self.pipeline = None
 
             # After 3+ consecutive failures, the MPP decoder may be stuck.
             # Force-restart ustreamer to reset MPP state. Never escalate on a
@@ -976,14 +998,20 @@ class DRMAdBlocker:
                         self.audio.start()
 
             time.sleep(delay)
-            self._init_pipeline()
+            with self._build_lock:
+                # NO SIGNAL or loading may have taken the screen during the
+                # backoff; building the video pipeline now would replace it.
+                if self.current_source in ('loading', 'no_hdmi_device'):
+                    logger.info(f"[DRMAdBlocker] Restart dropped - {self.current_source} screen took over")
+                    return
+                self._init_pipeline()
 
-            if self.pipeline:
-                ret = self.pipeline.set_state(Gst.State.PLAYING)
-                if ret != Gst.StateChangeReturn.FAILURE:
-                    logger.info("[DRMAdBlocker] Pipeline restarted successfully")
-                    self._last_buffer_time = time.time()
-                    self._last_restart_time = time.time()
+                if self.pipeline:
+                    ret = self.pipeline.set_state(Gst.State.PLAYING)
+                    if ret != Gst.StateChangeReturn.FAILURE:
+                        logger.info("[DRMAdBlocker] Pipeline restarted successfully")
+                        self._last_buffer_time = time.time()
+                        self._last_restart_time = time.time()
                     # Don't reset consecutive_failures here - let the buffer probe
                     # reset it after sustained flow. This ensures the ustreamer
                     # force-restart triggers if the pipeline keeps stalling.
@@ -1091,6 +1119,11 @@ class DRMAdBlocker:
         }
 
     def start_no_signal_mode(self, skip_dpms=False):
+        """Serialised: see _switch_lock_note."""
+        with self._build_lock:
+            return self._start_no_signal_mode_locked(skip_dpms)
+
+    def _start_no_signal_mode_locked(self, skip_dpms=False):
         """Start a standalone display for 'No Signal' message with DVD-style bouncing.
 
         This creates a simple pipeline using videotestsrc that doesn't depend on ustreamer.
@@ -1309,6 +1342,11 @@ class DRMAdBlocker:
                 break
 
     def start_loading_mode(self):
+        """Serialised: see _switch_lock_note."""
+        with self._build_lock:
+            return self._start_loading_mode_locked()
+
+    def _start_loading_mode_locked(self):
         """Start a standalone display for 'Loading' with animated ellipses.
 
         This creates a pipeline using videotestsrc that shows "Loading" with

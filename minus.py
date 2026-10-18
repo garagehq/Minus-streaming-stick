@@ -1379,6 +1379,14 @@ class Minus:
 
     def _on_hdmi_restored(self):
         """Handle HDMI signal restoration."""
+        if getattr(self, '_startup_waiting_for_signal', False):
+            # Minus started without a picture and its startup wait loop is
+            # still running: that loop sees the signal too and starts the
+            # display itself. Recovering here as well built a second video
+            # pipeline a second later (minus, 2026-10-18).
+            logger.info("[Recovery] HDMI signal restored during startup - the startup loop starts the display")
+            self._hdmi_signal_lost = False
+            return
         logger.info("[Recovery] HDMI signal restored - showing loading screen")
 
         # Resume detection workers
@@ -5251,6 +5259,9 @@ class Minus:
             if self.autonomous_mode:
                 self.autonomous_mode.set_ad_blocker(self)
                 self.autonomous_mode.start_if_enabled()
+            # Until start_display() below returns, startup owns the display;
+            # see _on_hdmi_restored.
+            self._startup_waiting_for_signal = True
             try:
                 poll_count = 0
                 while self.running:
@@ -5298,7 +5309,12 @@ class Minus:
         self.running = True
 
         # Start display (will transition from loading to live when ready)
-        if not self.start_display():
+        self._startup_waiting_for_signal = True
+        try:
+            display_ok = self.start_display()
+        finally:
+            self._startup_waiting_for_signal = False
+        if not display_ok:
             logger.warning("Failed to start display - will retry in background")
             self.display_connected = False
             self.display_error = "Display output not available. Check HDMI-TX connection to TV/monitor."

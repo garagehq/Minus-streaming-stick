@@ -165,7 +165,7 @@ class TestTXReinitOnNormalStartup(unittest.TestCase):
 
     def test_startup_path_calls_it_before_building_the_pipeline(self):
         src = (ROOT / 'src' / 'ad_blocker.py').read_text()
-        body = src[src.index('    def start(self):'):]
+        body = src[src.index('    def _start_locked(self):'):]
         body = body[:body.index('\n    def ', 10)]
         self.assertIn('_force_hdmi_reinit_if_connected', body,
                       'normal start-up no longer re-inits the transmitter')

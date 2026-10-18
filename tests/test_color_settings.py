@@ -335,6 +335,8 @@ class TestInitPipelineLaunchString(unittest.TestCase):
 
     def _run_init(self, saved):
         b = DRMAdBlocker.__new__(DRMAdBlocker)
+        b.pipeline = None
+        b.current_source = None
         b._saved_color_settings = dict(saved)
         b.ustreamer_port = 9090
         b.plane_id = 192
@@ -415,6 +417,7 @@ class TestRestartPenalize(unittest.TestCase):
         b._last_buffer_time = 0.0
         b._last_restart_time = 0.0
         b.pipeline = None
+        b.current_source = None
         b.bus = None
         b._init_pipeline = MagicMock()   # leaves b.pipeline None -> no PLAYING
         b._force_hdmi_reinit = MagicMock()

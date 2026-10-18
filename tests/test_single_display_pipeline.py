@@ -96,6 +96,103 @@ class TestSinglePipelineInvariant(unittest.TestCase):
         self.assertEqual(len(b._built), 2)
 
 
+def standalone_blocker():
+    """A blocker whose NO SIGNAL / loading screens build mock pipelines."""
+    b = object.__new__(DRMAdBlocker)
+    b.pipeline = None
+    b.bus = None
+    b._build_lock = threading.RLock()
+    b._restart_lock = threading.Lock()
+    b._pipeline_restarting = False
+    b.current_source = None
+    b.is_visible = False
+    b.plane_id, b.connector_id = 192, 231
+    for name in ('_set_led_state', '_stop_watchdog_thread', '_stop_loading_animation',
+                 '_stop_no_signal_animation', '_start_no_signal_animation',
+                 '_start_loading_animation', '_force_hdmi_reinit'):
+        setattr(b, name, MagicMock())
+    return b
+
+
+class TestStandaloneScreensAreSerialised(unittest.TestCase):
+    """minus, 2026-10-18: the TV came on and three paths started NO SIGNAL
+    within a second. One pipeline fell out of self.pipeline still PLAYING: the
+    text froze mid-screen, and once the source came up the video pipeline
+    stalled on every restart because the plane still showed videotestsrc."""
+
+    def run_concurrently(self, b, calls):
+        built = []
+        lock = threading.Lock()
+        real = ab.Gst.parse_launch
+
+        def fake_parse(desc):
+            # Widen the race window the way a real parse/PLAYING does.
+            import time
+            time.sleep(0.01)
+            p = MagicMock(name=f'p{len(built)}')
+            p.set_state.return_value = ab.Gst.StateChangeReturn.SUCCESS
+            with lock:
+                built.append(p)
+            return p
+        ab.Gst.parse_launch = fake_parse
+        try:
+            barrier = threading.Barrier(len(calls))
+
+            def go(fn):
+                barrier.wait()
+                fn()
+            ts = [threading.Thread(target=go, args=(fn,)) for fn in calls]
+            for t in ts: t.start()
+            for t in ts: t.join()
+        finally:
+            ab.Gst.parse_launch = real
+        return built
+
+    def assert_one_live(self, b, built):
+        live = [p for p in built
+                if not any(c.args == (ab.Gst.State.NULL,) for c in p.set_state.call_args_list)]
+        self.assertEqual(live, [b.pipeline], 'an orphaned pipeline is still PLAYING')
+
+    def test_concurrent_no_signal_starts_leave_one_pipeline(self):
+        b = standalone_blocker()
+        built = self.run_concurrently(
+            b, [lambda: b.start_no_signal_mode(skip_dpms=True)] * 6)
+        self.assertEqual(len(built), 6)
+        self.assert_one_live(b, built)
+
+    def test_no_signal_racing_loading_leaves_one_pipeline(self):
+        b = standalone_blocker()
+        built = self.run_concurrently(
+            b, [lambda: b.start_no_signal_mode(skip_dpms=True), b.start_loading_mode] * 3)
+        self.assert_one_live(b, built)
+
+    def test_restart_does_not_replace_the_no_signal_screen(self):
+        b = standalone_blocker()
+        b._restart_count = 0
+        b._consecutive_failures = 0
+        b._base_restart_delay, b._max_restart_delay = 0.0, 0.0
+        b._init_pipeline = MagicMock()
+        b.current_source = 'no_hdmi_device'
+        b._restart_pipeline(penalize=False)
+        b._init_pipeline.assert_not_called()
+
+
+class TestRestoreDuringStartup(unittest.TestCase):
+
+    def test_startup_owns_the_first_display_start(self):
+        import minus as m
+        mm = object.__new__(m.Minus)
+        mm._startup_waiting_for_signal = True
+        mm._hdmi_signal_lost = True
+        mm.ad_blocker = MagicMock()
+        mm._set_led_state = MagicMock()
+        mm._restart_ustreamer = MagicMock()
+        mm._on_hdmi_restored()
+        mm.ad_blocker.start.assert_not_called()
+        mm._restart_ustreamer.assert_not_called()
+        self.assertFalse(mm._hdmi_signal_lost)
+
+
 class TestCpuPercent(unittest.TestCase):
 
     def _hm(self):
