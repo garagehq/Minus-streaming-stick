@@ -354,14 +354,15 @@ class TestLiveDelay(unittest.TestCase):
     def test_first_calibration_applies_and_includes_the_display(self):
         a = make_calibratable(level_ms=300.0, aq_ms=0.0, offsets={'opt': 0.0})
         a.calibrate_sync('test')
-        # 16.7 + 38 + 28 (box) + 72 (Optoma) - 55 = 99.7
-        self.assertAlmostEqual(a.SYNC_BASELINE_MS, 99.7, places=1)
+        # 16.7 + 38 + 28 (box) + 72 (Optoma) - 55 - 15 (typical audioqueue) = 84.7
+        self.assertAlmostEqual(a.SYNC_BASELINE_MS, 84.7, places=1)
         self.assertEqual(a.get_sync_info()['display'], 'Optoma UHD')
 
     def test_old_global_trim_migrates_without_moving_the_delay(self):
         """10-18: the owner set the old trim to 325 by ear; after the update
         the delay must come out the same."""
-        before = av_sync.target_delay_ms(av_sync.video_latency_ms(38.0, 60.0), 0.0, 325.0)
+        before = av_sync.target_delay_ms(av_sync.video_latency_ms(38.0, 60.0),
+                                         av_sync.AUDIOQUEUE_TYPICAL_MS, 325.0)
         a = make_calibratable(level_ms=300.0, aq_ms=0.0, legacy=325.0)
         a.calibrate_sync('test')
         self.assertAlmostEqual(a.SYNC_BASELINE_MS, before, places=1)
@@ -406,13 +407,32 @@ class TestLiveDelay(unittest.TestCase):
         self.assertEqual(a.sync_offsets, {'opt': 20.0})
 
     def test_lowering_drains_but_never_to_unlimited(self):
-        a = make_calibratable(level_ms=300.0, aq_ms=65.0, display=('x', 'TV', None, None), offsets={'x': 0.0})
+        a = make_calibratable(level_ms=300.0, aq_ms=0.0, display=('x', 'TV', None, None), offsets={'x': -200.0})
         a.calibrate_sync('start')
         self.assertEqual(a.SYNC_BASELINE_MS, 0.0)
         a._q.set_property.assert_any_call('min-threshold-time', 0)
         self.assertLessEqual(a._qstate['level'], 5e6)       # 5 ms floor, not max-size-time=0
-        self.assertLess(a._aq_state['level'], 65e6)
-        self.assertEqual(a._aq_state['max'], 100_000_000, 'audioqueue size restored')
+
+    def test_audioqueue_level_does_not_move_the_delay(self):
+        """04:02: the delay dropped 63 ms because audioqueue read 60 ms at
+        that moment; it emptied soon after and the sound came out early."""
+        a = make_calibratable(level_ms=0.0, aq_ms=0.0, offsets={'opt': 259.0})
+        a.calibrate_sync('start')
+        settled = a.SYNC_BASELINE_MS
+        for aq in (60.0, 70.0, 0.0, 60.0):
+            a._aq_state['level'] = aq * 1e6
+            a.calibrate_sync('periodic')
+        self.assertEqual(a.SYNC_BASELINE_MS, settled)
+
+    def test_audioqueue_is_capped_small_live(self):
+        a = make_calibratable(level_ms=0.0, aq_ms=60.0, offsets={'opt': 0.0})
+        a.calibrate_sync('start')
+        self.assertEqual(a._aq_state['max'], int(av_sync.AUDIOQUEUE_MAX_MS * 1e6))
+        self.assertLessEqual(a._aq_state['level'], av_sync.AUDIOQUEUE_MAX_MS * 1e6)
+
+    def test_pipeline_builds_audioqueue_with_the_cap(self):
+        src = (Path(__file__).resolve().parent.parent / 'src' / 'audio.py').read_text()
+        self.assertIn('max-size-time={int(av_sync.AUDIOQUEUE_MAX_MS * 1e6)} leaky=downstream name=audioqueue', src)
 
     def test_raising_the_delay_does_not_drain(self):
         a = make_calibratable(level_ms=0.0, aq_ms=0.0, ustreamer_ms=400.0, offsets={'opt': 0.0})
@@ -470,5 +490,5 @@ class TestAvSettingsSurviveRestart(unittest.TestCase):
         self.assertEqual(obj.audio.sync_offsets, {'opt': 259.0})
         obj.audio.video_latency_fn = lambda: obj.audio.m
         obj.audio.calibrate_sync('start')
-        # 16.7 + 38 + 28 + 72 - 55 + 259 = 358.7: stays where the owner set it
-        self.assertAlmostEqual(obj.audio.SYNC_BASELINE_MS, 358.7, places=1)
+        # 16.7 + 38 + 28 + 72 - 55 - 15 + 259 = 343.7: where the owner set it
+        self.assertAlmostEqual(obj.audio.SYNC_BASELINE_MS, 343.7, places=1)

@@ -37,6 +37,8 @@ import os
 import re
 import subprocess
 import threading
+
+import av_sync
 import time
 import wave
 
@@ -379,7 +381,7 @@ class AudioPassthrough:
                         f"buffer-time=50000 latency-time=10000 sync=false")
             playback_chain = (
                 f"queue name=syncqueue min-threshold-time={int(self.SYNC_BASELINE_MS * 1e6)} max-size-time={int(self.SYNC_MAX_MS * 1e6)} max-size-buffers=0 max-size-bytes=0 ! "
-                f"queue max-size-buffers=10 max-size-time=100000000 leaky=downstream name=audioqueue ! "
+                f"queue max-size-buffers=0 max-size-bytes=0 max-size-time={int(av_sync.AUDIOQUEUE_MAX_MS * 1e6)} leaky=downstream name=audioqueue ! "
                 f"audioconvert ! "
                 f"volume name=vol volume=1.0 mute=false ! "
                 f"{sink}"
@@ -1491,13 +1493,10 @@ class AudioPassthrough:
         box_video = av_sync.video_latency_ms(m['ustreamer_ms'], m.get('source_fps') or 60.0)
         video_ms = box_video + disp_v
         aq = self._queue_level_ms('audioqueue') or 0.0
-        target = av_sync.target_delay_ms(video_ms, aq, offset, display_audio_ms=disp_a)
-        # Audio would still be late with no delay at all: drop audioqueue's
-        # standing backlog too (it adds its level to every sample).
-        overshoot = (av_sync.AUDIO_PATH_MS + aq + disp_a) - (video_ms + offset)
+        self._cap_audioqueue()
+        target = av_sync.target_delay_ms(video_ms, av_sync.AUDIOQUEUE_TYPICAL_MS, offset,
+                                         display_audio_ms=disp_a)
         drained = None
-        if target == 0.0 and overshoot > 15.0 and aq > 15.0:
-            drained = self._drain_queue('audioqueue', max(0.0, aq - overshoot))
         if not self._calibrated_once:
             force = True                       # first calibration since start
         value = self._smoother.propose(target, self.SYNC_BASELINE_MS, force=force)
@@ -1583,6 +1582,21 @@ class AudioPassthrough:
             'last_calibration': self._last_calibration,
             **self.get_sync_levels(),
         }
+
+    def _cap_audioqueue(self):
+        """Keep audioqueue at its small cap (also fixes a pipeline built
+        before the cap existed, live)."""
+        q = self.pipeline.get_by_name('audioqueue') if self.pipeline else None
+        if q is None:
+            return
+        want = int(av_sync.AUDIOQUEUE_MAX_MS * 1e6)
+        try:
+            if q.get_property('max-size-time') != want:
+                q.set_property('max-size-buffers', 0)
+                q.set_property('max-size-time', want)
+                logger.info(f"[AudioPassthrough] audioqueue capped at {av_sync.AUDIOQUEUE_MAX_MS:.0f}ms")
+        except Exception as e:
+            logger.debug(f"[AudioPassthrough] could not cap audioqueue: {e}")
 
     def _drain_queue(self, name: str, keep_ms: float):
         """Drop a leaky queue's oldest audio down to ~keep_ms. Returns the level after."""

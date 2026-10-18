@@ -44,6 +44,17 @@ DISPLAY_SIDE_MS = 28.0
 # audioqueue's level is measured live and added on top.
 AUDIO_PATH_MS = 55.0
 
+# audioqueue (after syncqueue) absorbs the drift between the HDMI-in and
+# HDMI-out audio clocks: it creeps up and, being leaky, drops its oldest audio
+# when full. At its old 100 ms cap that was a sawtooth -- the sound slid
+# ~100 ms later over minutes, then snapped back -- and a calibration that read
+# its level at one moment and subtracted it put the sound 60 ms early as soon
+# as it emptied (minus, 2026-10-18 04:02). Capped at 30 ms it drops ~10 ms
+# buffers instead (inaudible), and the delay counts its typical level rather
+# than chasing the momentary one.
+AUDIOQUEUE_MAX_MS = 30.0
+AUDIOQUEUE_TYPICAL_MS = 15.0
+
 MAX_DELAY_MS = 800.0
 TRIM_LIMIT_MS = 500.0
 
@@ -104,6 +115,7 @@ def target_delay_ms(video_ms: float, audioqueue_ms: float = 0.0, trim_ms: float 
     """
     d = (video_ms - (display_audio_ms or 0.0) - AUDIO_PATH_MS - (audioqueue_ms or 0.0)
          + clamp_trim(trim_ms))
+    # callers pass AUDIOQUEUE_TYPICAL_MS for audioqueue_ms, not a live reading
     return round(max(0.0, min(MAX_DELAY_MS, d)), 1)
 
 
