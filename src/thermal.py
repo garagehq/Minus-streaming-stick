@@ -52,16 +52,53 @@ _THERMAL_ZONE_GLOB = '/sys/class/thermal/thermal_zone*'
 _COOLING_DEVICE_GLOB = '/sys/class/thermal/cooling_device*'
 
 
+# A real hot SoC heats every zone: they are spots on one die and sit within a
+# few degrees of each other (67-70 C across all seven on minus at 4K). One zone
+# far above all the others is a bad reading, not heat. On minus every unforced
+# DEGRADED entry for six days read EXACTLY 85.0 C and was back to ~71 a minute
+# later (4 times; 2026-10-16 .. 10-18), and each one restarted ustreamer -- one
+# of them in the middle of a blocked ad, which then played on screen.
+OUTLIER_C = float(os.environ.get('MINUS_THERMAL_OUTLIER_C', '8'))
+last_rejected = None   # (zone, temp_c, others_max) of the last ignored reading
+
+
+def pick_temp_c(readings):
+    """Hottest zone, ignoring a single zone far above every other one.
+
+    `readings` is [(zone_type, temp_c), ...]. Returns (temp_c, rejected) where
+    rejected is (zone, temp_c, next_highest) or None.
+    """
+    if not readings:
+        return None, None
+    ordered = sorted(readings, key=lambda r: r[1], reverse=True)
+    if len(ordered) >= 3 and ordered[0][1] - ordered[1][1] > OUTLIER_C:
+        top = ordered[0]
+        return ordered[1][1], (top[0], top[1], ordered[1][1])
+    return ordered[0][1], None
+
+
 def read_max_temp_c():
-    """Max temperature across all SoC thermal zones, in °C (None if unreadable)."""
-    temps = []
-    for path in glob.glob(_THERMAL_ZONE_GLOB + '/temp'):
+    """Max temperature across SoC thermal zones in C, a lone outlier ignored."""
+    global last_rejected
+    readings = []
+    for zone in glob.glob(_THERMAL_ZONE_GLOB):
         try:
-            with open(path) as f:
-                temps.append(int(f.read().strip()) / 1000.0)
+            with open(zone + '/temp') as f:
+                temp = int(f.read().strip()) / 1000.0
         except (OSError, ValueError):
             continue
-    return max(temps) if temps else None
+        try:
+            with open(zone + '/type') as f:
+                name = f.read().strip()
+        except OSError:
+            name = os.path.basename(zone)
+        readings.append((name, temp))
+    temp, rejected = pick_temp_c(readings)
+    if rejected and rejected != last_rejected:
+        logger.warning(f"[Thermal] ignoring {rejected[0]} at {rejected[1]:.1f}C: every other zone "
+                       f"is at or below {rejected[2]:.1f}C (bad reading, not heat)")
+    last_rejected = rejected
+    return temp
 
 
 def read_cpu_throttled():

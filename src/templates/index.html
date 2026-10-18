@@ -2929,8 +2929,8 @@
             const c = d.last_calibration;
             if (c) {
                 document.getElementById('av-sync-info').textContent =
-                    `Picture delay ${Math.round(c.video_latency_ms)} ms, sound delay ${Math.round(d.delay_ms)} ms. ` +
-                    'If voices still come early, press +; if they come late, press −.';
+                    `${d.display}: picture delay ${Math.round(c.video_latency_ms)} ms, sound delay ${Math.round(d.delay_ms)} ms. ` +
+                    'If voices still come early, press +; if they come late, press −. Remembered for this display.';
             }
         }
         async function loadAVSync() {

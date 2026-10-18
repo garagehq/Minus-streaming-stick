@@ -62,6 +62,21 @@ The overlay also gets:
 - Automatic A/V sync reset every 45 minutes
 - Silent keepalive to prevent pipeline stalls
 - Exponential backoff restart on failures
+- **Lip sync that adapts** (`src/av_sync.py`): the audio delay = box video
+  latency (measured from ustreamer's per-frame headers) + the display's video
+  latency (its EDID's HDMI lip-sync fields) - the display's audio latency - the
+  audio path's own buffers + a correction learned per display (Settings → Audio
+  → Audio Delay Trim, −/+ 20 ms, remembered per EDID). Re-measured every 5 min
+  and after each ustreamer restart; changes only when two readings agree, by
+  > 40 ms, and are applied to the live queue (no restart). Starts from the last
+  delay that was right.
+- **Capture fixed at 30 fps** (`capture_fps` setting, 0 = old source-rate +
+  thermal cap): switching rates restarted ustreamer, which dropped the block
+  on screen and moved the video latency.
+- A block survives a ustreamer restart: the blocker checks ustreamer's
+  `/blocking` while a block is up and re-applies it to a new ustreamer.
+- Thermal: a lone zone far above the rest of the die (a bad reading, e.g. the
+  exact 85.0 °C seen on minus) is ignored.
 
 ### Streaming Device Remote Control
 

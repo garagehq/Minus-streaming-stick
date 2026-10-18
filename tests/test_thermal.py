@@ -402,6 +402,7 @@ class TestThermalCaptureFps(unittest.TestCase):
         m.MIN_BLOCKING_DURATION_FLOOR_BOTH = 1.5
         m.MIN_BLOCKING_DURATION_FLOOR_VLM = 0.5
         m.THERMAL_CAPTURE_FPS = 30
+        m._system_settings = {"capture_fps": 0}   # adaptive mode (opt-in since 2026-10-18)
         m.CAPTURE_FPS_SWITCH_MIN_S = 600.0
         m.CAPTURE_FPS_RESTORE_AFTER_S = 1800.0
         m._thermal_normal_since = 0.0
@@ -444,6 +445,7 @@ class TestThermalCaptureFps(unittest.TestCase):
         m._detected_format = 'NV12'
         m.thermal_degraded = True
         m.THERMAL_CAPTURE_FPS = 30
+        m._system_settings = {"capture_fps": 0}   # adaptive mode (opt-in since 2026-10-18)
         m._init_v4l2_device = MagicMock()
         proc = MagicMock()
         proc.poll.return_value = None
@@ -547,6 +549,7 @@ class TestThermalCaptureFps(unittest.TestCase):
     def test_disabled_by_env_value_zero(self):
         m = self._make()
         m.THERMAL_CAPTURE_FPS = 0
+        m._system_settings = {"capture_fps": 0}   # adaptive mode (opt-in since 2026-10-18)
         m.thermal_degraded = True
         self.assertEqual(m._ustreamer_fps_args(), [])
         self.assertEqual(m._maybe_switch_capture_fps(), 'unchanged')
@@ -651,6 +654,99 @@ class TestStartupNoSignalRetryNeedsATv(unittest.TestCase):
                 self.assertTrue(health.hdmi_output_connected())
 
 
+class TestFixedCaptureFps(unittest.TestCase):
+    """Default since 2026-10-18: capture fixed at 30 fps, never switched.
+
+    Each 60<->30 switch restarted ustreamer, which dropped the block on screen
+    mid-ad, rebuilt audio and moved the video latency under the audio delay."""
+
+    def _make(self, settings=None):
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.THERMAL_CAPTURE_FPS = 30
+        m.thermal_degraded = False
+        if settings is not None:
+            m._system_settings = settings
+        return m
+
+    def test_default_is_30_whatever_the_temperature(self):
+        m = self._make({})
+        for degraded in (False, True, False):
+            m.thermal_degraded = degraded
+            self.assertEqual(m._wanted_capture_fps(), 30)
+        self.assertEqual(m._ustreamer_fps_args(), ['--desired-fps=40'])
+
+    def test_thermal_changes_never_restart_ustreamer(self):
+        import threading
+        m = self._make({})
+        m._capture_fps_lock = threading.Lock()
+        m._capture_fps_cap = 30
+        m._capture_fps_switch_at = 0.0
+        m._restart_ustreamer = MagicMock()
+        for degraded in (True, False, True):
+            m.thermal_degraded = degraded
+            self.assertEqual(m._maybe_switch_capture_fps(), 'unchanged')
+        m._restart_ustreamer.assert_not_called()
+
+    def test_setting_zero_brings_back_the_source_rate(self):
+        m = self._make({'capture_fps': 0})
+        self.assertEqual(m._wanted_capture_fps(), 0)
+        m.thermal_degraded = True
+        self.assertEqual(m._wanted_capture_fps(), 30)
+
+    def test_env_overrides_and_junk_falls_back_to_30(self):
+        import os
+        m = self._make({'capture_fps': 'junk'})
+        self.assertEqual(m._wanted_capture_fps(), 30)
+        with patch.dict(os.environ, {'MINUS_CAPTURE_FPS': '0'}):
+            self.assertEqual(m._wanted_capture_fps(), 0)
+
+
+class TestLoneHotZoneIsIgnored(unittest.TestCase):
+    """minus 10-16..10-18: every unforced DEGRADED entry read exactly 85.0 C
+    with the rest of the die near 70 and back to normal a minute later."""
+
+    ZONES = [('soc-thermal', 69.3), ('bigcore0-thermal', 69.3), ('bigcore1-thermal', 69.3),
+             ('littlecore-thermal', 70.2), ('center-thermal', 68.4), ('gpu-thermal', 67.5),
+             ('npu-thermal', 68.4)]
+
+    def test_one_zone_at_85_with_the_die_at_70_is_ignored(self):
+        import thermal
+        zones = self.ZONES[:6] + [('npu-thermal', 85.0)]
+        temp, rejected = thermal.pick_temp_c(zones)
+        self.assertEqual(temp, 70.2)
+        self.assertEqual(rejected[0], 'npu-thermal')
+
+    def test_real_heat_moves_every_zone_and_still_trips(self):
+        import thermal
+        hot = [(n, t + 15.0) for n, t in self.ZONES]
+        temp, rejected = thermal.pick_temp_c(hot)
+        self.assertEqual(temp, 85.2)
+        self.assertIsNone(rejected)
+        g = thermal.ThermalGovernor(enter_temp=83, exit_temp=75, enter_sustain=15, exit_sustain=60)
+        for t in range(0, 20, 5):
+            g.update(temp, False, t)
+        self.assertTrue(g.degraded)
+
+    def test_the_spike_never_reaches_the_governor(self):
+        import thermal
+        g = thermal.ThermalGovernor(enter_temp=83, exit_temp=75, enter_sustain=15, exit_sustain=60)
+        zones = self.ZONES[:6] + [('npu-thermal', 85.0)]
+        for t in range(0, 60, 5):
+            g.update(thermal.pick_temp_c(zones)[0], False, t)
+        self.assertFalse(g.degraded)
+
+    def test_hot_spot_within_the_spread_counts(self):
+        import thermal
+        zones = self.ZONES[:6] + [('bigcore0-thermal', 76.0)]
+        self.assertEqual(thermal.pick_temp_c(zones), (76.0, None))
+
+    def test_too_few_zones_to_judge(self):
+        import thermal
+        self.assertEqual(thermal.pick_temp_c([('a', 85.0), ('b', 60.0)])[0], 85.0)
+        self.assertEqual(thermal.pick_temp_c([]), (None, None))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
 
@@ -665,6 +761,7 @@ class TestCaptureSwitchWaitsForASignal(unittest.TestCase):
         m = Minus.__new__(Minus)
         m.thermal_degraded = True
         m.THERMAL_CAPTURE_FPS = 30
+        m._system_settings = {"capture_fps": 0}   # adaptive mode (opt-in since 2026-10-18)
         m.CAPTURE_FPS_SWITCH_MIN_S = 600.0
         m.CAPTURE_FPS_RESTORE_AFTER_S = 1800.0
         m._thermal_normal_since = 0.0

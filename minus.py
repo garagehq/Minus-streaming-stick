@@ -1113,8 +1113,7 @@ class Minus:
                 )
                 # Keep the audio delay matched to the measured video latency
                 # (av_sync.py), plus the owner's saved trim.
-                self.audio.video_latency_fn = self._measure_video_latency
-                self.audio.sync_trim_ms = float(self._system_settings.get('av_sync_trim_ms', 0) or 0)
+                self._init_av_sync()
                 # Link audio to ad_blocker for mute control
                 if self.ad_blocker:
                     self.ad_blocker.set_audio(self.audio)
@@ -1246,7 +1245,28 @@ class Minus:
             logger.error(f"[Thermal] Failed to apply mode change: {e}")
 
     def _wanted_capture_fps(self) -> int:
-        """Capture cap the current thermal state calls for (0 = source rate)."""
+        """Capture rate ustreamer should run at (0 = source rate).
+
+        Fixed at 30 fps by default (system setting `capture_fps`, env
+        MINUS_CAPTURE_FPS). Switching 60 <-> 30 with the temperature meant a
+        ustreamer restart each time, and every restart cost something: the
+        block on screen was lost mid-ad (the new ustreamer starts with
+        blocking off), audio was rebuilt, and the video latency the audio
+        delay is matched to changed underneath it (minus, 2026-10-18: three
+        switches in two hours, two of them on false 85.0 C readings). A 4K
+        source on this SoC spends most of its time at the thermal trip
+        anyway, where it was capped to 30. 0 = the old behaviour: source rate,
+        capped to THERMAL_CAPTURE_FPS only while thermally degraded.
+        """
+        fixed = os.environ.get('MINUS_CAPTURE_FPS')
+        if fixed is None:
+            fixed = (getattr(self, '_system_settings', None) or {}).get('capture_fps', 30)
+        try:
+            fixed = int(fixed)
+        except (TypeError, ValueError):
+            fixed = 30
+        if fixed > 0:
+            return fixed
         cap = getattr(self, 'THERMAL_CAPTURE_FPS', 30)
         if getattr(self, 'thermal_degraded', False) and cap > 0:
             return cap
@@ -1595,6 +1615,10 @@ class Minus:
                 logger.info("[Recovery] ustreamer restarted successfully")
                 if getattr(self, 'audio', None):
                     self.audio.request_calibration()   # its latency may have changed
+                if getattr(self, 'ad_blocker', None):
+                    # A new ustreamer starts with blocking off; an ad that was being
+                    # blocked would play on screen until the next ad.
+                    self._schedule_block_reapply()
                 # Also restart video pipeline to reconnect to new ustreamer
                 # (no display: the display retry loop starts it when one appears)
                 if self.ad_blocker and self.display_connected:
@@ -2914,8 +2938,45 @@ class Minus:
     # System Settings
     # =========================================================================
 
+    def _schedule_block_reapply(self, delay_s: float = 1.5):
+        t = threading.Timer(delay_s, self._reapply_block_after_restart)
+        t.daemon = True
+        t.start()
+
+    def _reapply_block_after_restart(self):
+        try:
+            if self.ad_blocker and self.ad_blocker.reapply_block_if_lost():
+                logger.info("[Recovery] block re-applied on the restarted ustreamer")
+        except Exception as e:
+            logger.warning(f"[Recovery] could not re-apply the block: {e}")
+
+    def _init_av_sync(self):
+        """Hook the audio delay up to the latency measurements + saved state."""
+        a = self.audio
+        st = self._system_settings
+        a.video_latency_fn = self._measure_video_latency
+        a.sync_offsets = dict(st.get('av_sync_offsets') or {})
+        if not a.sync_offsets and st.get('av_sync_trim_ms') is not None:
+            a.legacy_trim_ms = float(st.get('av_sync_trim_ms') or 0)
+        last = st.get('av_sync_last_delay_ms')
+        if last is not None:
+            # Start where it was last right, not at the old 300 ms, so a
+            # restart doesn't play out of sync until the first calibration.
+            a.SYNC_BASELINE_MS = float(last)
+            a.SYNC_MAX_MS = float(last) + a.SYNC_HEADROOM_MS
+        a.on_sync_settings = self._save_av_sync_settings
+
+    def _save_av_sync_settings(self, values: dict):
+        changed = {k: v for k, v in values.items() if self._system_settings.get(k) != v}
+        if not changed:
+            return
+        self._system_settings.update(changed)
+        self._system_settings.pop('av_sync_trim_ms', None)   # migrated
+        self._save_system_settings()
+
     def _measure_video_latency(self):
-        """(ustreamer capture->send ms, source fps) for av_sync, or None."""
+        """What av_sync needs: box capture->send ms, source fps, and the
+        connected display's own latency + identity from its EDID."""
         import av_sync
         port = self.config.ustreamer_port
         ms = av_sync.measure_ustreamer_ms(port)
@@ -2929,14 +2990,17 @@ class Minus:
             fps = float(src.get('captured_fps') or fps)
         except Exception:
             pass
-        return ms, fps
+        display = av_sync.connected_display() or {}
+        return {
+            'ustreamer_ms': ms, 'source_fps': fps,
+            'display_id': display.get('id'), 'display_name': display.get('name'),
+            'display_video_ms': display.get('video_ms'), 'display_audio_ms': display.get('audio_ms'),
+        }
 
     def set_av_sync_trim(self, trim_ms) -> dict:
         """Owner's A/V trim from Settings: + plays the sound later, - earlier."""
         import av_sync
         trim = av_sync.clamp_trim(trim_ms)
-        self._system_settings['av_sync_trim_ms'] = trim
-        self._save_system_settings()
         if not getattr(self, 'audio', None):
             return {'success': False, 'error': 'Audio not initialized', 'trim_ms': trim}
         return self.audio.set_sync_trim(trim)
@@ -3507,6 +3571,10 @@ class Minus:
         logger.info(f"ustreamer started on port {port}")
         if getattr(self, 'audio', None):
             self.audio.request_calibration()   # its latency may have changed
+        if getattr(self, 'ad_blocker', None):
+            # A new ustreamer starts with blocking off; an ad that was being
+            # blocked would play on screen until the next ad.
+            self._schedule_block_reapply()
 
         # Initialize frame capture
         self.frame_capture = UstreamerCapture(port=port)

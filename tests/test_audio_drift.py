@@ -230,16 +230,25 @@ def stream(*pairs):
     return b''.join(FRAME % p for p in pairs)
 
 
-def make_calibratable(level_ms=300.0, aq_ms=65.0, measured=(38.0, 60.0), trim=0.0):
+def make_calibratable(level_ms=300.0, aq_ms=65.0, ustreamer_ms=38.0, fps=60.0,
+                      display=('opt', 'Optoma UHD', 72, 0), offsets=None, legacy=None):
     a = make_audio(level_ms=level_ms)
     a.SYNC_HEADROOM_MS = 200.0
-    a.sync_trim_ms = trim
     a.SYNC_AUTO = True
     a.CALIBRATE_INTERVAL_S = 300.0
-    a.CALIBRATE_HYSTERESIS_MS = 30.0
     a._calibrate_at = 0.0
     a._last_calibration = None
-    a.video_latency_fn = (lambda: measured)
+    a.sync_offsets = dict(offsets or {})
+    a.legacy_trim_ms = legacy
+    a.saved = []
+    a.on_sync_settings = a.saved.append
+    a._display_id = 'unknown'
+    a._display_name = 'unknown'
+    a._calibrated_once = False
+    a._smoother = av_sync.DelaySmoother(band=40.0)
+    a.m = {'ustreamer_ms': ustreamer_ms, 'source_fps': fps, 'display_id': display[0],
+           'display_name': display[1], 'display_video_ms': display[2], 'display_audio_ms': display[3]}
+    a.video_latency_fn = lambda: a.m
     sq = a._q
     aq = MagicMock()
     aq_state = {'level': aq_ms * 1e6, 'max': 100_000_000}
@@ -256,6 +265,24 @@ def make_calibratable(level_ms=300.0, aq_ms=65.0, measured=(38.0, 60.0), trim=0.
     return a
 
 
+# The real Optoma UHD EDID read on minus 2026-10-18 (HDMI VSDB: video 72 ms, audio 0 ms).
+OPTOMA_VSDB = bytes.fromhex('72030c002000b83ce025013701808001020304')
+
+
+def edid_with(vsdb=OPTOMA_VSDB, name=b'Optoma UHD'):
+    base = bytearray(128)
+    base[0:8] = b'\x00\xff\xff\xff\xff\xff\xff\x00'
+    base[8:16] = bytes.fromhex('3e8d7c0004000000')
+    base[54:57] = b'\x00\x00\x00'
+    base[57] = 0xFC
+    base[59:59 + 13] = (name + b'\n').ljust(13, b' ')
+    ext = bytearray(128)
+    ext[0], ext[1] = 0x02, 0x03
+    ext[4:4 + len(vsdb)] = vsdb
+    ext[2] = 4 + len(vsdb)
+    return bytes(base + ext)
+
+
 class TestAvSyncMath(unittest.TestCase):
     def test_parses_grab_to_send_per_frame(self):
         lat = av_sync.frame_latencies_ms(stream((100.000, 100.038), (100.016, 100.050)))
@@ -265,68 +292,146 @@ class TestAvSyncMath(unittest.TestCase):
         data = stream((1.0, 1.04)) + b'--boundarydonotcross\r\nX-UStreamer-Grab-Time: 2.0\r\n'
         self.assertEqual(len(av_sync.frame_latencies_ms(data)), 1)
 
-    def test_measured_case_from_minus_needs_no_delay(self):
-        video = av_sync.video_latency_ms(38.0, 60.0)
-        self.assertAlmostEqual(video, 82.7, places=1)
-        self.assertEqual(av_sync.target_delay_ms(video, 65.0), 0.0)
-
-    def test_slow_video_gets_matching_delay(self):
-        # The April pipeline: ~110 ms in ustreamer and a 300 ms-ish total.
-        video = av_sync.video_latency_ms(250.0, 30.0)
-        self.assertAlmostEqual(av_sync.target_delay_ms(video, 0.0), video - av_sync.AUDIO_PATH_MS, places=0)
-
-    def test_trim_shifts_and_is_clamped(self):
-        self.assertEqual(av_sync.target_delay_ms(200.0, 0.0, 40.0), 185.0)
+    def test_trim_is_clamped(self):
         self.assertEqual(av_sync.clamp_trim(9999), av_sync.TRIM_LIMIT_MS)
         self.assertEqual(av_sync.clamp_trim('junk'), 0.0)
 
+    def test_display_audio_latency_is_subtracted(self):
+        self.assertEqual(av_sync.target_delay_ms(300.0, 0.0, 0.0, display_audio_ms=50.0),
+                         300.0 - 50.0 - av_sync.AUDIO_PATH_MS)
+
+
+class TestEdid(unittest.TestCase):
+    def test_reads_the_optoma_on_minus(self):
+        info = av_sync.parse_edid(edid_with())
+        self.assertEqual(info['name'], 'Optoma UHD')
+        self.assertEqual((info['video_ms'], info['audio_ms']), (72, 0))
+        self.assertEqual(info['id'], '3e8d7c0004000000')
+
+    def test_display_without_latency_fields(self):
+        vsdb = bytearray(OPTOMA_VSDB)
+        vsdb[8] &= 0x7F                    # Latency_Fields_Present off
+        info = av_sync.parse_edid(edid_with(bytes(vsdb)))
+        self.assertEqual((info['video_ms'], info['audio_ms']), (None, None))
+
+    def test_garbage(self):
+        self.assertIsNone(av_sync.parse_edid(b''))
+        self.assertIsNone(av_sync.parse_edid(b'\x00' * 10))
+
+    def test_connected_display_from_sysfs(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            for name, status, edid in (('card0-HDMI-A-1', 'disconnected', b''),
+                                       ('card0-HDMI-A-2', 'connected', edid_with())):
+                os.makedirs(os.path.join(d, name))
+                Path(d, name, 'status').write_text(status + '\n')
+                Path(d, name, 'edid').write_bytes(edid)
+            self.assertEqual(av_sync.connected_display(d)['video_ms'], 72)
+
+
+class TestSmoother(unittest.TestCase):
+    def test_small_moves_are_ignored(self):
+        s = av_sync.DelaySmoother(40)
+        self.assertIsNone(s.propose(330, 300))
+
+    def test_a_big_move_needs_two_agreeing_readings(self):
+        s = av_sync.DelaySmoother(40)
+        self.assertIsNone(s.propose(200, 300))
+        self.assertEqual(s.propose(220, 300), 210.0)
+
+    def test_one_outlier_never_moves_it(self):
+        s = av_sync.DelaySmoother(40)
+        self.assertIsNone(s.propose(150, 300))     # outlier
+        self.assertIsNone(s.propose(310, 300))     # back to normal: pending dropped
+        self.assertIsNone(s.propose(150, 300))
+        self.assertIsNone(s.propose(260, 300))     # disagrees with the last one
+
+    def test_force_applies_at_once(self):
+        self.assertEqual(av_sync.DelaySmoother(40).propose(120, 300, force=True), 120)
+
 
 class TestLiveDelay(unittest.TestCase):
-    def test_calibration_lowers_the_delay_and_drains_the_backlog(self):
-        a = make_calibratable(level_ms=300.0)
-        r = a.calibrate_sync('test')
-        self.assertTrue(r['success'])
+    def test_first_calibration_applies_and_includes_the_display(self):
+        a = make_calibratable(level_ms=300.0, aq_ms=0.0, offsets={'opt': 0.0})
+        a.calibrate_sync('test')
+        # 16.7 + 38 + 28 (box) + 72 (Optoma) - 55 = 99.7
+        self.assertAlmostEqual(a.SYNC_BASELINE_MS, 99.7, places=1)
+        self.assertEqual(a.get_sync_info()['display'], 'Optoma UHD')
+
+    def test_old_global_trim_migrates_without_moving_the_delay(self):
+        """10-18: the owner set the old trim to 325 by ear; after the update
+        the delay must come out the same."""
+        before = av_sync.target_delay_ms(av_sync.video_latency_ms(38.0, 60.0), 0.0, 325.0)
+        a = make_calibratable(level_ms=300.0, aq_ms=0.0, legacy=325.0)
+        a.calibrate_sync('test')
+        self.assertAlmostEqual(a.SYNC_BASELINE_MS, before, places=1)
+        self.assertEqual(a.sync_offsets['opt'], 325.0 - 72)
+        self.assertIsNone(a.legacy_trim_ms)
+        self.assertEqual(a.saved[-1]['av_sync_offsets'], {'opt': 253.0})
+
+    def test_later_noise_does_not_move_it(self):
+        a = make_calibratable(level_ms=0.0, aq_ms=0.0, offsets={'opt': 253.0})
+        a.calibrate_sync('start')
+        settled = a.SYNC_BASELINE_MS
+        for us in (75.0, 20.0, 60.0):          # ustreamer reads that jump around
+            a.m['ustreamer_ms'] = us
+            a.calibrate_sync('periodic')
+        self.assertEqual(a.SYNC_BASELINE_MS, settled)
+
+    def test_a_real_change_is_followed_after_two_readings(self):
+        a = make_calibratable(level_ms=0.0, aq_ms=0.0, offsets={'opt': 0.0})
+        a.calibrate_sync('start')
+        start = a.SYNC_BASELINE_MS
+        a.m['ustreamer_ms'] = 138.0            # e.g. a slower capture path: +100 ms
+        a.calibrate_sync('periodic')
+        self.assertEqual(a.SYNC_BASELINE_MS, start)
+        a.calibrate_sync('periodic')
+        self.assertAlmostEqual(a.SYNC_BASELINE_MS, start + 100.0, places=0)
+
+    def test_each_display_keeps_its_own_offset(self):
+        a = make_calibratable(level_ms=0.0, aq_ms=0.0, offsets={'opt': 253.0, 'tv': -20.0})
+        a.calibrate_sync('start')
+        projector = a.SYNC_BASELINE_MS
+        a.m.update(display_id='tv', display_name='Living room TV', display_video_ms=20, display_audio_ms=0)
+        a.calibrate_sync('periodic')          # a new display applies at once
+        self.assertAlmostEqual(projector - a.SYNC_BASELINE_MS, (253 + 72) - (-20 + 20), places=0)
+
+    def test_trim_sets_this_displays_offset_at_once(self):
+        a = make_calibratable(level_ms=0.0, aq_ms=0.0, offsets={'opt': 0.0})
+        a.calibrate_sync('start')
+        base = a.SYNC_BASELINE_MS
+        info = a.set_sync_trim(20)
+        self.assertEqual(info['trim_ms'], 20)
+        self.assertAlmostEqual(a.SYNC_BASELINE_MS, base + 20, places=1)
+        self.assertEqual(a.sync_offsets, {'opt': 20.0})
+
+    def test_lowering_drains_but_never_to_unlimited(self):
+        a = make_calibratable(level_ms=300.0, aq_ms=65.0, display=('x', 'TV', None, None), offsets={'x': 0.0})
+        a.calibrate_sync('start')
         self.assertEqual(a.SYNC_BASELINE_MS, 0.0)
-        self.assertEqual(a.SYNC_MAX_MS, 200.0)
         a._q.set_property.assert_any_call('min-threshold-time', 0)
-        # the 300 ms already queued was dropped (to the 5 ms floor, never to
-        # max-size-time=0, which GStreamer reads as UNLIMITED)
-        self.assertLessEqual(a._qstate['level'], 5e6)
-        # audio was still late with no delay: audioqueue's backlog trimmed too
+        self.assertLessEqual(a._qstate['level'], 5e6)       # 5 ms floor, not max-size-time=0
         self.assertLess(a._aq_state['level'], 65e6)
         self.assertEqual(a._aq_state['max'], 100_000_000, 'audioqueue size restored')
 
-    def test_small_change_is_left_alone(self):
-        a = make_calibratable(level_ms=300.0, measured=(300.0, 60.0), aq_ms=0.0)
-        # video = 16.7 + 300 + 28 = 344.7; target = 289.7 -> within 30 ms of 300
-        a.calibrate_sync('test')
-        self.assertEqual(a.SYNC_BASELINE_MS, 300.0)
-
     def test_raising_the_delay_does_not_drain(self):
-        a = make_calibratable(level_ms=0.0, measured=(400.0, 60.0), aq_ms=0.0)
+        a = make_calibratable(level_ms=0.0, aq_ms=0.0, ustreamer_ms=400.0, offsets={'opt': 0.0})
         a.SYNC_BASELINE_MS = 0.0
-        a.calibrate_sync('test')
+        a.calibrate_sync('start')
         self.assertGreater(a.SYNC_BASELINE_MS, 300.0)
         self.assertNotIn(unittest.mock.call('leaky', 2), a._q.set_property.call_args_list)
 
     def test_no_measurement_keeps_the_delay(self):
-        a = make_calibratable(measured=None)
+        a = make_calibratable()
+        a.video_latency_fn = lambda: None
         self.assertFalse(a.calibrate_sync('test')['success'])
         self.assertEqual(a.SYNC_BASELINE_MS, 300.0)
 
     def test_watchdog_calibrates_when_due_and_reschedules(self):
-        a = make_calibratable(level_ms=300.0)
+        a = make_calibratable(level_ms=300.0, offsets={'opt': 0.0})
         a._check_av_drift()
-        self.assertEqual(a.SYNC_BASELINE_MS, 0.0)
+        self.assertTrue(a._calibrated_once)
         self.assertGreater(a._calibrate_at, time.time() + 200)
-
-    def test_trim_recalibrates(self):
-        a = make_calibratable(level_ms=0.0, aq_ms=0.0)
-        a.SYNC_BASELINE_MS = 0.0
-        info = a.set_sync_trim(120)
-        self.assertEqual(info['trim_ms'], 120)
-        # 82.7 - 55 + 120 = 147.7
-        self.assertAlmostEqual(a.SYNC_BASELINE_MS, 147.7, places=1)
 
     def test_pipeline_string_uses_the_current_delay(self):
         src = (Path(__file__).resolve().parent.parent / 'src' / 'audio.py').read_text()

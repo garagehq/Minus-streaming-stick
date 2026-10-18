@@ -215,11 +215,18 @@ class AudioPassthrough:
         # SYNC_HEADROOM_MS) to match, live. 300 is only the value used until
         # the first measurement. See av_sync.py for why.
         self.SYNC_HEADROOM_MS = 200.0
-        self.sync_trim_ms = 0.0          # owner's trim (Settings), + = later audio
-        self.video_latency_fn = None     # -> (ustreamer_ms, source_fps) or None
+        # Learned offset per display (EDID id), + = later audio. Owner's -/+.
+        self.sync_offsets = {}
+        self.legacy_trim_ms = None       # pre-per-display trim, migrated once
+        self.on_sync_settings = None     # callback(dict) to persist offsets + delay
+        self._display_id = 'unknown'
+        self._display_name = 'unknown'
+        self._calibrated_once = False
+        import av_sync
+        self._smoother = av_sync.DelaySmoother(band=40.0)
+        self.video_latency_fn = None     # -> dict (see Minus._measure_video_latency) or None
         self.SYNC_AUTO = os.environ.get('MINUS_AV_AUTO', '1') != '0'
         self.CALIBRATE_INTERVAL_S = float(os.environ.get('MINUS_AV_CALIBRATE_S', '300'))
-        self.CALIBRATE_HYSTERESIS_MS = 30.0
         self._calibrate_at = time.time() + 15.0
         self._last_calibration = None    # dict, for /api/audio/sync
         # NOTE the reachable drift range is 0..(SYNC_MAX - baseline) = 0..200ms:
@@ -1446,41 +1453,74 @@ class AudioPassthrough:
         """Re-measure soon, e.g. after ustreamer restarted with a new rate."""
         self._calibrate_at = min(self._calibrate_at, time.time() + delay_s)
 
-    def calibrate_sync(self, reason: str = 'manual') -> dict:
-        """Measure the video latency and set the audio delay to match it."""
+    def calibrate_sync(self, reason: str = 'manual', force: bool = False) -> dict:
+        """Measure the video latency and set the audio delay to match it.
+
+        delay = box video (measured) + display video (EDID) - display audio
+        (EDID) - box audio (measured) + the learned offset for this display.
+        See av_sync.py.
+        """
         import av_sync
         if not self.video_latency_fn:
             return {'success': False, 'error': 'no video latency source'}
         try:
-            measured = self.video_latency_fn()
+            m = self.video_latency_fn()
         except Exception as e:
-            measured = None
+            m = None
             logger.debug(f"[AudioPassthrough] video latency measurement failed: {e}")
-        if not measured or measured[0] is None:
+        if not m or m.get('ustreamer_ms') is None:
             return {'success': False, 'error': 'video latency not measurable (ustreamer down?)'}
-        ustreamer_ms, source_fps = measured
-        video_ms = av_sync.video_latency_ms(ustreamer_ms, source_fps)
+        disp_v = m.get('display_video_ms') or 0.0
+        disp_a = m.get('display_audio_ms') or 0.0
+        display = m.get('display_id') or 'unknown'
+        if display != self._display_id:
+            self._display_id = display
+            self._display_name = m.get('display_name') or display
+            force = True                       # a different display: no stale smoothing
+        offset = self.sync_offsets.get(display)
+        if offset is None:
+            offset = 0.0
+            if self.legacy_trim_ms is not None:
+                # Carry the owner's old global trim over so the delay stays
+                # where they set it by ear (the EDID part is now counted
+                # separately, so it comes out of the trim).
+                offset = av_sync.clamp_trim(self.legacy_trim_ms - disp_v + disp_a)
+                self.legacy_trim_ms = None
+            self.sync_offsets[display] = offset
+            self._sync_settings_changed()
+        box_video = av_sync.video_latency_ms(m['ustreamer_ms'], m.get('source_fps') or 60.0)
+        video_ms = box_video + disp_v
         aq = self._queue_level_ms('audioqueue') or 0.0
-        target = av_sync.target_delay_ms(video_ms, aq, self.sync_trim_ms)
+        target = av_sync.target_delay_ms(video_ms, aq, offset, display_audio_ms=disp_a)
         # Audio would still be late with no delay at all: drop audioqueue's
         # standing backlog too (it adds its level to every sample).
-        overshoot = (av_sync.AUDIO_PATH_MS + aq) - (video_ms + av_sync.clamp_trim(self.sync_trim_ms))
+        overshoot = (av_sync.AUDIO_PATH_MS + aq + disp_a) - (video_ms + offset)
         drained = None
         if target == 0.0 and overshoot > 15.0 and aq > 15.0:
             drained = self._drain_queue('audioqueue', max(0.0, aq - overshoot))
-        changed = abs(target - self.SYNC_BASELINE_MS) >= self.CALIBRATE_HYSTERESIS_MS
-        if changed:
-            self.set_sync_delay(target, reason=f"calibration ({reason})")
+        if not self._calibrated_once:
+            force = True                       # first calibration since start
+        value = self._smoother.propose(target, self.SYNC_BASELINE_MS, force=force)
+        if value is not None and abs(value - self.SYNC_BASELINE_MS) >= 1.0:
+            self.set_sync_delay(value, reason=f"calibration ({reason})")
+            self._sync_settings_changed()
+        self._calibrated_once = True
         self._last_calibration = {
             'at': time.time(), 'reason': reason,
-            'ustreamer_ms': round(ustreamer_ms, 1), 'source_fps': source_fps,
+            'ustreamer_ms': round(m['ustreamer_ms'], 1), 'source_fps': m.get('source_fps'),
+            'box_video_ms': round(box_video, 1),
+            'display': self._display_name, 'display_video_ms': disp_v, 'display_audio_ms': disp_a,
             'video_latency_ms': round(video_ms, 1), 'audioqueue_ms': round(aq, 1),
-            'target_delay_ms': target, 'applied': changed, 'audioqueue_drained_to_ms': drained,
+            'offset_ms': offset, 'target_delay_ms': target,
+            'applied_ms': value, 'pending_ms': self._smoother.pending,
+            'audioqueue_drained_to_ms': drained,
         }
-        logger.info(f"[AudioPassthrough] A/V calibration ({reason}): video {video_ms:.0f}ms "
-                    f"(ustreamer {ustreamer_ms:.0f}ms @ {source_fps}fps), audioqueue {aq:.0f}ms, "
-                    f"trim {self.sync_trim_ms:+.0f}ms -> delay {target:.0f}ms"
-                    + ("" if changed else f" (kept {self.SYNC_BASELINE_MS:.0f}ms)")
+        logger.info(f"[AudioPassthrough] A/V calibration ({reason}): box video {box_video:.0f}ms "
+                    f"(ustreamer {m['ustreamer_ms']:.0f}ms) + {self._display_name} {disp_v:.0f}ms"
+                    f" - display audio {disp_a:.0f}ms, audioqueue {aq:.0f}ms, offset {offset:+.0f}ms "
+                    f"-> target {target:.0f}ms, delay {self.SYNC_BASELINE_MS:.0f}ms"
+                    + ("" if value is not None else
+                       ("" if self._smoother.pending is None else " (waiting for a second reading)"))
                     + ("" if drained is None else f", audioqueue drained to {drained:.0f}ms"))
         return {'success': True, **self._last_calibration}
 
@@ -1508,20 +1548,37 @@ class AudioPassthrough:
         logger.info(f"[AudioPassthrough] A/V delay {old:.0f}ms -> {delay_ms:.0f}ms ({reason})")
         return {'success': True, 'delay_ms': delay_ms, 'previous_ms': old}
 
+    @property
+    def sync_trim_ms(self) -> float:
+        """The learned offset for the display that is connected now."""
+        return float(self.sync_offsets.get(self._display_id, 0.0) or 0.0)
+
     def set_sync_trim(self, trim_ms: float) -> dict:
+        """Owner's -/+: the offset for THIS display. Applied at once."""
         import av_sync
-        self.sync_trim_ms = av_sync.clamp_trim(trim_ms)
-        result = self.calibrate_sync('trim')
+        self.sync_offsets[self._display_id] = av_sync.clamp_trim(trim_ms)
+        self.legacy_trim_ms = None
+        self._sync_settings_changed()
+        result = self.calibrate_sync('trim', force=True)
         if not result.get('success'):
-            # No measurement available: apply the trim to the current delay.
             self.set_sync_delay(self.SYNC_BASELINE_MS, reason='trim')
         return self.get_sync_info()
+
+    def _sync_settings_changed(self):
+        cb = getattr(self, 'on_sync_settings', None)
+        if cb:
+            try:
+                cb({'av_sync_offsets': dict(self.sync_offsets),
+                    'av_sync_last_delay_ms': self.SYNC_BASELINE_MS})
+            except Exception as e:
+                logger.debug(f"[AudioPassthrough] saving A/V settings failed: {e}")
 
     def get_sync_info(self) -> dict:
         return {
             'success': True,
             'delay_ms': self.SYNC_BASELINE_MS,
             'trim_ms': self.sync_trim_ms,
+            'display': self._display_name,
             'auto': self.SYNC_AUTO,
             'last_calibration': self._last_calibration,
             **self.get_sync_levels(),

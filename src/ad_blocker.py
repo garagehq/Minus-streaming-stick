@@ -2223,6 +2223,33 @@ class DRMAdBlocker:
     def is_test_mode_active(self) -> bool:
         return self._test_blocking_until > time.time()
 
+    BLOCK_VERIFY_INTERVAL_S = 2.0
+
+    def _ustreamer_lost_block(self, now=None) -> bool:
+        """True when ustreamer answers that blocking is off. Rate-limited.
+
+        Unreachable ustreamer = unknown = False (nothing to re-apply to yet;
+        the next call after it is back will see blocking off and say so).
+        """
+        now = time.time() if now is None else now
+        if now - getattr(self, '_block_verified_at', 0.0) < self.BLOCK_VERIFY_INTERVAL_S:
+            return False
+        self._block_verified_at = now
+        state = self._blocking_api_call('/blocking', timeout=0.3)
+        if not state or not isinstance(state.get('result'), dict):
+            return False
+        return state['result'].get('enabled') is False
+
+    def reapply_block_if_lost(self):
+        """Called after ustreamer (re)starts: if a block is up, put it back."""
+        with self._lock:
+            if not self.is_visible or self.current_source in ('loading', 'no_hdmi_device'):
+                return False
+            source = self.current_source or 'default'
+            self._block_verified_at = 0.0
+        self.show(source)
+        return True
+
     def show(self, source='default', ocr_trigger_text=''):
         with self._lock:
             # Note: We still enable ustreamer blocking even without display pipeline
@@ -2237,6 +2264,19 @@ class DRMAdBlocker:
             new_snippet = self._format_ocr_trigger(ocr_trigger_text, source)
             if new_snippet or source in ('vlm', 'vlm+asr'):
                 self._ocr_trigger_text = new_snippet
+
+            if (self.is_visible and self._animation_direction != 'end'
+                    and self.current_source not in ('loading', 'no_hdmi_device')
+                    and self._ustreamer_lost_block()):
+                # ustreamer restarted under a block (thermal capture switch,
+                # crash recovery, signal change) and the new one starts with
+                # blocking OFF: Minus kept believing it was blocking while the
+                # ad played on screen (minus, 2026-10-18). Start the block
+                # again from scratch on the new ustreamer.
+                logger.warning(f"[DRMAdBlocker] ustreamer is not blocking although a block is up "
+                               f"(it restarted?) - re-applying the block ({source})")
+                self.is_visible = False
+                self._stop_animation_thread()
 
             if self.is_visible and self._animation_direction != 'end':
                 if self.current_source != source:

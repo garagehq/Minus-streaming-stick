@@ -313,6 +313,14 @@ Get audio passthrough status.
 }
 ```
 
+### GET/POST /api/audio/sync
+
+Lip-sync state: `delay_ms` (current audio delay), `trim_ms` (learned offset for
+the connected display), `display`, and `last_calibration` (box video latency,
+display EDID latencies, target, pending reading). POST `{"trim_ms": n}` sets the
+offset for the connected display (+ = sound later) and applies it live;
+POST `{}` re-measures.
+
 ### POST /api/audio/sync-reset
 
 Reset audio/video sync (causes ~300ms audio dropout).
