@@ -695,30 +695,21 @@ class TestHDMIReconnectGrace(unittest.TestCase):
 
 
 class TestVocabularyExtended(unittest.TestCase):
-    """Extended vocabulary supplies dual example sentences."""
+    """Every entry carries several example sentences (2026-10-18 rebuild:
+    one list, variable example count, two shown at random)."""
 
-    def test_combined_list_is_larger_than_base(self):
-        from vocabulary import (
-            SPANISH_VOCABULARY,
-            SPANISH_VOCABULARY_EXTENDED,
-            VOCABULARY_COMBINED,
-        )
-        self.assertEqual(
-            len(VOCABULARY_COMBINED),
-            len(SPANISH_VOCABULARY) + len(SPANISH_VOCABULARY_EXTENDED))
-        self.assertGreater(len(SPANISH_VOCABULARY_EXTENDED), 150)
+    def test_combined_list_is_the_full_list(self):
+        from vocabulary import SPANISH_VOCABULARY, VOCABULARY_COMBINED
+        self.assertIs(VOCABULARY_COMBINED, SPANISH_VOCABULARY)
+        self.assertGreater(len(VOCABULARY_COMBINED), 1200)
 
-    def test_extended_entries_are_5_tuples(self):
-        from vocabulary import SPANISH_VOCABULARY_EXTENDED
-        for entry in SPANISH_VOCABULARY_EXTENDED:
-            self.assertEqual(
-                len(entry), 5,
-                f"extended entry must be 5-tuple: {entry[:1]}")
-            for field in entry:
+    def test_entries_have_examples(self):
+        from vocabulary import SPANISH_VOCABULARY
+        for entry in SPANISH_VOCABULARY:
+            self.assertEqual(len(entry), 4)
+            for field in entry[:3] + tuple(entry[3]):
                 self.assertIsInstance(field, str)
-                self.assertTrue(
-                    field.strip(),
-                    f"empty field in extended entry {entry[:1]}")
+                self.assertTrue(field.strip(), f"empty field in {entry[:1]}")
 
 
 class TestOptimizationSettingsAPI(unittest.TestCase):

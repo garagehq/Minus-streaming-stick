@@ -38,6 +38,7 @@ from gi.repository import Gst
 
 # Import vocabulary from extracted module
 from vocabulary import SPANISH_VOCABULARY, VOCABULARY_COMBINED
+from vocab_picker import VocabBag, pick_examples, latin1_safe
 from facts import DID_YOU_KNOW
 from config import MinusConfig
 from drm import (
@@ -307,7 +308,10 @@ class DRMAdBlocker:
         try:
             url = f"http://localhost:{self.ustreamer_port}{endpoint}"
             if params:
-                url += '?' + urllib.parse.urlencode(params)
+                # Latin-1, not UTF-8: ustreamer draws one byte per glyph, so
+                # this is what makes accents and ñ render (vocab_picker.py).
+                params = {k: latin1_safe(v) for k, v in params.items()}
+                url += '?' + urllib.parse.urlencode(params, encoding='latin-1')
 
             if method == 'POST' and data:
                 req = urllib.request.Request(url, data=data, method='POST')
@@ -1597,12 +1601,15 @@ class DRMAdBlocker:
                 f"re-rolled locked kind {locked} -> {self._locked_content_kind}")
 
     def _render_vocab(self, header):
-        vocab = random.choice(VOCABULARY_COMBINED)
-        self._current_vocab = vocab
-        # 4-tuple -> single example; 5-tuple -> two examples on own lines
-        spanish, pronunciation, english = vocab[0], vocab[1], vocab[2]
-        examples = [ex for ex in vocab[3:] if ex]
-        example_block = "\n".join(f'"{ex}"' for ex in examples)
+        # Every word once before any repeats (persisted), and two of its
+        # examples at random each time -- see vocab_picker.py.
+        bag = getattr(self, '_vocab_bag', None)
+        if not isinstance(bag, VocabBag):
+            bag = self._vocab_bag = VocabBag(VOCABULARY_COMBINED)
+        spanish, pronunciation, english, examples = bag.next()
+        shown = pick_examples(examples)
+        self._current_vocab = (spanish, pronunciation, english, shown)
+        example_block = "\n".join(f'"{ex}"' for ex in shown)
         prefix = f"{header}\n\n" if header else ""
         return f"{prefix}{spanish}\n({pronunciation})\n\n= {english}\n\n{example_block}"
 
@@ -2199,16 +2206,13 @@ class DRMAdBlocker:
     def get_current_vocabulary(self) -> dict:
         """Get the current vocabulary word being displayed."""
         if self._current_vocab and self.is_visible:
-            # VOCABULARY_COMBINED mixes 4-tuples (SPANISH_VOCABULARY) and
-            # 5-tuples (SPANISH_VOCABULARY_EXTENDED, which carries a 2nd
-            # example). Take the first 4 fields so a 5-tuple doesn't raise
-            # "too many values to unpack".
-            spanish, pronunciation, english, example = self._current_vocab[:4]
+            spanish, pronunciation, english, shown = self._current_vocab
             return {
                 'word': spanish,
                 'pronunciation': pronunciation,
                 'translation': english,
-                'example': example,
+                'example': shown[0] if shown else None,
+                'examples': list(shown),
             }
         return {'word': None, 'pronunciation': None, 'translation': None, 'example': None}
 

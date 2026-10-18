@@ -56,20 +56,21 @@ class TestVocabulary:
         assert len(SPANISH_VOCABULARY) >= 500
 
     def test_vocabulary_tuple_format(self):
-        """Test that each vocabulary entry is a 4-tuple."""
+        """Each entry is (spanish, pronunciation, english, (examples...))."""
         from vocabulary import SPANISH_VOCABULARY
         for entry in SPANISH_VOCABULARY:
             assert isinstance(entry, tuple), f"Entry is not a tuple: {entry}"
             assert len(entry) == 4, f"Entry doesn't have 4 elements: {entry}"
+            assert isinstance(entry[3], tuple) and entry[3], f"No examples: {entry[0]}"
 
     def test_vocabulary_tuple_contents(self):
         """Test that each tuple contains strings."""
         from vocabulary import SPANISH_VOCABULARY
-        for spanish, pronunciation, english, example in SPANISH_VOCABULARY[:10]:
+        for spanish, pronunciation, english, examples in SPANISH_VOCABULARY[:10]:
             assert isinstance(spanish, str), f"Spanish word is not string: {spanish}"
             assert isinstance(pronunciation, str), f"Pronunciation is not string: {pronunciation}"
             assert isinstance(english, str), f"English is not string: {english}"
-            assert isinstance(example, str), f"Example is not string: {example}"
+            assert all(isinstance(x, str) for x in examples), f"Example is not string: {examples}"
             assert len(spanish) > 0, "Spanish word is empty"
             assert len(english) > 0, "English translation is empty"
 
