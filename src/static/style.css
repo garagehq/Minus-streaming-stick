@@ -3245,3 +3245,7 @@ input:checked + .toggle-slider:before {
 ul.consent-text { margin-left: 1.2rem; }
 #contribute-modal .modal-buttons { margin-top: 1.25rem; }
 [data-theme="light"] .consent-text { color: #222; }
+
+.av-trim { display: inline-flex; align-items: center; gap: 8px; }
+.av-trim .action-btn { min-width: 36px; padding: 4px 10px; }
+#av-trim-value { min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }

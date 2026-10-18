@@ -209,3 +209,126 @@ class TestWatchdogHook(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+# ---------------------------------------------------------------------------
+# Audio delay follows the measured video latency (av_sync.py).
+#
+# minus, 2026-10-18: the delay was a constant 300 ms calibrated in April for a
+# ustreamer that took ~110 ms; the July 60 fps change made video ~83 ms end to
+# end and the sound arrived ~300 ms after the picture.
+# ---------------------------------------------------------------------------
+import time  # noqa: E402
+import unittest.mock  # noqa: E402
+import av_sync  # noqa: E402
+
+FRAME = (b'--boundarydonotcross\r\nContent-Type: image/jpeg\r\n'
+         b'X-UStreamer-Grab-Time: %.6f\r\nX-UStreamer-Send-Time: %.6f\r\n\r\n' + b'\xff' * 64)
+
+
+def stream(*pairs):
+    return b''.join(FRAME % p for p in pairs)
+
+
+def make_calibratable(level_ms=300.0, aq_ms=65.0, measured=(38.0, 60.0), trim=0.0):
+    a = make_audio(level_ms=level_ms)
+    a.SYNC_HEADROOM_MS = 200.0
+    a.sync_trim_ms = trim
+    a.SYNC_AUTO = True
+    a.CALIBRATE_INTERVAL_S = 300.0
+    a.CALIBRATE_HYSTERESIS_MS = 30.0
+    a._calibrate_at = 0.0
+    a._last_calibration = None
+    a.video_latency_fn = (lambda: measured)
+    sq = a._q
+    aq = MagicMock()
+    aq_state = {'level': aq_ms * 1e6, 'max': 100_000_000}
+    aq.get_property.side_effect = lambda n: {'current-level-time': aq_state['level'],
+                                             'max-size-time': aq_state['max']}[n]
+
+    def aq_set(n, v):
+        if n == 'max-size-time':
+            aq_state['max'] = v
+            aq_state['level'] = min(aq_state['level'], v)   # leaky downstream
+    aq.set_property.side_effect = aq_set
+    a.pipeline.get_by_name.side_effect = lambda n: {'syncqueue': sq, 'audioqueue': aq}.get(n)
+    a._aq_state = aq_state
+    return a
+
+
+class TestAvSyncMath(unittest.TestCase):
+    def test_parses_grab_to_send_per_frame(self):
+        lat = av_sync.frame_latencies_ms(stream((100.000, 100.038), (100.016, 100.050)))
+        self.assertEqual([round(x) for x in lat], [38, 34])
+
+    def test_a_frame_without_both_times_is_skipped(self):
+        data = stream((1.0, 1.04)) + b'--boundarydonotcross\r\nX-UStreamer-Grab-Time: 2.0\r\n'
+        self.assertEqual(len(av_sync.frame_latencies_ms(data)), 1)
+
+    def test_measured_case_from_minus_needs_no_delay(self):
+        video = av_sync.video_latency_ms(38.0, 60.0)
+        self.assertAlmostEqual(video, 82.7, places=1)
+        self.assertEqual(av_sync.target_delay_ms(video, 65.0), 0.0)
+
+    def test_slow_video_gets_matching_delay(self):
+        # The April pipeline: ~110 ms in ustreamer and a 300 ms-ish total.
+        video = av_sync.video_latency_ms(250.0, 30.0)
+        self.assertAlmostEqual(av_sync.target_delay_ms(video, 0.0), video - av_sync.AUDIO_PATH_MS, places=0)
+
+    def test_trim_shifts_and_is_clamped(self):
+        self.assertEqual(av_sync.target_delay_ms(200.0, 0.0, 40.0), 185.0)
+        self.assertEqual(av_sync.clamp_trim(9999), av_sync.TRIM_LIMIT_MS)
+        self.assertEqual(av_sync.clamp_trim('junk'), 0.0)
+
+
+class TestLiveDelay(unittest.TestCase):
+    def test_calibration_lowers_the_delay_and_drains_the_backlog(self):
+        a = make_calibratable(level_ms=300.0)
+        r = a.calibrate_sync('test')
+        self.assertTrue(r['success'])
+        self.assertEqual(a.SYNC_BASELINE_MS, 0.0)
+        self.assertEqual(a.SYNC_MAX_MS, 200.0)
+        a._q.set_property.assert_any_call('min-threshold-time', 0)
+        # the 300 ms already queued was dropped (to the 5 ms floor, never to
+        # max-size-time=0, which GStreamer reads as UNLIMITED)
+        self.assertLessEqual(a._qstate['level'], 5e6)
+        # audio was still late with no delay: audioqueue's backlog trimmed too
+        self.assertLess(a._aq_state['level'], 65e6)
+        self.assertEqual(a._aq_state['max'], 100_000_000, 'audioqueue size restored')
+
+    def test_small_change_is_left_alone(self):
+        a = make_calibratable(level_ms=300.0, measured=(300.0, 60.0), aq_ms=0.0)
+        # video = 16.7 + 300 + 28 = 344.7; target = 289.7 -> within 30 ms of 300
+        a.calibrate_sync('test')
+        self.assertEqual(a.SYNC_BASELINE_MS, 300.0)
+
+    def test_raising_the_delay_does_not_drain(self):
+        a = make_calibratable(level_ms=0.0, measured=(400.0, 60.0), aq_ms=0.0)
+        a.SYNC_BASELINE_MS = 0.0
+        a.calibrate_sync('test')
+        self.assertGreater(a.SYNC_BASELINE_MS, 300.0)
+        self.assertNotIn(unittest.mock.call('leaky', 2), a._q.set_property.call_args_list)
+
+    def test_no_measurement_keeps_the_delay(self):
+        a = make_calibratable(measured=None)
+        self.assertFalse(a.calibrate_sync('test')['success'])
+        self.assertEqual(a.SYNC_BASELINE_MS, 300.0)
+
+    def test_watchdog_calibrates_when_due_and_reschedules(self):
+        a = make_calibratable(level_ms=300.0)
+        a._check_av_drift()
+        self.assertEqual(a.SYNC_BASELINE_MS, 0.0)
+        self.assertGreater(a._calibrate_at, time.time() + 200)
+
+    def test_trim_recalibrates(self):
+        a = make_calibratable(level_ms=0.0, aq_ms=0.0)
+        a.SYNC_BASELINE_MS = 0.0
+        info = a.set_sync_trim(120)
+        self.assertEqual(info['trim_ms'], 120)
+        # 82.7 - 55 + 120 = 147.7
+        self.assertAlmostEqual(a.SYNC_BASELINE_MS, 147.7, places=1)
+
+    def test_pipeline_string_uses_the_current_delay(self):
+        src = (Path(__file__).resolve().parent.parent / 'src' / 'audio.py').read_text()
+        self.assertIn('min-threshold-time={int(self.SYNC_BASELINE_MS * 1e6)}', src)
+        self.assertNotIn('min-threshold-time=300000000', src)

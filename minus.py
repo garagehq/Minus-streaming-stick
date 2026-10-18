@@ -1111,6 +1111,10 @@ class Minus:
                     playback_device=config.audio_playback_device,  # HDMI-TX audio (auto-detected)
                     asr_tap=self.asr_tap  # Optional; None disables the tap branch entirely
                 )
+                # Keep the audio delay matched to the measured video latency
+                # (av_sync.py), plus the owner's saved trim.
+                self.audio.video_latency_fn = self._measure_video_latency
+                self.audio.sync_trim_ms = float(self._system_settings.get('av_sync_trim_ms', 0) or 0)
                 # Link audio to ad_blocker for mute control
                 if self.ad_blocker:
                     self.ad_blocker.set_audio(self.audio)
@@ -1589,6 +1593,8 @@ class Minus:
 
             if self.ustreamer_process.poll() is None:
                 logger.info("[Recovery] ustreamer restarted successfully")
+                if getattr(self, 'audio', None):
+                    self.audio.request_calibration()   # its latency may have changed
                 # Also restart video pipeline to reconnect to new ustreamer
                 # (no display: the display retry loop starts it when one appears)
                 if self.ad_blocker and self.display_connected:
@@ -2908,6 +2914,33 @@ class Minus:
     # System Settings
     # =========================================================================
 
+    def _measure_video_latency(self):
+        """(ustreamer capture->send ms, source fps) for av_sync, or None."""
+        import av_sync
+        port = self.config.ustreamer_port
+        ms = av_sync.measure_ustreamer_ms(port)
+        if ms is None:
+            return None
+        fps = 60.0
+        try:
+            import json, urllib.request
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/state", timeout=2) as r:
+                src = json.load(r).get('result', {}).get('source', {})
+            fps = float(src.get('captured_fps') or fps)
+        except Exception:
+            pass
+        return ms, fps
+
+    def set_av_sync_trim(self, trim_ms) -> dict:
+        """Owner's A/V trim from Settings: + plays the sound later, - earlier."""
+        import av_sync
+        trim = av_sync.clamp_trim(trim_ms)
+        self._system_settings['av_sync_trim_ms'] = trim
+        self._save_system_settings()
+        if not getattr(self, 'audio', None):
+            return {'success': False, 'error': 'Audio not initialized', 'trim_ms': trim}
+        return self.audio.set_sync_trim(trim)
+
     def _load_system_settings(self) -> dict:
         """Load system settings from disk."""
         defaults = {
@@ -3472,6 +3505,8 @@ class Minus:
             return False
 
         logger.info(f"ustreamer started on port {port}")
+        if getattr(self, 'audio', None):
+            self.audio.request_calibration()   # its latency may have changed
 
         # Initialize frame capture
         self.frame_capture = UstreamerCapture(port=port)

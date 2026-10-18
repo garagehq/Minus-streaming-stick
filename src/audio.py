@@ -210,6 +210,18 @@ class AudioPassthrough:
         # regardless once lag is clearly perceptible.
         self.SYNC_BASELINE_MS = 300.0   # == syncqueue min-threshold-time
         self.SYNC_MAX_MS = 500.0        # == syncqueue max-size-time
+        # The baseline is no longer fixed: av_sync measures the video latency
+        # and set_sync_delay() moves the baseline (and max = baseline +
+        # SYNC_HEADROOM_MS) to match, live. 300 is only the value used until
+        # the first measurement. See av_sync.py for why.
+        self.SYNC_HEADROOM_MS = 200.0
+        self.sync_trim_ms = 0.0          # owner's trim (Settings), + = later audio
+        self.video_latency_fn = None     # -> (ustreamer_ms, source_fps) or None
+        self.SYNC_AUTO = os.environ.get('MINUS_AV_AUTO', '1') != '0'
+        self.CALIBRATE_INTERVAL_S = float(os.environ.get('MINUS_AV_CALIBRATE_S', '300'))
+        self.CALIBRATE_HYSTERESIS_MS = 30.0
+        self._calibrate_at = time.time() + 15.0
+        self._last_calibration = None    # dict, for /api/audio/sync
         # NOTE the reachable drift range is 0..(SYNC_MAX - baseline) = 0..200ms:
         # the queue cannot hold more than max-size-time, so at drift ~200ms it
         # saturates and alsasrc starts overrunning. Thresholds must sit inside
@@ -359,7 +371,7 @@ class AudioPassthrough:
                 sink = (f"alsasink device={self.playback_device} "
                         f"buffer-time=50000 latency-time=10000 sync=false")
             playback_chain = (
-                f"queue name=syncqueue min-threshold-time=300000000 max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! "
+                f"queue name=syncqueue min-threshold-time={int(self.SYNC_BASELINE_MS * 1e6)} max-size-time={int(self.SYNC_MAX_MS * 1e6)} max-size-buffers=0 max-size-bytes=0 ! "
                 f"queue max-size-buffers=10 max-size-time=100000000 leaky=downstream name=audioqueue ! "
                 f"audioconvert ! "
                 f"volume name=vol volume=1.0 mute=false ! "
@@ -1386,7 +1398,9 @@ class AudioPassthrough:
             return {'success': False, 'error': 'syncqueue not found'}
         before = self._queue_level_ms('syncqueue')
         try:
-            q.set_property('max-size-time', int(self.SYNC_BASELINE_MS * 1e6))
+            # max-size-time=0 means UNLIMITED in GStreamer, so a 0 ms
+            # baseline must drain to a small positive size instead.
+            q.set_property('max-size-time', int(max(self.SYNC_BASELINE_MS, 5.0) * 1e6))
             q.set_property('leaky', 2)  # GST_QUEUE_LEAK_DOWNSTREAM: drop oldest
             time.sleep(0.15)
         finally:
@@ -1412,6 +1426,9 @@ class AudioPassthrough:
             return
         if getattr(self, '_playback_fakesink', False):
             return  # no TV audio path; nothing to keep in sync
+        if getattr(self, 'SYNC_AUTO', False) and time.time() >= getattr(self, '_calibrate_at', float('inf')):
+            self._calibrate_at = time.time() + self.CALIBRATE_INTERVAL_S
+            self.calibrate_sync('periodic')
         level = self._queue_level_ms('syncqueue')
         if level is None:
             return
@@ -1424,6 +1441,105 @@ class AudioPassthrough:
                      f"over={self._drift_over_checks} -> {reason}")
         if reason:
             self.resync_av(reason)
+
+    def request_calibration(self, delay_s: float = 10.0):
+        """Re-measure soon, e.g. after ustreamer restarted with a new rate."""
+        self._calibrate_at = min(self._calibrate_at, time.time() + delay_s)
+
+    def calibrate_sync(self, reason: str = 'manual') -> dict:
+        """Measure the video latency and set the audio delay to match it."""
+        import av_sync
+        if not self.video_latency_fn:
+            return {'success': False, 'error': 'no video latency source'}
+        try:
+            measured = self.video_latency_fn()
+        except Exception as e:
+            measured = None
+            logger.debug(f"[AudioPassthrough] video latency measurement failed: {e}")
+        if not measured or measured[0] is None:
+            return {'success': False, 'error': 'video latency not measurable (ustreamer down?)'}
+        ustreamer_ms, source_fps = measured
+        video_ms = av_sync.video_latency_ms(ustreamer_ms, source_fps)
+        aq = self._queue_level_ms('audioqueue') or 0.0
+        target = av_sync.target_delay_ms(video_ms, aq, self.sync_trim_ms)
+        # Audio would still be late with no delay at all: drop audioqueue's
+        # standing backlog too (it adds its level to every sample).
+        overshoot = (av_sync.AUDIO_PATH_MS + aq) - (video_ms + av_sync.clamp_trim(self.sync_trim_ms))
+        drained = None
+        if target == 0.0 and overshoot > 15.0 and aq > 15.0:
+            drained = self._drain_queue('audioqueue', max(0.0, aq - overshoot))
+        changed = abs(target - self.SYNC_BASELINE_MS) >= self.CALIBRATE_HYSTERESIS_MS
+        if changed:
+            self.set_sync_delay(target, reason=f"calibration ({reason})")
+        self._last_calibration = {
+            'at': time.time(), 'reason': reason,
+            'ustreamer_ms': round(ustreamer_ms, 1), 'source_fps': source_fps,
+            'video_latency_ms': round(video_ms, 1), 'audioqueue_ms': round(aq, 1),
+            'target_delay_ms': target, 'applied': changed, 'audioqueue_drained_to_ms': drained,
+        }
+        logger.info(f"[AudioPassthrough] A/V calibration ({reason}): video {video_ms:.0f}ms "
+                    f"(ustreamer {ustreamer_ms:.0f}ms @ {source_fps}fps), audioqueue {aq:.0f}ms, "
+                    f"trim {self.sync_trim_ms:+.0f}ms -> delay {target:.0f}ms"
+                    + ("" if changed else f" (kept {self.SYNC_BASELINE_MS:.0f}ms)")
+                    + ("" if drained is None else f", audioqueue drained to {drained:.0f}ms"))
+        return {'success': True, **self._last_calibration}
+
+    def set_sync_delay(self, delay_ms: float, reason: str = 'manual') -> dict:
+        """Change the audio delay live: no restart, no PCM close.
+
+        Raising it makes syncqueue hold output until it has the extra audio
+        (a gap of the difference, once). Lowering it drains the oldest audio
+        down to the new floor, as resync_av does.
+        """
+        import av_sync
+        delay_ms = round(max(0.0, min(av_sync.MAX_DELAY_MS, float(delay_ms))), 1)
+        old = self.SYNC_BASELINE_MS
+        self.SYNC_BASELINE_MS = delay_ms
+        self.SYNC_MAX_MS = delay_ms + self.SYNC_HEADROOM_MS
+        q = self.pipeline.get_by_name('syncqueue') if self.pipeline else None
+        if q is not None:
+            try:
+                q.set_property('min-threshold-time', int(delay_ms * 1e6))
+                q.set_property('max-size-time', int(self.SYNC_MAX_MS * 1e6))
+            except Exception as e:
+                logger.warning(f"[AudioPassthrough] could not set sync delay: {e}")
+            if delay_ms < old:
+                self.resync_av(f'delay {old:.0f}->{delay_ms:.0f}ms')
+        logger.info(f"[AudioPassthrough] A/V delay {old:.0f}ms -> {delay_ms:.0f}ms ({reason})")
+        return {'success': True, 'delay_ms': delay_ms, 'previous_ms': old}
+
+    def set_sync_trim(self, trim_ms: float) -> dict:
+        import av_sync
+        self.sync_trim_ms = av_sync.clamp_trim(trim_ms)
+        result = self.calibrate_sync('trim')
+        if not result.get('success'):
+            # No measurement available: apply the trim to the current delay.
+            self.set_sync_delay(self.SYNC_BASELINE_MS, reason='trim')
+        return self.get_sync_info()
+
+    def get_sync_info(self) -> dict:
+        return {
+            'success': True,
+            'delay_ms': self.SYNC_BASELINE_MS,
+            'trim_ms': self.sync_trim_ms,
+            'auto': self.SYNC_AUTO,
+            'last_calibration': self._last_calibration,
+            **self.get_sync_levels(),
+        }
+
+    def _drain_queue(self, name: str, keep_ms: float):
+        """Drop a leaky queue's oldest audio down to ~keep_ms. Returns the level after."""
+        q = self.pipeline.get_by_name(name) if self.pipeline else None
+        if q is None:
+            return None
+        try:
+            orig = q.get_property('max-size-time')
+            q.set_property('max-size-time', int(max(keep_ms, 5.0) * 1e6))
+            time.sleep(0.12)
+            q.set_property('max-size-time', orig)
+        except Exception as e:
+            logger.debug(f"[AudioPassthrough] drain {name} failed: {e}")
+        return self._queue_level_ms(name)
 
     def reset_av_sync(self):
         """Manually reset A/V sync by flushing the sync queue.

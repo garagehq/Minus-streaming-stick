@@ -1914,6 +1914,26 @@ class WebUI:
                 logger.error(f"Error restarting audio: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
+        @self.app.route('/api/audio/sync', methods=['GET', 'POST'])
+        def api_audio_sync():
+            """A/V delay: GET shows the measured video latency and the audio
+            delay; POST {"trim_ms": n} sets the owner's trim (+ = sound later)
+            and recalibrates live; POST {"calibrate": true} just re-measures."""
+            try:
+                audio = getattr(self.minus, 'audio', None)
+                if not audio:
+                    return jsonify({'success': False, 'error': 'Audio not initialized'}), 500
+                if request.method == 'GET':
+                    return jsonify(audio.get_sync_info())
+                data = request.get_json(silent=True) or {}
+                if 'trim_ms' in data:
+                    return jsonify(self.minus.set_av_sync_trim(data.get('trim_ms')))
+                audio.calibrate_sync('web UI')
+                return jsonify(audio.get_sync_info())
+            except Exception as e:
+                logger.error(f"Error with A/V sync: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
         @self.app.route('/api/audio/sync-reset', methods=['POST'])
         def api_audio_sync_reset():
             """Reset A/V sync by flushing the audio sync queue.

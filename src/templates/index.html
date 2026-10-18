@@ -635,6 +635,15 @@
                     <button onclick="resetAVSync()" class="action-btn" id="av-sync-btn">Reset Sync</button>
                 </div>
                 <p class="help-text">If audio is out of sync with video, click to reset. Causes ~300ms audio dropout.</p>
+                <div class="setting-item">
+                    <span class="setting-label">Audio Delay Trim</span>
+                    <span class="av-trim">
+                        <button onclick="nudgeAVTrim(-20)" class="action-btn" title="Sound earlier">&minus;</button>
+                        <span id="av-trim-value">0 ms</span>
+                        <button onclick="nudgeAVTrim(20)" class="action-btn" title="Sound later">+</button>
+                    </span>
+                </div>
+                <p class="help-text" id="av-sync-info">Minus measures the picture's delay and delays the sound to match. If voices still come early, press +; if they come late, press &minus;.</p>
             </section>
 
             <!-- Release checks: code, ustreamer, VLM model (src/updates.py) -->
@@ -2911,6 +2920,30 @@
                 console.error('Failed to update schedule:', error);
             }
         }
+
+        let avTrimMs = 0;
+        function renderAVSync(d) {
+            if (!d || !d.success) return;
+            avTrimMs = d.trim_ms || 0;
+            document.getElementById('av-trim-value').textContent = (avTrimMs > 0 ? '+' : '') + Math.round(avTrimMs) + ' ms';
+            const c = d.last_calibration;
+            if (c) {
+                document.getElementById('av-sync-info').textContent =
+                    `Picture delay ${Math.round(c.video_latency_ms)} ms, sound delay ${Math.round(d.delay_ms)} ms. ` +
+                    'If voices still come early, press +; if they come late, press −.';
+            }
+        }
+        async function loadAVSync() {
+            try { renderAVSync(await (await fetch('/api/audio/sync')).json()); } catch (e) {}
+        }
+        async function nudgeAVTrim(step) {
+            try {
+                const r = await fetch('/api/audio/sync', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                          body: JSON.stringify({trim_ms: avTrimMs + step})});
+                renderAVSync(await r.json());
+            } catch (e) { console.error('A/V trim failed:', e); }
+        }
+        document.addEventListener('DOMContentLoaded', loadAVSync);
 
         async function resetAVSync() {
             const btn = document.getElementById('av-sync-btn');
