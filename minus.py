@@ -2852,10 +2852,12 @@ class Minus:
             if SYSTEM_SETTINGS_FILE.exists():
                 with open(SYSTEM_SETTINGS_FILE) as f:
                     saved = json.load(f)
-                    # Merge with defaults
-                    for key in defaults:
-                        if key in saved:
-                            defaults[key] = saved[key]
+                # Keep EVERY saved key, not just the ones listed above. Only
+                # copying known keys silently dropped anything newer: the A/V
+                # trim set in Settings vanished on the next restart and the
+                # sound went out of sync again (minus, 2026-10-18).
+                if isinstance(saved, dict):
+                    defaults.update(saved)
                     logger.info(
                         f"Loaded system settings: vlm_preload={defaults['vlm_preload']}, "
                         f"block_falloff={defaults['block_falloff']}, "
