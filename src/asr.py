@@ -114,6 +114,8 @@ class ASRManager:
     # doesn't carry forever, and a streak of cleanness over 4+ seconds
     # provides enough evidence to veto.
     HISTORY_WINDOW_S = 8.0
+    # No veto for this long after a marker was heard (see verdict()).
+    AD_CONTEXT_S = float(os.environ.get('MINUS_ASR_AD_CONTEXT_S', '30'))
 
     # How often to invoke whisper. Overlapping windows catch short bursts
     # of marketing copy that a non-overlapping grid might split. Env-
@@ -169,6 +171,7 @@ class ASRManager:
 
         # Rolling history: (timestamp, marker_hits, transcript_alpha_word_count)
         self._history = deque(maxlen=32)
+        self._last_hit_time = 0.0
         self._lock = threading.RLock()
 
         self._stop_event = threading.Event()
@@ -258,6 +261,8 @@ class ASRManager:
                 self.last_marker_hits = hits
                 alpha_word_count = len(re.findall(r'[a-z]{2,}', transcript.lower()))
                 self._history.append((now, hits, alpha_word_count))
+                if hits > 0:
+                    self._last_hit_time = now
                 cutoff = now - self.HISTORY_WINDOW_S
                 while self._history and self._history[0][0] < cutoff:
                     self._history.popleft()
@@ -299,6 +304,14 @@ class ASRManager:
         total_hits = sum(h[1] for h in recent)
         if total_hits > 0:
             return 'confirm'
+        # Ad context: an ad that said something marketing-like in the last
+        # AD_CONTEXT_S is most likely still the ad (they run 15-90 s, and
+        # stretches of them -- side-effect lists, a jingle, a story -- have no
+        # markers). Not 'confirm': that would hold a block on show content
+        # after the ad; just no veto.
+        last_hit = getattr(self, '_last_hit_time', 0.0)
+        if last_hit and now - last_hit < self.AD_CONTEXT_S:
+            return 'unknown'
         total_words = sum(h[2] for h in recent)
         if total_words >= 10:
             return 'veto'

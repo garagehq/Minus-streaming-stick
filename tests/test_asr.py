@@ -202,6 +202,35 @@ class TestASRManager(unittest.TestCase):
                 0.5)
         self.assertEqual(m.verdict(), 'veto')
 
+    def test_pharma_disclosures_are_ad_language(self):
+        """Live on minus 2026-10-19 (SenseVoice, a Mounjaro ad): the
+        side-effect stretch had no markers and the window vetoed a real ad."""
+        from asr_keywords import count_marker_hits
+        for heard in ('to it or if you or someone in your family had medullary thyroid cancer',
+                      'serious side effects may include pancreatitis',
+                      'stop taking and call your doctor right away'):
+            self.assertGreater(count_marker_hits(heard), 0, heard)
+        for show in ('she walked into the kitchen and sat down',
+                     'the doctor will see you now said the nurse'):
+            self.assertEqual(count_marker_hits(show), 0, show)
+
+    def test_no_veto_right_after_ad_language(self):
+        """An ad that said 'ask your doctor' 15 s ago is still the ad, even
+        through a stretch with no markers: no veto (but no confirm either)."""
+        import time as _time
+        m = self._make()
+        m.is_running = True
+        m._record_result('ok', 'now that you know ask your doctor about it', 0.3)
+        # age that hit out of the 8 s window, keep it inside ad context
+        m._history = type(m._history)(
+            [(t - 15.0, h, w) for (t, h, w) in m._history], maxlen=m._history.maxlen)
+        m._last_hit_time -= 15.0
+        for _ in range(3):
+            m._record_result('ok', 'she walked into the room and sat down with her brother there', 0.3)
+        self.assertEqual(m.verdict(), 'unknown')
+        m._last_hit_time -= 30.0       # long after the ad: show dialog vetoes again
+        self.assertEqual(m.verdict(), 'veto')
+
     def test_verdict_unknown_on_silence_window(self):
         """Several inferences with zero hits AND very little transcribed
         speech → 'unknown' (not 'veto'). Avoids vetoing when audio is

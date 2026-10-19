@@ -131,6 +131,17 @@ ASR_CTA_MARKERS = [
     'ask your pharmacist', 'talk to your doctor', 'ask your doctor',
     'do not take if', 'individual results may vary', 'results may vary',
     'results not typical', 'consult a physician', 'use as directed',
+    # pharma side-effect disclosures: a long stretch of them read like show
+    # dialog with no markers and the 8 s window vetoed a real Mounjaro ad
+    # (minus, 2026-10-19). Phrases ad copy is legally required to say and
+    # TV dialog almost never does.
+    'side effects', 'serious side effects', 'common side effects',
+    'allergic reaction', 'serious allergic', 'thyroid cancer', 'medullary thyroid',
+    'endocrine neoplasia', 'stop taking', 'tell your doctor', 'call your doctor',
+    'available by prescription', 'prescription medicine', 'prescription medication',
+    'once weekly', 'once daily', 'may cause', 'may increase the risk',
+    'not for people with', 'pancreatitis', 'gallbladder problems',
+    'low blood sugar', 'kidney problems', 'fda approved', 'fda-approved',
     # sponsor self-reference
     'official sponsor', 'proud sponsor', 'proud partner',
     'in partnership with', 'presented by',
