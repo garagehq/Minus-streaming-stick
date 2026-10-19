@@ -994,6 +994,39 @@ class TestAudioGateStop(unittest.TestCase):
         self.assertTrue(m.ad_detected)
 
 
+class TestNoReblockFromStaleOCRFlag(unittest.TestCase):
+    """A both-block ended by the VLM must not restart from OCR's old flag.
+
+    Observed live 2026-10-19: every ad ending "stopped by BOTH" re-blocked
+    0.6-1.6 s later as "(OCR)" with no new OCR ad read, ran 2.6-3.6 s, and
+    raised the flap threshold - ocr_ad_detected was still True from the ad.
+    """
+
+    def _both_block_vlm_clearing(self):
+        m = TestOCRTriangulationVeto._make_minus(
+            self, blocking_elapsed=20.0, vlm_no_ad_ratio=1.0,
+            asr_verdict='unknown', source='both')
+        m.ocr_ad_detected = True
+        m.ocr_ad_detection_count = 3
+        m.vlm_no_ad_count = 5
+        m._system_settings = {}
+        m._ad_clock_says_playing = lambda now: False
+        return m
+
+    def test_vlm_stop_clears_ocr_flag(self):
+        m = self._both_block_vlm_clearing()
+        m._update_blocking_state()
+        self.assertFalse(m.ad_detected)
+        self.assertFalse(m.ocr_ad_detected)
+        self.assertEqual(m.ocr_ad_detection_count, 0)
+
+    def test_no_restart_without_a_new_ocr_read(self):
+        m = self._both_block_vlm_clearing()
+        m._update_blocking_state()
+        m._update_blocking_state()   # next tick, nothing new from OCR
+        self.assertFalse(m.ad_detected)
+
+
 class TestAudibleTracker(unittest.TestCase):
     """AudioPassthrough.seconds_since_audible: None means unknown."""
 

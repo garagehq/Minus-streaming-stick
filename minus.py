@@ -4478,6 +4478,15 @@ class Minus:
                     self.last_matched_keywords = []
                     # Also clear VLM state so it doesn't immediately re-trigger
                     self.vlm_ad_detected = False
+                    # ...and OCR's. A "both" block usually ends on the VLM's
+                    # no-ad votes while OCR is still counting toward its own
+                    # stop, so ocr_ad_detected was left True and the next tick
+                    # started a new "(OCR)" block with no new ad read (seen
+                    # 4x in 20 min, 2.6-3.6 s each, each one also raising the
+                    # flap threshold). An ad that is really still on screen
+                    # is read again by OCR within a frame or two.
+                    self.ocr_ad_detected = False
+                    self.ocr_ad_detection_count = 0
                     self.vlm_decision_history.clear()
                     # Clear cached VLM-trigger frame: a pause AFTER the block
                     # ends is not "during a VLM ad block" — don't act on a
