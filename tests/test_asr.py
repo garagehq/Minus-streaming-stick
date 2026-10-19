@@ -1067,6 +1067,39 @@ class TestStaleVLMStart(unittest.TestCase):
         self.assertTrue(m.ad_detected)
 
 
+class TestVetoNeedsAConfidentVLM(unittest.TestCase):
+    """minus 2026-10-19 12:45: five weak AD calls (mean 0.78) read as 100%
+    agreement and overruled ASR hearing lyrics; 4.5 s false-positive block."""
+
+    def _m(self, confs):
+        import time as _t
+        m = TestDecisionEngineASRGate._make_minus(self, asr_verdict='veto')
+        now = _t.time()
+        m.vlm_history_window = 8.0
+        m.vlm_decision_history = [(now - i, True, c) for i, c in enumerate(confs)]
+        m._get_vlm_agreement = MagicMock(return_value=(1.0, 0.0, len(confs)))
+        m.vlm_ad_detected = True
+        return m
+
+    def test_weak_unanimous_vlm_does_not_overrule_the_ear(self):
+        m = self._m([0.91, 0.50, 0.91, 0.65, 0.95])
+        m._update_blocking_state()
+        self.assertFalse(m.ad_detected)
+
+    def test_confident_unanimous_vlm_still_overrules(self):
+        m = self._m([0.97, 0.95, 0.99, 0.93, 0.96])
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+    def test_without_a_veto_weak_vlm_still_blocks(self):
+        """No ASR objection: VLM-only ads (e.g. cable TV, no on-screen text)
+        keep their old threshold."""
+        m = self._m([0.91, 0.50, 0.91, 0.65, 0.95])
+        m.asr.verdict.return_value = 'unknown'
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+
 # =============================================================================
 # OCR triangulation — transience guard + VLM+ASR veto + sustained OCR override
 # =============================================================================

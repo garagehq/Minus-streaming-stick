@@ -331,6 +331,8 @@ class Minus:
     # An ASR veto (show dialog, no ad language) holds back a VLM-alone block
     # only while VLM agreement is below this. See _update_blocking_state.
     ASR_VETO_MAX_VLM_RATIO = float(os.environ.get('MINUS_ASR_VETO_MAX_VLM', '0.95'))
+    # ...and VLM overrules a veto only if its AD calls are also confident.
+    ASR_VETO_MIN_VLM_CONF = float(os.environ.get('MINUS_ASR_VETO_MIN_VLM_CONF', '0.85'))
     # A VLM-alone block needs VLM's recent decisions to still say AD at the
     # moment it would start (the vlm_ad_detected flag is sticky).
     VLM_ALONE_START_MIN_RATIO = float(os.environ.get('MINUS_VLM_ALONE_MIN_START', '0.6'))
@@ -2887,6 +2889,16 @@ class Minus:
         duration = self.MIN_BLOCKING_DURATION_BASE - self.consecutive_ad_count * self.MIN_BLOCKING_DURATION_STEP
         return max(duration, floor)
 
+    def _vlm_ad_mean_confidence(self) -> float:
+        """Mean confidence of the AD decisions in the sliding window (0 if none)."""
+        try:
+            cutoff = time.time() - self.vlm_history_window
+            confs = [e[2] if len(e) == 3 else 0.75
+                     for e in self.vlm_decision_history if e[0] >= cutoff and e[1]]
+            return sum(confs) / len(confs) if confs else 0.0
+        except Exception:
+            return 1.0      # unknown: don't let this check hold a block back
+
     def _get_vlm_agreement(self) -> tuple:
         """
         Calculate VLM agreement percentage from sliding window using confidence-weighted votes.
@@ -4017,11 +4029,23 @@ class Minus:
                                             f"{ad_ratio*100:.0f}% of {total} < "
                                             f"{self.VLM_ALONE_START_MIN_RATIO*100:.0f}%)")
                         elif (asr_verdict == 'veto' and veto_now
-                                and ad_ratio < self.ASR_VETO_MAX_VLM_RATIO):
+                                and (ad_ratio < self.ASR_VETO_MAX_VLM_RATIO
+                                     or self._vlm_ad_mean_confidence() < self.ASR_VETO_MIN_VLM_CONF)):
+                            # Overruling the ear takes a VLM that is both
+                            # unanimous AND confident. Unanimity alone is cheap:
+                            # the 8 s window holds ~5 decisions, and on minus
+                            # 2026-10-19 12:45 a music video with a "Shazam for
+                            # more" overlay read 100% from five weak AD calls
+                            # (0.91, 0.50, 0.91, 0.65, 0.95; mean 0.78) after two
+                            # NO calls aged out, overruled ASR hearing lyrics, and
+                            # blocked 4.5 s -- a false positive.
                             should_start = False
                             logger.info(f"VLM suppressed - ASR hears show dialog, no ad "
                                         f"language (VLM agreement {ad_ratio*100:.0f}% "
-                                        f"of {total} < {self.ASR_VETO_MAX_VLM_RATIO*100:.0f}%)")
+                                        f"of {total}, mean AD confidence "
+                                        f"{self._vlm_ad_mean_confidence():.2f}; needs "
+                                        f">= {self.ASR_VETO_MAX_VLM_RATIO*100:.0f}% and "
+                                        f">= {self.ASR_VETO_MIN_VLM_CONF:.2f})")
                         else:
                             should_start = True
                             if asr_verdict == 'confirm' and self.asr:
