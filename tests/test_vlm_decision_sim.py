@@ -36,8 +36,28 @@ import block_latency_harness as H  # noqa: E402
 HOLDOUT = '/home/radxa/axera_models/FastVLM/FastVLM-0.5B-ad-classifier-iter4/threshold_sweep_raw.json'
 
 # ---- virtual clock: DecisionEngine.on_vlm calls module time.time() ----
+# Only the HARNESS module's clock is virtual. H.time is the real `time`
+# module, so `H.time.time = ...` used to freeze time.time() for the whole
+# process: under pytest every test collected after this module ran on a
+# clock stuck at 0 (23 cooldown/grace/rate-limit tests failed on the box,
+# the only place the holdout file exists so this module gets imported).
 _VT = [0.0]
-H.time.time = lambda: _VT[0]          # patch the harness module's clock
+
+
+class _VirtualClock:
+    """`time` for the harness: time() is virtual, the rest is real."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def time(self):
+        return _VT[0]
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+H.time = _VirtualClock(H.time)
 
 
 def _load_scores():
