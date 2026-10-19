@@ -1518,6 +1518,13 @@ class AudioPassthrough:
             logger.debug(f"[AudioPassthrough] video latency measurement failed: {e}")
         if not m or m.get('ustreamer_ms') is None:
             return {'success': False, 'error': 'video latency not measurable (ustreamer down?)'}
+        if not m.get('display_id'):
+            # No TV/projector connected: there is no picture to sync to. Doing
+            # it anyway set the delay to the box alone (~18 ms instead of the
+            # Optoma's ~347) and saved it, so the sound ran ~330 ms early
+            # after the projector came back until the next calibration, up to
+            # 5 min later (minus, 2026-10-19). Keep the delay as it is.
+            return {'success': False, 'error': 'no display connected'}
         disp_v = m.get('display_video_ms') or 0.0
         disp_a = m.get('display_audio_ms') or 0.0
         display = m.get('display_id') or 'unknown'

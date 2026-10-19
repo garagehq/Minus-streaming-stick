@@ -2480,6 +2480,11 @@ class Minus:
     def notify_hdmi_reconnect(self):
         """Called by the health monitor when the TV output reconnects."""
         self.hdmi_reconnect_time = time.time()
+        # A display just arrived: match the audio delay to it now rather than
+        # at the next 5-minute calibration (it may be a different display,
+        # with its own EDID latency and learned offset).
+        if getattr(self, 'audio', None) is not None and hasattr(self.audio, 'request_calibration'):
+            self.audio.request_calibration(3.0)
         logger.info(
             f"[Minus] HDMI reconnect recorded; ad blocking suppressed for "
             f"{self.HDMI_RECONNECT_GRACE_SECONDS:.0f}s"
