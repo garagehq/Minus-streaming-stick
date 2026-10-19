@@ -3470,6 +3470,24 @@ class WebUI:
                 logger.error(f"Error toggling night mode: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
 
+        @self.app.route('/api/autonomous/music-seed', methods=['POST'])
+        def api_autonomous_music_seed():
+            """Jump autonomous playback to the next music-video seed now.
+
+            The same action music mode takes after an ad drought, on demand:
+            lets a test run steer back to music (more ads per hour) when
+            autoplay has drifted into long-form content.
+            """
+            try:
+                am = getattr(self.minus, 'autonomous_mode', None)
+                if not am:
+                    return jsonify({'success': False, 'error': 'Autonomous mode not initialized'}), 500
+                ok = bool(am._launch_music_seed())
+                return jsonify({'success': ok})
+            except Exception as e:
+                logger.error(f"Error launching music seed: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+
         @self.app.route('/api/autonomous/music-mode', methods=['POST'])
         def api_autonomous_music_mode():
             """Toggle music mode - steer autonomous playback toward music
