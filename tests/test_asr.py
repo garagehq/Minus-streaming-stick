@@ -238,6 +238,20 @@ class TestASRManager(unittest.TestCase):
         m._last_hit_time -= 30.0       # long after the ad: show dialog vetoes again
         self.assertEqual(m.verdict(), 'veto')
 
+    def test_short_window_ignores_the_previous_videos_speech(self):
+        """Zepbound ad, minus 2026-10-19: the 8 s window still held the music
+        video's lyrics when the ad began. Judged on the last 2.5 s (the ad's
+        own audio, no words yet), there is nothing to veto."""
+        m = self._make()
+        m.is_running = True
+        for _ in range(4):
+            m._record_result('ok', 'im waking up to ash and dust i wipe my brow and i sweat my rust', 0.3)
+        m._history = type(m._history)(
+            [(t - 4.0, h, w) for (t, h, w) in m._history], maxlen=m._history.maxlen)
+        m._record_result('ok', 'mm', 0.3)          # ad just started: music bed
+        self.assertEqual(m.verdict(), 'veto')       # 8 s window: the lyrics
+        self.assertEqual(m.verdict(window_s=2.5), 'unknown')
+
     def test_verdict_unknown_on_silence_window(self):
         """Several inferences with zero hits AND very little transcribed
         speech → 'unknown' (not 'veto'). Avoids vetoing when audio is

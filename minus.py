@@ -331,6 +331,8 @@ class Minus:
     # An ASR veto (show dialog, no ad language) holds back a VLM-alone block
     # only while VLM agreement is below this. See _update_blocking_state.
     ASR_VETO_MAX_VLM_RATIO = float(os.environ.get('MINUS_ASR_VETO_MAX_VLM', '0.95'))
+    # ...and only on what ASR heard in the last few seconds (see the veto).
+    ASR_VETO_WINDOW_S = float(os.environ.get('MINUS_ASR_VETO_WINDOW_S', '2.5'))
 
     # ── Thermal-degraded blocking parameters (src/thermal.py) ─────────────
     # Swapped in while the kernel is actively throttling the CPU; originals
@@ -2449,7 +2451,7 @@ class Minus:
             return None
         return float(quiet) if isinstance(quiet, (int, float)) else None
 
-    def _asr_verdict(self) -> str:
+    def _asr_verdict(self, window_s: float = None) -> str:
         """Return ASR's current verdict on whether audio sounds like an ad.
 
         Returns one of:
@@ -2463,7 +2465,7 @@ class Minus:
         if self.asr is None:
             return 'unknown'
         try:
-            return self.asr.verdict()
+            return self.asr.verdict(window_s) if window_s else self.asr.verdict()
         except Exception as e:
             logger.debug(f"ASR verdict error: {e}")
             return 'unknown'
@@ -3980,6 +3982,10 @@ class Minus:
                         # is caught by the GATED mid-block ASR rescue below,
                         # which only force-stops once VLM ITSELF has weakened.
                         asr_verdict = self._asr_verdict()
+                        # The veto judges only the last few seconds of audio:
+                        # VLM needs several agreeing decisions to get here, so
+                        # those seconds are the ad's, not the video's before it.
+                        veto_now = (self._asr_verdict(self.ASR_VETO_WINDOW_S) == 'veto')
                         source = "vlm"  # base stays "vlm" for stop-logic;
                         asr_confirmed = (asr_verdict == 'confirm')  # label only
                         ad_ratio, _, total = self._get_vlm_agreement()
@@ -3991,7 +3997,7 @@ class Minus:
                         # markers) holds back a VLM-alone start below
                         # ASR_VETO_MAX_VLM_RATIO, and a VLM that sure blocks
                         # whatever the audio says.
-                        if (asr_verdict == 'veto'
+                        if (asr_verdict == 'veto' and veto_now
                                 and ad_ratio < self.ASR_VETO_MAX_VLM_RATIO):
                             should_start = False
                             logger.info(f"VLM suppressed - ASR hears show dialog, no ad "

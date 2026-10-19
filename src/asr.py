@@ -279,7 +279,7 @@ class ASRManager:
 
     # ----- decision API -----
 
-    def verdict(self) -> str:
+    def verdict(self, window_s: float = None) -> str:
         """Three-state output: 'confirm' / 'veto' / 'unknown'.
 
         Used by Minus._update_blocking_state for the VLM-alone start
@@ -297,7 +297,12 @@ class ASRManager:
             return 'unknown'
         now = time.time()
         with self._lock:
-            cutoff = now - self.HISTORY_WINDOW_S
+            # window_s: only inferences that finished this recently. The
+            # start veto uses a short one so the audio it judges is the
+            # audio of what VLM is looking at, not the video before it: an
+            # 8 s window still held the previous music video's lyrics when a
+            # Zepbound ad began and vetoed it (minus, 2026-10-19 09:28 UTC).
+            cutoff = now - (window_s if window_s else self.HISTORY_WINDOW_S)
             recent = [h for h in self._history if h[0] >= cutoff]
         if not recent:
             return 'unknown'
