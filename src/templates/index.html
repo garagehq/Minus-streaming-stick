@@ -2584,10 +2584,18 @@
         // =========================================================================
         // Status LEDs (WS2812B strip on SPI0 MOSI)
         // =========================================================================
+        // Bumped by every LED change the user makes. loadStatusLEDs() also runs
+        // on a 2.5 s poll: a poll that left before a toggle's POST finished
+        // used to land afterwards with the old state and flip the toggle and
+        // panel back (seen as random failures of the live LED UI tests).
+        let _ledsGen = 0;
+
         async function loadStatusLEDs() {
+            const gen = _ledsGen;
             try {
                 const r = await fetch('/api/leds/status');
                 const data = await r.json();
+                if (gen !== _ledsGen) return;   // a change happened meanwhile
                 const toggle = document.getElementById('leds-toggle');
                 const panel = document.getElementById('leds-state-panel');
                 const help = document.getElementById('leds-help-text');
@@ -2661,10 +2669,12 @@
         async function toggleStatusLEDs(enabled) {
             const panel = document.getElementById('leds-state-panel');
             const toggle = document.getElementById('leds-toggle');
+            _ledsGen++;
             try {
                 const endpoint = enabled ? '/api/leds/enable' : '/api/leds/disable';
                 const r = await fetch(endpoint, { method: 'POST' });
                 const data = await r.json();
+                _ledsGen++;   // polls sent while the POST was in flight are stale too
                 if (!data.success) {
                     toggle.checked = !enabled;
                     setLEDStatus(data.error || 'failed', true);
@@ -2681,6 +2691,7 @@
 
         async function setStatusLEDState(state) {
             setLEDStatus(`switching to ${state}…`, false);
+            _ledsGen++;
             try {
                 const r = await fetch('/api/leds/state', {
                     method: 'POST',
@@ -2688,6 +2699,7 @@
                     body: JSON.stringify({ state }),
                 });
                 const data = await r.json();
+                _ledsGen++;
                 if (data.success) {
                     setLEDStatus(`state: ${state}`, false);
                     highlightLEDState(state);
