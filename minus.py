@@ -3940,6 +3940,29 @@ class Minus:
 
         return (now - self.last_ocr_ad_time) >= self._effective_ocr_stop_seconds()
 
+    BARE_AD_KEYWORD_NAMES = frozenset({'ad', 'ads'})
+
+    def _bare_ad_uncorroborated(self, keywords_found, strong_ad_recent):
+        """A lone 'ad'/'ads' token that nothing else agrees with.
+
+        OCR reads a stray "ad" out of noisy frames (scene changes, a video
+        page loading: '4 | C | ad | fb-haus | ...'). Since 2026-10-18 that
+        alone started 17 blocks; ~9 had no VLM ad vote and no other ad
+        keyword in their whole life (3-18 s false blocks). Real ads that
+        show only "Ad" have the VLM (or ASR, or a recent strong keyword like
+        'skip in') agreeing, so require that.
+        """
+        if not keywords_found or not set(keywords_found) <= self.BARE_AD_KEYWORD_NAMES:
+            return False
+        if strong_ad_recent or self.vlm_ad_detected or self.vlm_last_state == 'ad':
+            return False
+        try:
+            if self._asr_verdict() == 'confirm':
+                return False
+        except Exception:
+            pass
+        return True
+
     def _update_blocking_state(self):
         """Update combined blocking state using weighted OCR/VLM model."""
         with self._state_lock:
@@ -5064,6 +5087,11 @@ class Minus:
                     elif self.home_screen_detected:
                         suppress_reason = (f"home screen detected "
                                            f"(would have been {keywords_found})")
+                    elif self._bare_ad_uncorroborated(keywords_found,
+                                                      strong_ad_recent):
+                        suppress_reason = (
+                            f"bare {keywords_found} with nothing agreeing "
+                            f"(texts {all_texts[:3]})")
                     elif weak_only and not strong_ad_recent:
                         suppress_reason = (
                             f"weak-only {keywords_found}, no strong ad "

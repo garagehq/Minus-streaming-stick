@@ -1027,6 +1027,33 @@ class TestNoReblockFromStaleOCRFlag(unittest.TestCase):
         self.assertFalse(m.ad_detected)
 
 
+class TestBareAdNeedsCorroboration(unittest.TestCase):
+    """A lone OCR 'ad' token blocks only when something agrees."""
+
+    def _m(self, vlm=False, last='no-ad', asr='unknown'):
+        m = TestOCRTriangulationVeto._make_minus(
+            self, blocking_elapsed=0.0, vlm_no_ad_ratio=1.0,
+            asr_verdict=asr, source='ocr')
+        m.vlm_ad_detected = vlm
+        m.vlm_last_state = last
+        return m
+
+    def test_noise_ad_alone_is_suppressed(self):
+        self.assertTrue(self._m()._bare_ad_uncorroborated(['ad'], False))
+
+    def test_vlm_or_asr_or_strong_keyword_lets_it_through(self):
+        self.assertFalse(self._m(last='ad')._bare_ad_uncorroborated(['ad'], False))
+        self.assertFalse(self._m(vlm=True)._bare_ad_uncorroborated(['ads'], False))
+        self.assertFalse(self._m(asr='confirm')._bare_ad_uncorroborated(['ad'], False))
+        self.assertFalse(self._m()._bare_ad_uncorroborated(['ad'], True))
+
+    def test_other_keywords_untouched(self):
+        m = self._m()
+        self.assertFalse(m._bare_ad_uncorroborated(['ad', 'sponsored'], False))
+        self.assertFalse(m._bare_ad_uncorroborated(['skip in'], False))
+        self.assertFalse(m._bare_ad_uncorroborated([], False))
+
+
 class TestAudibleTracker(unittest.TestCase):
     """AudioPassthrough.seconds_since_audible: None means unknown."""
 
