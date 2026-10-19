@@ -3010,6 +3010,8 @@ class WebUI:
                         'block_falloff': self.minus.block_falloff_enabled,
                         'hdmi_reconnect_grace': self.minus.hdmi_reconnect_grace_enabled,
                         'greyscale_preview': self.minus.greyscale_preview_enabled,
+                        'block_requires_audio': bool(self.minus._system_settings.get(
+                            'block_requires_audio', True)),
                     })
 
                 data = request.get_json() or {}

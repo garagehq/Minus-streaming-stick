@@ -59,7 +59,7 @@ from collections import deque
 from typing import Optional
 
 from asr_keywords import count_marker_hits, explain_hits
-from asr_worker import ASRProcess
+from asr_worker import ASRProcess, resolve_engine
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +79,18 @@ def is_asr_available() -> bool:
     faster-whisper installed will skip the tap branch entirely,
     keeping the audio pipeline byte-identical to pre-ASR shape."""
     try:
-        import faster_whisper  # noqa: F401
-        return True
-    except ImportError:
-        return False
+        from sensevoice_npu import is_available as _sensevoice_available
+        if _sensevoice_available():
+            return True
+    except Exception:
+        pass
+    for mod in ('faster_whisper', 'moonshine_voice'):
+        try:
+            __import__(mod)
+            return True
+        except ImportError:
+            continue
+    return False
 
 
 class ASRManager:
@@ -128,6 +136,19 @@ class ASRManager:
         """
         self._tap = audio_tap
         self._model_name = model_name or ASR_MODEL
+        # What the worker actually runs (status/logs). SenseVoice on the NPU
+        # costs a fixed ~0.38 s per window whatever its length, so it takes
+        # 3 s windows (recall 85% vs 77% at 2 s on the asr-first benchmarks)
+        # every second, unless MINUS_ASR_WINDOW / MINUS_ASR_INTERVAL say so.
+        self.engine = resolve_engine()
+        if self.engine == 'sensevoice':
+            self.model_label = 'sensevoice-small-npu'
+            if 'MINUS_ASR_WINDOW' not in os.environ:
+                self.WINDOW_SECONDS = 3.0
+            if 'MINUS_ASR_INTERVAL' not in os.environ:
+                self.INFERENCE_INTERVAL_S = 1.0
+        else:
+            self.model_label = f"{self.engine}:{self._model_name}"
         self._cpu_threads = cpu_threads
 
         # Worker process (hard-timeout via process kill — see asr_worker.py)
@@ -159,7 +180,7 @@ class ASRManager:
         if self.is_running:
             return
         if not is_asr_available():
-            logger.warning("[ASR] faster-whisper not installed — ASR disabled")
+            logger.warning("[ASR] no ASR engine installed (SenseVoice/moonshine/faster-whisper) — ASR disabled")
             return
 
         if not self._process.start():
@@ -170,7 +191,7 @@ class ASRManager:
         self.is_running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name='ASR')
         self._thread.start()
-        logger.info(f"[ASR] started (model={self._model_name}, "
+        logger.info(f"[ASR] started (model={self.model_label}, "
                     f"window={self.WINDOW_SECONDS}s, interval={self.INFERENCE_INTERVAL_S}s, "
                     f"threads={self._cpu_threads})")
 
@@ -324,8 +345,8 @@ class ASRManager:
             'available': is_asr_available(),
             'enabled': self.enabled,
             'running': self.is_running,
-            'engine': os.environ.get('MINUS_ASR_ENGINE', 'moonshine'),
-            'model': self._model_name,
+            'engine': self.engine,
+            'model': self.model_label,
             'inference_count': self.inference_count,
             'timeout_count': self.timeout_count,
             'killed_count': self.killed_count,

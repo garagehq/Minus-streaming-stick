@@ -51,6 +51,7 @@ The blocking overlay rolls a single *replacement mode* at the start of each ad b
 The overlay also gets:
 - **Pixelated pre-ad background** — heavy pixelation + 60% darken of the screen as it looked ~6s before the ad. Gives context without competing for attention. Falls back to a dark radial gradient when the snapshot buffer is empty (e.g. within the first seconds after a restart).
 - **Ad countdown bar** — when OCR reads "Ad 0:30" or "Ad 10", a `[###...] 12s` bar drains in real time so the user sees how long is left.
+- **Only block when there's sound** (`block_requires_audio`): no block starts after 3 s of silence and one ends after 10 s — menus, banners and pauses are silent, ads aren't. ASR (SenseVoice on NPU core 1) confirms, and vetoes a VLM-alone block when VLM is under 95%. See docs/ASR.md.
 - **Audio-reactive visualizer** — a short ASCII ramp bar (`' .,-;+ox*#@'`) driven by RMS of the alsasrc capture in `src/audio.py`. Bounded 16-sample deque — no memory growth over a 24h run.
 - **Rotating Spanish word color** — 10-color YUV palette cycled per rotation.
 

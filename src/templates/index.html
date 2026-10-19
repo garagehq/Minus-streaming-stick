@@ -749,6 +749,15 @@
                 <p class="help-text">After the TV reconnects, suppress ad blocking for 90 seconds so you can navigate menus without overlays jumping in.</p>
 
                 <div class="setting-item" style="margin-top: 1rem;">
+                    <span class="setting-label">Only Block When There's Sound</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="block-requires-audio-toggle" checked onchange="toggleOptimization('block_requires_audio', this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p class="help-text">Ads always play sound. With the input silent for 3 seconds (a menu, a home-screen banner, a paused video), no block starts, and a block ends after 10 seconds of silence.</p>
+
+                <div class="setting-item" style="margin-top: 1rem;">
                     <span class="setting-label">Greyscale Ad Preview</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="greyscale-preview-toggle" checked onchange="toggleOptimization('greyscale_preview', this.checked)">
@@ -2278,6 +2287,7 @@
                 block_falloff: 'block-falloff-toggle',
                 hdmi_reconnect_grace: 'hdmi-grace-toggle',
                 greyscale_preview: 'greyscale-preview-toggle',
+                block_requires_audio: 'block-requires-audio-toggle',
             };
             const toggleId = toggleIds[key];
             try {
@@ -2468,6 +2478,7 @@
                 document.getElementById('block-falloff-toggle').checked = !!data.block_falloff;
                 document.getElementById('hdmi-grace-toggle').checked = !!data.hdmi_reconnect_grace;
                 document.getElementById('greyscale-preview-toggle').checked = !!data.greyscale_preview;
+                document.getElementById('block-requires-audio-toggle').checked = data.block_requires_audio !== false;
             } catch (error) {
                 console.error('Failed to load optimization settings:', error);
             }

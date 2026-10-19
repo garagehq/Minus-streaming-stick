@@ -322,6 +322,16 @@ class Minus:
     switching between video and blocking overlay.
     """
 
+    # Audio as a blocking input (setting `block_requires_audio`, default on).
+    # Ads always play sound; menus, home-screen banners and paused screens
+    # are silent. A block doesn't start after this long without audio, and
+    # an active one ends after the longer one. See _audio_quiet_seconds().
+    AUDIO_GATE_START_QUIET_S = float(os.environ.get('MINUS_AUDIO_GATE_START_S', '3'))
+    AUDIO_GATE_STOP_QUIET_S = float(os.environ.get('MINUS_AUDIO_GATE_STOP_S', '10'))
+    # An ASR veto (show dialog, no ad language) holds back a VLM-alone block
+    # only while VLM agreement is below this. See _update_blocking_state.
+    ASR_VETO_MAX_VLM_RATIO = float(os.environ.get('MINUS_ASR_VETO_MAX_VLM', '0.95'))
+
     # ── Thermal-degraded blocking parameters (src/thermal.py) ─────────────
     # Swapped in while the kernel is actively throttling the CPU; originals
     # are restored on recovery. Rationale: throttled cores slow OCR/VLM
@@ -1093,7 +1103,7 @@ class Minus:
                 # but it isn't ready yet at construction; read from the
                 # manager attrs for the boot log line instead.
                 logger.info(f"ASR initialized (faster-whisper "
-                            f"{self.asr._model_name} + audio tap, "
+                            f"{getattr(self.asr, 'model_label', self.asr._model_name)} + audio tap, "
                             f"enabled={self.asr.enabled})")
             except Exception as e:
                 logger.warning(f"ASR init failed: {e} — running without ASR")
@@ -2410,6 +2420,22 @@ class Minus:
         src = self._display_source() or ''
         return self._SOURCE_LABELS.get(src, src.upper())
 
+    def _audio_quiet_seconds(self):
+        """Seconds the HDMI input has been silent, or None (unknown/disabled).
+
+        Setting `block_requires_audio` (default on) turns the audio gate on.
+        """
+        if not (getattr(self, '_system_settings', None) or {}).get('block_requires_audio', True):
+            return None
+        audio = getattr(self, 'audio', None)
+        if audio is None or not hasattr(audio, 'seconds_since_audible'):
+            return None
+        try:
+            quiet = audio.seconds_since_audible()
+        except Exception:
+            return None
+        return float(quiet) if isinstance(quiet, (int, float)) else None
+
     def _asr_verdict(self) -> str:
         """Return ASR's current verdict on whether audio sounds like an ad.
 
@@ -3012,6 +3038,7 @@ class Minus:
             'asr_enabled': True,          # Run faster-whisper ASR confirm/veto for VLM-alone blocks
             'block_falloff': True,        # Shorten min-block duration on consecutive ads
             'hdmi_reconnect_grace': True, # Disable ad blocking for 90s after HDMI reconnect
+            'block_requires_audio': True, # No block while the input is silent (menus, pauses)
             'greyscale_preview': True,    # Desaturate the ad preview window in blocking mode
             'debug_overlay': True,        # Show BLOCKING header + bottom-left stats + top-right OCR snippet
             'ir_enabled': False,          # Show REI HDMI-switch IR remote in autonomous mode
@@ -3272,7 +3299,8 @@ class Minus:
 
     def set_optimization_setting(self, key: str, enabled: bool) -> dict:
         """Update one of the optimization toggles and persist."""
-        allowed = {'block_falloff', 'hdmi_reconnect_grace', 'greyscale_preview'}
+        allowed = {'block_falloff', 'hdmi_reconnect_grace', 'greyscale_preview',
+                   'block_requires_audio'}
         if key not in allowed:
             return {'success': False, 'error': f'unknown setting {key}'}
         self._system_settings[key] = bool(enabled)
@@ -3930,19 +3958,53 @@ class Minus:
                         # is caught by the GATED mid-block ASR rescue below,
                         # which only force-stops once VLM ITSELF has weakened.
                         asr_verdict = self._asr_verdict()
-                        should_start = True
                         source = "vlm"  # base stays "vlm" for stop-logic;
                         asr_confirmed = (asr_verdict == 'confirm')  # label only
                         ad_ratio, _, total = self._get_vlm_agreement()
-                        if asr_verdict == 'confirm' and self.asr:
-                            asr_note = f" + ASR confirmed ({self.asr.last_marker_hits} markers)"
-                        elif asr_verdict == 'veto':
-                            asr_note = " (ASR veto ignored at start — trusting VLM)"
+                        # The ASR veto counts again, but only against a VLM
+                        # that isn't sure. The old unconditional veto (tiny
+                        # Whisper on the CPU) killed real ads whose copy had
+                        # no marketing words; those cases were at 80% and
+                        # 100% agreement. Now a veto (clear show dialog, no
+                        # markers) holds back a VLM-alone start below
+                        # ASR_VETO_MAX_VLM_RATIO, and a VLM that sure blocks
+                        # whatever the audio says.
+                        if (asr_verdict == 'veto'
+                                and ad_ratio < self.ASR_VETO_MAX_VLM_RATIO):
+                            should_start = False
+                            logger.info(f"VLM suppressed - ASR hears show dialog, no ad "
+                                        f"language (VLM agreement {ad_ratio*100:.0f}% "
+                                        f"of {total} < {self.ASR_VETO_MAX_VLM_RATIO*100:.0f}%)")
                         else:
-                            asr_note = ''
-                        logger.info(f"VLM triggered alone (agreement: "
-                                    f"{ad_ratio*100:.0f}% of {total} "
-                                    f"decisions){asr_note}")
+                            should_start = True
+                            if asr_verdict == 'confirm' and self.asr:
+                                asr_note = f" + ASR confirmed ({self.asr.last_marker_hits} markers)"
+                            elif asr_verdict == 'veto':
+                                asr_note = (f" (ASR veto overruled: VLM at "
+                                            f"{ad_ratio*100:.0f}%)")
+                            else:
+                                asr_note = ''
+                            logger.info(f"VLM triggered alone (agreement: "
+                                        f"{ad_ratio*100:.0f}% of {total} "
+                                        f"decisions){asr_note}")
+
+                # No sound means no ad playing: a menu, a home-screen banner, a
+                # "Sponsored" tile or a paused screen can look exactly like an
+                # ad, but ads always play audio. Seen on minus 2026-10-18: a
+                # Fire TV home banner ("amazon kids+ 1-month free") blocked
+                # for 26 s with the room silent. Fails open: when the audio
+                # level is unknown (no audio pipeline, no samples) this never
+                # holds a block back.
+                if should_start:
+                    quiet = self._audio_quiet_seconds()
+                    if quiet is not None and quiet >= self.AUDIO_GATE_START_QUIET_S:
+                        if now - getattr(self, '_audio_gate_logged_at', 0.0) >= 10.0:
+                            self._audio_gate_logged_at = now
+                            logger.info(
+                                f"Blocking suppressed - no audio for {quiet:.0f}s "
+                                f"({source} saw an ad; a silent screen is a menu or "
+                                f"a pause, not an ad)")
+                        should_start = False
 
                 if should_start and self.is_in_hdmi_reconnect_grace():
                     remaining = self.get_hdmi_reconnect_grace_remaining()
@@ -4081,7 +4143,19 @@ class Minus:
                 if not release_stale and self._ad_clock_says_playing(now):
                     return
 
-                if release_stale:
+                # The audio went quiet and stayed quiet: whatever is on screen
+                # isn't an ad playing (an ad ended into a menu, or was paused).
+                # Only after the minimum block time, and never while the ad's
+                # own countdown says it is still running (checked above).
+                audio_stop = False
+                if not release_stale and blocking_elapsed >= min_duration:
+                    quiet = self._audio_quiet_seconds()
+                    if quiet is not None and quiet >= self.AUDIO_GATE_STOP_QUIET_S:
+                        logger.info(f"[Audio] Ending {self.blocking_source} block: "
+                                    f"no audio for {quiet:.0f}s")
+                        audio_stop = should_stop = True
+
+                if release_stale or audio_stop:
                     pass
                 elif blocking_elapsed >= min_duration:
                     ocr_says_stop = self._ocr_says_stop()

@@ -811,17 +811,24 @@ class TestDecisionEngineASRGate(unittest.TestCase):
         m.get_hdmi_reconnect_grace_remaining = lambda: 0
         return m
 
-    def test_vlm_alone_blocks_despite_asr_veto(self):
-        """ASR 'veto' is IGNORED at the start gate now — the visual
-        detector is trusted, so a VLM-alone block fires anyway with base
-        source 'vlm' and the +asr label OFF. (The old start-veto wrongly
-        killed real ads VLM was sure about; product-placement FPs are
-        caught by the gated mid-block rescue instead.)"""
+    def test_asr_veto_holds_back_an_unsure_vlm(self):
+        """The veto counts again (2026-10-18, SenseVoice on the NPU), but
+        only against a VLM below ASR_VETO_MAX_VLM_RATIO: at 85% agreement,
+        clear show dialog with no ad language keeps the block from starting."""
         m = self._make_minus(asr_verdict='veto')
         m.vlm_ad_detected = True
         m._update_blocking_state()
+        self.assertFalse(m.ad_detected)
+
+    def test_asr_veto_cannot_stop_a_sure_vlm(self):
+        """The cases the old unconditional veto got wrong (an insurance ad
+        at 100% whose copy had no marketing words) still block."""
+        m = self._make_minus(asr_verdict='veto')
+        m._get_vlm_agreement = MagicMock(return_value=(1.0, 0.0, 5))
+        m.vlm_ad_detected = True
+        m._update_blocking_state()
         self.assertTrue(m.ad_detected,
-                        "ASR veto must NOT suppress a VLM-alone block at start")
+                        "a VLM at 100% must block whatever ASR says")
         self.assertEqual(m.blocking_source, 'vlm')
         self.assertFalse(m.blocking_asr_confirmed)
         self.assertEqual(m._display_source(), 'vlm')
@@ -860,6 +867,126 @@ class TestDecisionEngineASRGate(unittest.TestCase):
         m._update_blocking_state()
         self.assertTrue(m.ad_detected)
         self.assertEqual(m.blocking_source, 'ocr')
+
+
+class TestAudioGate(unittest.TestCase):
+    """No sound, no ad (2026-10-18): menus, home-screen banners and paused
+    screens can look like ads, but ads always play audio."""
+
+    def _m(self, quiet, **kw):
+        m = TestDecisionEngineASRGate._make_minus(self, **kw)
+        m.audio.seconds_since_audible = MagicMock(return_value=quiet)
+        m._system_settings = {}
+        return m
+
+    def test_silent_screen_does_not_start_a_block(self):
+        for src in ('vlm', 'ocr'):
+            m = self._m(quiet=5.0, asr_verdict='unknown')
+            if src == 'vlm':
+                m.vlm_ad_detected = True
+            else:
+                m.ocr_ad_detected = True
+            m._update_blocking_state()
+            self.assertFalse(m.ad_detected, f"{src} block started on a silent screen")
+
+    def test_audio_playing_blocks_as_before(self):
+        m = self._m(quiet=0.2)
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+    def test_unknown_audio_never_holds_a_block_back(self):
+        for quiet in (None, MagicMock()):
+            m = self._m(quiet=quiet)
+            m.ocr_ad_detected = True
+            m._update_blocking_state()
+            self.assertTrue(m.ad_detected, "an audio outage must not stop blocking")
+
+    def test_setting_off_disables_the_gate(self):
+        m = self._m(quiet=60.0)
+        m._system_settings = {'block_requires_audio': False}
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+
+class TestAudioGateStop(unittest.TestCase):
+    """A block ends after AUDIO_GATE_STOP_QUIET_S of silence."""
+
+    def _blocking(self, quiet, elapsed=20.0):
+        # Mid-block OCR harness, with the ad still on screen (OCR and VLM
+        # both keep calling it an ad): only the audio can end it.
+        m = TestOCRTriangulationVeto._make_minus(
+            self, blocking_elapsed=elapsed, vlm_no_ad_ratio=0.0,
+            asr_verdict='unknown', source='both')
+        m.audio.seconds_since_audible = MagicMock(return_value=quiet)
+        m._system_settings = {}
+        return m
+
+    def test_long_silence_ends_the_block(self):
+        m = self._blocking(quiet=12.0)
+        m._update_blocking_state()
+        self.assertFalse(m.ad_detected)
+
+    def test_short_gap_keeps_it(self):
+        m = self._blocking(quiet=4.0)
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+
+class TestAudibleTracker(unittest.TestCase):
+    """AudioPassthrough.seconds_since_audible: None means unknown."""
+
+    def _a(self):
+        from audio import AudioPassthrough
+        a = AudioPassthrough.__new__(AudioPassthrough)
+        a.is_running = True
+        a.AUDIBLE_DBFS = -55.0
+        a._last_level_mono = 0.0
+        a._last_audible_mono = 0.0
+        a._level_since_mono = 0.0
+        return a
+
+    def test_unknown_states(self):
+        import time as _time
+        a = self._a()
+        self.assertIsNone(a.seconds_since_audible())          # no samples yet
+        a._last_level_mono = _time.monotonic() - 5.0
+        self.assertIsNone(a.seconds_since_audible())          # samples stopped
+        a.is_running = False
+        self.assertIsNone(a.seconds_since_audible())
+
+    def test_quiet_and_audible(self):
+        import time as _time
+        now = _time.monotonic()
+        a = self._a()
+        a._level_since_mono = now - 7.0
+        a._last_level_mono = now
+        self.assertGreaterEqual(a.seconds_since_audible(), 6.9)   # quiet since start
+        a._last_audible_mono = now - 1.0
+        self.assertLess(a.seconds_since_audible(), 1.5)
+
+
+class TestEngineSelection(unittest.TestCase):
+    """SenseVoice on the NPU by default, CPU moonshine when it's missing."""
+
+    def test_falls_back_without_the_model(self):
+        import asr_worker
+        with patch.dict(os.environ, {'MINUS_ASR_ENGINE': 'sensevoice'}), \
+                patch('sensevoice_npu.is_available', return_value=False):
+            self.assertEqual(asr_worker.resolve_engine(), 'moonshine')
+        with patch.dict(os.environ, {'MINUS_ASR_ENGINE': 'sensevoice'}), \
+                patch('sensevoice_npu.is_available', return_value=True):
+            self.assertEqual(asr_worker.resolve_engine(), 'sensevoice')
+        with patch.dict(os.environ, {'MINUS_ASR_ENGINE': 'moonshine'}):
+            self.assertEqual(asr_worker.resolve_engine(), 'moonshine')
+
+    def test_sys_path_is_not_grown_per_call(self):
+        import sys as _sys, asr_worker
+        before = len(_sys.path)
+        for _ in range(5):
+            asr_worker.resolve_engine()
+        self.assertLessEqual(len(_sys.path), before + 1)
 
 
 # =============================================================================
