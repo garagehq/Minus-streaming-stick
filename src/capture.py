@@ -133,6 +133,23 @@ def _is_blocking_active(port=9090):
     return _blocking_state_cache['enabled']
 
 
+# /snapshot/raw older than this (X-Raw-Age, seconds) is not the current picture.
+RAW_STALE_S = 1.0
+RAW_STALE_RETRY_WAIT_S = 0.3
+
+
+def raw_frame_is_stale(response) -> bool:
+    """True when ustreamer says the raw snapshot it served is stale.
+
+    Older ustreamer builds send no X-Raw-Age header: treated as fresh.
+    """
+    try:
+        age = response.headers.get('X-Raw-Age')
+        return response.status_code == 200 and age is not None and float(age) > RAW_STALE_S
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 class UstreamerCapture:
     """Frame capture using ustreamer's HTTP snapshot endpoint.
 
@@ -189,6 +206,15 @@ class UstreamerCapture:
             # HTTP request OUTSIDE the lock - prevents cascade failure if ustreamer is slow
             session = _get_http_session()
             response = session.get(self.snapshot_url, timeout=2, allow_redirects=True)
+            # During a block /snapshot/raw serves the last frame the encoder
+            # stored. With no display attached nothing drives the encoder, so
+            # that frame could be minutes old and OCR/VLM ended real ad blocks
+            # because the stale picture showed no ad. ustreamer now reports
+            # the frame's age and wakes the encoder when it is stale: wait for
+            # that encode and ask once more.
+            if raw_frame_is_stale(response):
+                time.sleep(RAW_STALE_RETRY_WAIT_S)
+                response = session.get(self.snapshot_url, timeout=2, allow_redirects=True)
 
             if response.status_code == 200:
                 # Decode JPEG directly from memory (no disk I/O)
