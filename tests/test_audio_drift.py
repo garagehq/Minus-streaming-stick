@@ -492,3 +492,30 @@ class TestAvSettingsSurviveRestart(unittest.TestCase):
         obj.audio.calibrate_sync('start')
         # 16.7 + 38 + 28 + 72 - 55 - 15 + 259 = 343.7: where the owner set it
         self.assertAlmostEqual(obj.audio.SYNC_BASELINE_MS, 343.7, places=1)
+
+
+class TestNoDisplayNoCalibration(unittest.TestCase):
+    """minus 2026-10-19: the projector went off, the next calibration set the
+    delay to the box alone (17.7 ms) and saved it; the Optoma needs ~347."""
+
+    def test_no_display_keeps_the_delay_and_saves_nothing(self):
+        a = make_calibratable(level_ms=0.0, aq_ms=0.0, offsets={'opt': 259.0})
+        a.calibrate_sync('start')
+        good = a.SYNC_BASELINE_MS
+        saved = list(a.saved)
+        a.m.update(display_id=None, display_name=None, display_video_ms=None, display_audio_ms=None)
+        r = a.calibrate_sync('periodic')
+        self.assertFalse(r['success'])
+        self.assertEqual(a.SYNC_BASELINE_MS, good)
+        self.assertEqual(a.saved, saved, 'nothing saved without a display')
+        self.assertNotIn('unknown', a.sync_offsets)
+
+    def test_reconnect_requests_a_calibration(self):
+        import minus as minus_mod
+        from unittest.mock import MagicMock
+        m = minus_mod.Minus.__new__(minus_mod.Minus)
+        m.HDMI_RECONNECT_GRACE_SECONDS = 90.0
+        m.audio = MagicMock()
+        m.notify_hdmi_reconnect()
+        m.audio.request_calibration.assert_called_once()
+

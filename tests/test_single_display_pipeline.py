@@ -193,6 +193,29 @@ class TestRestoreDuringStartup(unittest.TestCase):
         self.assertFalse(mm._hdmi_signal_lost)
 
 
+class TestCaptureResumesWithoutATV(unittest.TestCase):
+    """minus 2026-10-19: the source slept and woke with the projector off;
+    recovery couldn't start the display, kept the audio watchdog paused, and
+    capture (ASR, audio gate) stayed stopped for the rest of the night."""
+
+    def test_signal_back_without_a_tv_restarts_capture(self):
+        import minus as m
+        from unittest.mock import patch
+        mm = object.__new__(m.Minus)
+        mm._startup_waiting_for_signal = False
+        mm._hdmi_signal_lost = True
+        mm.ad_blocker = MagicMock()
+        mm.ad_blocker.start.return_value = False        # no TV attached
+        mm.audio = MagicMock()
+        mm._set_led_state = MagicMock()
+        mm._restart_ustreamer = MagicMock()
+        mm._start_display_retry_loop = MagicMock()
+        with patch('minus.time.sleep'):
+            mm._on_hdmi_restored()
+        mm._start_display_retry_loop.assert_called_once()
+        mm.audio.resume_watchdog.assert_called_once()
+        mm.audio.unmute.assert_not_called()
+
 class TestCpuPercent(unittest.TestCase):
 
     def _hm(self):

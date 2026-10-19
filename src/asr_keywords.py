@@ -131,6 +131,27 @@ ASR_CTA_MARKERS = [
     'ask your pharmacist', 'talk to your doctor', 'ask your doctor',
     'do not take if', 'individual results may vary', 'results may vary',
     'results not typical', 'consult a physician', 'use as directed',
+    # pharma side-effect disclosures: a long stretch of them read like show
+    # dialog with no markers and the 8 s window vetoed a real Mounjaro ad
+    # (minus, 2026-10-19). Phrases ad copy is legally required to say and
+    # TV dialog almost never does.
+    'side effects', 'serious side effects', 'common side effects',
+    'allergic reaction', 'serious allergic', 'thyroid cancer', 'medullary thyroid',
+    'endocrine neoplasia', 'stop taking', 'tell your doctor', 'call your doctor',
+    'available by prescription', 'prescription medicine', 'prescription medication',
+    'once weekly', 'once daily', 'may cause', 'may increase the risk',
+    'not for people with', 'pancreatitis', 'gallbladder problems',
+    'low blood sugar', 'kidney problems', 'fda approved', 'fda-approved',
+    # sports-betting disclaimers: these ads open with game footage and
+    # commentary, so the window heard "show dialog" and vetoed a Fanatics
+    # Sportsbook ad for ~4 s until OCR caught it (minus, 2026-10-19). The
+    # legal lines are said in every one and never in a broadcast.
+    'gambling problem', 'if you or someone you know has a gambling',
+    '1 800 gambler', '1-800-gambler', 'eight hundred gambler', 'call 1 800',
+    'must be 21', 'must be twenty one', '21 and over', '21 plus',
+    'sportsbook', 'sports book', 'bonus bets', 'bet credits',
+    'deposit match', 'first bet', 'no sweat bet', 'odds boost',
+    'void where prohibited', 'terms apply',
     # sponsor self-reference
     'official sponsor', 'proud sponsor', 'proud partner',
     'in partnership with', 'presented by',

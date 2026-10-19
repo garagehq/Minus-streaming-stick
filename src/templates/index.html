@@ -749,6 +749,15 @@
                 <p class="help-text">After the TV reconnects, suppress ad blocking for 90 seconds so you can navigate menus without overlays jumping in.</p>
 
                 <div class="setting-item" style="margin-top: 1rem;">
+                    <span class="setting-label">Only Block When There's Sound</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="block-requires-audio-toggle" checked onchange="toggleOptimization('block_requires_audio', this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p class="help-text">Menus, home-screen banners and paused videos are silent. When only the picture model thinks it sees an ad and the input has been silent for 3 seconds, no block starts (and such a block ends after 10 seconds of silence). Ads whose on-screen text Minus can read are blocked either way.</p>
+
+                <div class="setting-item" style="margin-top: 1rem;">
                     <span class="setting-label">Greyscale Ad Preview</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="greyscale-preview-toggle" checked onchange="toggleOptimization('greyscale_preview', this.checked)">
@@ -2278,6 +2287,7 @@
                 block_falloff: 'block-falloff-toggle',
                 hdmi_reconnect_grace: 'hdmi-grace-toggle',
                 greyscale_preview: 'greyscale-preview-toggle',
+                block_requires_audio: 'block-requires-audio-toggle',
             };
             const toggleId = toggleIds[key];
             try {
@@ -2468,6 +2478,7 @@
                 document.getElementById('block-falloff-toggle').checked = !!data.block_falloff;
                 document.getElementById('hdmi-grace-toggle').checked = !!data.hdmi_reconnect_grace;
                 document.getElementById('greyscale-preview-toggle').checked = !!data.greyscale_preview;
+                document.getElementById('block-requires-audio-toggle').checked = data.block_requires_audio !== false;
             } catch (error) {
                 console.error('Failed to load optimization settings:', error);
             }
@@ -2573,10 +2584,18 @@
         // =========================================================================
         // Status LEDs (WS2812B strip on SPI0 MOSI)
         // =========================================================================
+        // Bumped by every LED change the user makes. loadStatusLEDs() also runs
+        // on a 2.5 s poll: a poll that left before a toggle's POST finished
+        // used to land afterwards with the old state and flip the toggle and
+        // panel back (seen as random failures of the live LED UI tests).
+        let _ledsGen = 0;
+
         async function loadStatusLEDs() {
+            const gen = _ledsGen;
             try {
                 const r = await fetch('/api/leds/status');
                 const data = await r.json();
+                if (gen !== _ledsGen) return;   // a change happened meanwhile
                 const toggle = document.getElementById('leds-toggle');
                 const panel = document.getElementById('leds-state-panel');
                 const help = document.getElementById('leds-help-text');
@@ -2650,10 +2669,12 @@
         async function toggleStatusLEDs(enabled) {
             const panel = document.getElementById('leds-state-panel');
             const toggle = document.getElementById('leds-toggle');
+            _ledsGen++;
             try {
                 const endpoint = enabled ? '/api/leds/enable' : '/api/leds/disable';
                 const r = await fetch(endpoint, { method: 'POST' });
                 const data = await r.json();
+                _ledsGen++;   // polls sent while the POST was in flight are stale too
                 if (!data.success) {
                     toggle.checked = !enabled;
                     setLEDStatus(data.error || 'failed', true);
@@ -2670,6 +2691,7 @@
 
         async function setStatusLEDState(state) {
             setLEDStatus(`switching to ${state}…`, false);
+            _ledsGen++;
             try {
                 const r = await fetch('/api/leds/state', {
                     method: 'POST',
@@ -2677,6 +2699,7 @@
                     body: JSON.stringify({ state }),
                 });
                 const data = await r.json();
+                _ledsGen++;
                 if (data.success) {
                     setLEDStatus(`state: ${state}`, false);
                     highlightLEDState(state);

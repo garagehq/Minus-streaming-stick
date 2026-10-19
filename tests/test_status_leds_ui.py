@@ -158,10 +158,15 @@ class TestStatusLEDsUI(unittest.TestCase):
         self.page.reload()
         self.page.wait_for_timeout(1500)
         _open_settings(self.page)
-        # After reload, loadStatusLEDs() should hydrate from the server.
-        toggle_checked = self.page.evaluate(
-            "document.getElementById('leds-toggle').checked"
-        )
+        # After reload, loadStatusLEDs() should hydrate from the server. Wait
+        # for it rather than a fixed delay: on a box busy blocking an ad the
+        # status fetch can take longer than 1.5 s (flaked once, 2026-10-19).
+        try:
+            self.page.wait_for_function(
+                "document.getElementById('leds-toggle').checked", timeout=8000)
+            toggle_checked = True
+        except Exception:
+            toggle_checked = False
         self.assertTrue(toggle_checked, "Toggle should remember 'enabled'")
         self.assertTrue(_wait_panel_visible(self.page, expect_visible=True))
 

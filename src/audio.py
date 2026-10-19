@@ -174,6 +174,13 @@ class AudioPassthrough:
         # Only sample RMS every N seconds — full-rate would thrash the CPU
         # and we only need ~10 Hz updates for the bar visualizer.
         self._level_sample_interval = 0.1
+        # Is anything playing? Measured before the mute, so a block doesn't
+        # read as silence. Program audio sits around -26..-12 dBFS; menus
+        # and paused screens are digital silence. See seconds_since_audible().
+        self.AUDIBLE_DBFS = float(os.environ.get('MINUS_AUDIBLE_DBFS', '-55'))
+        self._last_level_mono = 0.0
+        self._last_audible_mono = 0.0
+        self._level_since_mono = 0.0
         # Disabled: the sync-queue flush cannot cleanly recover the pipeline —
         # alsasink closes the PCM device when the pipeline goes to PAUSED mid-
         # flush, and with min-threshold-time on the upstream queue, nothing
@@ -353,7 +360,9 @@ class AudioPassthrough:
             #
             # Latency breakdown (PLAYBACK branch — applies whether or not the
             # ASR tap branch is attached):
-            #   - alsasrc: 50ms buffer
+            #   - alsasrc: 10ms periods in a 200ms ring (the ring only absorbs
+            #     stalls; at 50ms a busy box overran it and lost 10-20% of the
+            #     audio -- measured on the asr-first branch)
             #   - syncqueue: 300ms delay (min-threshold-time forces buffering before output)
             #   - audioqueue: up to 100ms for jitter absorption
             #   - alsasink: 50ms buffer
@@ -400,8 +409,12 @@ class AudioPassthrough:
                     f"appsink name=asr_sink emit-signals=true drop=true sync=false max-buffers=20"
                 )
                 pipeline_str = (
-                    f"alsasrc device={self.capture_device} buffer-time=50000 latency-time=10000 provide-clock=false ! "
+                    f"alsasrc device={self.capture_device} buffer-time=200000 latency-time=10000 provide-clock=false ! "
                     f"audio/x-raw,rate=48000,channels=2,format=S16LE ! "
+                    # Capture gets its own thread: a stall downstream (a Python
+                    # probe waiting on the GIL) backs up here instead of
+                    # overrunning the ALSA ring and losing samples.
+                    f"queue name=srcqueue max-size-time=1000000000 max-size-buffers=0 max-size-bytes=0 ! "
                     f"tee name=audiotee allow-not-linked=true "
                     # Playback branch (this comes off the tee and runs the
                     # same elements as the no-tap pipeline)
@@ -415,8 +428,12 @@ class AudioPassthrough:
                 # to pre-ASR Minus. No tee, no risk of pipeline-shape
                 # regressions on those installs.
                 pipeline_str = (
-                    f"alsasrc device={self.capture_device} buffer-time=50000 latency-time=10000 provide-clock=false ! "
+                    f"alsasrc device={self.capture_device} buffer-time=200000 latency-time=10000 provide-clock=false ! "
                     f"audio/x-raw,rate=48000,channels=2,format=S16LE ! "
+                    # Capture gets its own thread: a stall downstream (a Python
+                    # probe waiting on the GIL) backs up here instead of
+                    # overrunning the ALSA ring and losing samples.
+                    f"queue name=srcqueue max-size-time=1000000000 max-size-buffers=0 max-size-bytes=0 ! "
                     f"{playback_chain}"
                 )
 
@@ -433,8 +450,13 @@ class AudioPassthrough:
             self.bus.connect('message::eos', self._on_eos)
             self.bus.connect('message::state-changed', self._on_state_changed)
 
-            # Add probe to track buffer flow (for stall detection)
-            queue = self.pipeline.get_by_name('audioqueue')
+            # Buffer-flow probe (stall detection, level meter). It needs the
+            # GIL, so with the ASR tap it sits on the tap's leaky branch, off
+            # the playback path: on audioqueue a GIL stall paused the output
+            # (up to 0.7 s with the web API busy, measured on asr-first), an
+            # audible gap that also left the delay that much longer.
+            asrqueue = self.pipeline.get_by_name('asrqueue')
+            queue = asrqueue or self.pipeline.get_by_name('audioqueue')
             if queue:
                 pad = queue.get_static_pad('src')
                 if pad:
@@ -533,8 +555,32 @@ class AudioPassthrough:
             # are ~0.3. A sqrt curve makes the bars feel more responsive.
             visual = min(1.0, math.sqrt(rms))
             self._level_history.append(visual)
+            now_m = time.monotonic()
+            if not self._level_since_mono:
+                self._level_since_mono = now_m
+            self._last_level_mono = now_m
+            if rms > 0 and 20.0 * math.log10(rms) >= self.AUDIBLE_DBFS:
+                self._last_audible_mono = now_m
         finally:
             buf.unmap(mapinfo)
+
+    def seconds_since_audible(self):
+        """Seconds since the input last carried audible sound, or None when
+        it can't be told (pipeline not running, no level samples lately).
+
+        None means "unknown" and callers must not treat it as silence: an
+        audio outage must never stop ad blocking.
+        """
+        if not self.is_running or not self._last_level_mono:
+            return None
+        now = time.monotonic()
+        if now - self._last_level_mono > 2.0:
+            return None          # no samples flowing: unknown, not quiet
+        if not self._last_audible_mono:
+            # Flowing but nothing audible since start: quiet for as long as
+            # we have been listening.
+            return now - self._level_since_mono
+        return now - self._last_audible_mono
 
     def get_level_bars(self, width=16):
         """Render the current audio history as a unicode block bar string.
@@ -1472,6 +1518,13 @@ class AudioPassthrough:
             logger.debug(f"[AudioPassthrough] video latency measurement failed: {e}")
         if not m or m.get('ustreamer_ms') is None:
             return {'success': False, 'error': 'video latency not measurable (ustreamer down?)'}
+        if not m.get('display_id'):
+            # No TV/projector connected: there is no picture to sync to. Doing
+            # it anyway set the delay to the box alone (~18 ms instead of the
+            # Optoma's ~347) and saved it, so the sound ran ~330 ms early
+            # after the projector came back until the next calibration, up to
+            # 5 min later (minus, 2026-10-19). Keep the delay as it is.
+            return {'success': False, 'error': 'no display connected'}
         disp_v = m.get('display_video_ms') or 0.0
         disp_a = m.get('display_audio_ms') or 0.0
         display = m.get('display_id') or 'unknown'
