@@ -2579,6 +2579,10 @@ class Minus:
             'vlm_user_paused': self.is_vlm_user_paused(),
             'vlm_user_pause_remaining': self.get_vlm_pause_remaining(),
             'asr_verdict': self._asr_verdict(),
+            # Seconds the HDMI input has been silent (None = unknown or the
+            # audio gate is off) -- what block_requires_audio acts on.
+            'audio_quiet_s': (None if self._audio_quiet_seconds() is None
+                              else round(self._audio_quiet_seconds(), 1)),
             'asr': (self.asr.get_status() if self.asr is not None else
                     {'available': False, 'enabled': False, 'running': False}),
             'hdmi_reconnect_grace': self.is_in_hdmi_reconnect_grace(),
