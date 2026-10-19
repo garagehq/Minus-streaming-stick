@@ -142,6 +142,16 @@ ASR_CTA_MARKERS = [
     'once weekly', 'once daily', 'may cause', 'may increase the risk',
     'not for people with', 'pancreatitis', 'gallbladder problems',
     'low blood sugar', 'kidney problems', 'fda approved', 'fda-approved',
+    # sports-betting disclaimers: these ads open with game footage and
+    # commentary, so the window heard "show dialog" and vetoed a Fanatics
+    # Sportsbook ad for ~4 s until OCR caught it (minus, 2026-10-19). The
+    # legal lines are said in every one and never in a broadcast.
+    'gambling problem', 'if you or someone you know has a gambling',
+    '1 800 gambler', '1-800-gambler', 'eight hundred gambler', 'call 1 800',
+    'must be 21', 'must be twenty one', '21 and over', '21 plus',
+    'sportsbook', 'sports book', 'bonus bets', 'bet credits',
+    'deposit match', 'first bet', 'no sweat bet', 'odds boost',
+    'void where prohibited', 'terms apply',
     # sponsor self-reference
     'official sponsor', 'proud sponsor', 'proud partner',
     'in partnership with', 'presented by',

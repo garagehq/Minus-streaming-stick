@@ -210,8 +210,15 @@ class TestASRManager(unittest.TestCase):
                       'serious side effects may include pancreatitis',
                       'stop taking and call your doctor right away'):
             self.assertGreater(count_marker_hits(heard), 0, heard)
+        # Fanatics Sportsbook ad, minus 2026-10-19: commentary-like opening,
+        # then the required disclaimers.
+        for heard in ('if you or someone you know has a gambling problem call 1 800 gambler',
+                      'must be 21 plus terms apply', 'the only sportsbook to reward every bet'):
+            self.assertGreater(count_marker_hits(heard), 0, heard)
         for show in ('she walked into the kitchen and sat down',
-                     'the doctor will see you now said the nurse'):
+                     'the doctor will see you now said the nurse',
+                     'third and long for the colts from their own twenty one',
+                     'he bet on himself and it paid off this season'):
             self.assertEqual(count_marker_hits(show), 0, show)
 
     def test_no_veto_right_after_ad_language(self):
