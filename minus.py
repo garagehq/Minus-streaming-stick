@@ -331,6 +331,9 @@ class Minus:
     # An ASR veto (show dialog, no ad language) holds back a VLM-alone block
     # only while VLM agreement is below this. See _update_blocking_state.
     ASR_VETO_MAX_VLM_RATIO = float(os.environ.get('MINUS_ASR_VETO_MAX_VLM', '0.95'))
+    # A VLM-alone block needs VLM's recent decisions to still say AD at the
+    # moment it would start (the vlm_ad_detected flag is sticky).
+    VLM_ALONE_START_MIN_RATIO = float(os.environ.get('MINUS_VLM_ALONE_MIN_START', '0.6'))
     # ...and only on what ASR heard in the last few seconds (see the veto).
     ASR_VETO_WINDOW_S = float(os.environ.get('MINUS_ASR_VETO_WINDOW_S', '2.5'))
 
@@ -3997,7 +4000,23 @@ class Minus:
                         # markers) holds back a VLM-alone start below
                         # ASR_VETO_MAX_VLM_RATIO, and a VLM that sure blocks
                         # whatever the audio says.
-                        if (asr_verdict == 'veto' and veto_now
+                        if ad_ratio < self.VLM_ALONE_START_MIN_RATIO:
+                            # vlm_ad_detected is sticky (it clears only on
+                            # VLM's stop hysteresis) while other gates -- home
+                            # screen, static screen, grace, audio, the ASR veto
+                            # -- hold the start back. When the last of them
+                            # cleared, blocks started on that stale flag with
+                            # VLM's own recent decisions mostly NO-AD: 17%,
+                            # 31%, 46-50% seen on minus 2026-10-19, typically
+                            # a 2-3 s block that flickered off again. VLM alone
+                            # must still be calling it an ad NOW.
+                            should_start = False
+                            if now - getattr(self, '_vlm_stale_logged_at', 0.0) >= 5.0:
+                                self._vlm_stale_logged_at = now
+                                logger.info(f"VLM suppressed - stale (agreement now "
+                                            f"{ad_ratio*100:.0f}% of {total} < "
+                                            f"{self.VLM_ALONE_START_MIN_RATIO*100:.0f}%)")
+                        elif (asr_verdict == 'veto' and veto_now
                                 and ad_ratio < self.ASR_VETO_MAX_VLM_RATIO):
                             should_start = False
                             logger.info(f"VLM suppressed - ASR hears show dialog, no ad "
@@ -4007,9 +4026,11 @@ class Minus:
                             should_start = True
                             if asr_verdict == 'confirm' and self.asr:
                                 asr_note = f" + ASR confirmed ({self.asr.last_marker_hits} markers)"
-                            elif asr_verdict == 'veto':
+                            elif asr_verdict == 'veto' and veto_now:
                                 asr_note = (f" (ASR veto overruled: VLM at "
                                             f"{ad_ratio*100:.0f}%)")
+                            elif asr_verdict == 'veto':
+                                asr_note = " (ASR heard show dialog earlier, not in the last seconds)"
                             else:
                                 asr_note = ''
                             logger.info(f"VLM triggered alone (agreement: "

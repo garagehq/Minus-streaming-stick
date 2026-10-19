@@ -1039,6 +1039,34 @@ class TestEngineSelection(unittest.TestCase):
         self.assertLessEqual(len(_sys.path), before + 1)
 
 
+class TestStaleVLMStart(unittest.TestCase):
+    """minus 2026-10-19: VLM-alone blocks started at 17-50% agreement on the
+    sticky vlm_ad_detected flag once other gates cleared."""
+
+    def _m(self, ratio):
+        m = TestDecisionEngineASRGate._make_minus(self, asr_verdict='unknown')
+        m._get_vlm_agreement = MagicMock(return_value=(ratio, 1 - ratio, 6))
+        m.vlm_ad_detected = True
+        return m
+
+    def test_stale_flag_does_not_start_a_block(self):
+        for ratio in (0.17, 0.31, 0.5):
+            m = self._m(ratio)
+            m._update_blocking_state()
+            self.assertFalse(m.ad_detected, f"started at {ratio:.0%}")
+
+    def test_current_agreement_still_starts(self):
+        m = self._m(0.85)
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+    def test_ocr_blocks_do_not_need_vlm(self):
+        m = self._m(0.1)
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+
 # =============================================================================
 # OCR triangulation — transience guard + VLM+ASR veto + sustained OCR override
 # =============================================================================
