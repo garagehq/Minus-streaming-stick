@@ -1481,8 +1481,21 @@ class Minus:
                     "Display output not available. Check HDMI-TX connection to TV/monitor."
                 )
                 self._start_display_retry_loop()
-                # Audio stays muted/paused; resume_watchdog will fire when the
-                # retry loop succeeds (start_display_pipeline → main resume path).
+                # Capture must come back even with no TV: the pipeline routes
+                # playback to fakesink without one, and ASR (and the audio gate)
+                # listen on the capture side. Leaving the watchdog paused here
+                # kept audio stopped after a source sleep/wake with the TV off
+                # -- ASR deaf for the rest of the night (minus, 2026-10-19,
+                # autonomous mode running with the projector off). Muting is
+                # unchanged; the retry loop's success still does the full
+                # resume + unmute.
+                if self.audio:
+                    try:
+                        self.audio.resume_watchdog()
+                    except Exception as e:
+                        logger.warning(f"[Recovery] could not resume audio capture: {e}")
+                # Audio stays muted; the retry loop's success unmutes it
+                # (start_display_pipeline → main resume path).
                 # LED state stays at no_signal — the display gate keeps the
                 # strip dark while the retry loop runs.
         finally:
