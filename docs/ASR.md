@@ -20,12 +20,19 @@ From the `asr-first` experiments (the name-muter branch; its
   `MINUS_ASR_VETO_MAX_VLM`). The cases that got the old veto removed (below)
   were at 80% and 100%: the 100% one still blocks. OCR blocks never consult
   ASR.
-- **Audio as an input** (setting `block_requires_audio`, default on;
-  Settings → "Only Block When There's Sound"): ads always play sound, menus,
-  home-screen banners and paused screens don't. No block starts after 3 s
-  of input below -55 dBFS (`MINUS_AUDIO_GATE_START_S`, `MINUS_AUDIBLE_DBFS`),
-  and a block ends after 10 s of it (`MINUS_AUDIO_GATE_STOP_S`) unless the
-  ad's own countdown says it's still running. Measured before the mute, so a
+- **Audio as an input, for VLM-alone detections** (setting
+  `block_requires_audio`, default on; Settings → "Only Block When There's
+  Sound"): menus, home-screen banners and paused screens are silent and fool
+  the VLM. A VLM-alone block doesn't start after 3 s of input below -55 dBFS
+  (`MINUS_AUDIO_GATE_START_S`, `MINUS_AUDIBLE_DBFS`) and ends after 10 s of
+  it (`MINUS_AUDIO_GATE_STOP_S`) unless the ad's own countdown says it's
+  running. OCR-detected ads block regardless of sound: gating them too left
+  silent ad cards (frozen end cards, stalled ads, static image ads) visible,
+  32% of all ad frames in a day's test (2026-10-19).
+- **Other false-positive guards (2026-10-19):** a VLM-alone start needs VLM's
+  agreement to still be >= 60% when it starts (the detection flag is sticky
+  while other gates hold it back); and overruling an ASR veto needs VLM to be
+  unanimous (>= 95%) AND confident (mean AD confidence >= 0.85). Measured before the mute, so a
   block doesn't read as silence. Unknown audio (no pipeline, no samples)
   never holds a block back.
 - **Audio pipeline robustness:** 200 ms alsasrc ring (was 50 ms: a busy box

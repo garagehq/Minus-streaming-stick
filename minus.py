@@ -322,10 +322,11 @@ class Minus:
     switching between video and blocking overlay.
     """
 
-    # Audio as a blocking input (setting `block_requires_audio`, default on).
-    # Ads always play sound; menus, home-screen banners and paused screens
-    # are silent. A block doesn't start after this long without audio, and
-    # an active one ends after the longer one. See _audio_quiet_seconds().
+    # Audio as a blocking input (setting `block_requires_audio`, default on),
+    # for VLM-alone detections only: menus, home-screen banners and paused
+    # screens are silent and fool the VLM; ads on screen that OCR can read
+    # block regardless. A VLM-alone block doesn't start after this long
+    # without audio, and ends after the longer one. See _audio_quiet_seconds().
     AUDIO_GATE_START_QUIET_S = float(os.environ.get('MINUS_AUDIO_GATE_START_S', '3'))
     AUDIO_GATE_STOP_QUIET_S = float(os.environ.get('MINUS_AUDIO_GATE_STOP_S', '10'))
     # An ASR veto (show dialog, no ad language) holds back a VLM-alone block
@@ -4068,7 +4069,13 @@ class Minus:
                 # for 26 s with the room silent. Fails open: when the audio
                 # level is unknown (no audio pipeline, no samples) this never
                 # holds a block back.
-                if should_start:
+                # Only VLM-alone starts: OCR reading the ad's own UI on screen
+                # ("Sponsored", "Skip in", "Send to phone") is authoritative
+                # whether or not it makes a sound. Gating OCR too left silent
+                # ad cards (frozen end cards, stalled ads, static image ads)
+                # on screen: 1101 of the 1301 visible ad frames on minus
+                # 10-19 10:45-15:00 UTC, ~32% of all ad frames.
+                if should_start and source == 'vlm':
                     quiet = self._audio_quiet_seconds()
                     if quiet is not None and quiet >= self.AUDIO_GATE_START_QUIET_S:
                         if now - getattr(self, '_audio_gate_logged_at', 0.0) >= 10.0:
@@ -4221,7 +4228,8 @@ class Minus:
                 # Only after the minimum block time, and never while the ad's
                 # own countdown says it is still running (checked above).
                 audio_stop = False
-                if not release_stale and blocking_elapsed >= min_duration:
+                if (not release_stale and blocking_elapsed >= min_duration
+                        and self.blocking_source == 'vlm' and not self.ocr_ad_detected):
                     quiet = self._audio_quiet_seconds()
                     if quiet is not None and quiet >= self.AUDIO_GATE_STOP_QUIET_S:
                         logger.info(f"[Audio] Ending {self.blocking_source} block: "

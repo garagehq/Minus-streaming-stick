@@ -929,15 +929,19 @@ class TestAudioGate(unittest.TestCase):
         m._system_settings = {}
         return m
 
-    def test_silent_screen_does_not_start_a_block(self):
-        for src in ('vlm', 'ocr'):
-            m = self._m(quiet=5.0, asr_verdict='unknown')
-            if src == 'vlm':
-                m.vlm_ad_detected = True
-            else:
-                m.ocr_ad_detected = True
-            m._update_blocking_state()
-            self.assertFalse(m.ad_detected, f"{src} block started on a silent screen")
+    def test_silent_screen_does_not_start_a_vlm_block(self):
+        m = self._m(quiet=5.0, asr_verdict='unknown')
+        m.vlm_ad_detected = True
+        m._get_vlm_agreement = MagicMock(return_value=(1.0, 0.0, 5))
+        m._update_blocking_state()
+        self.assertFalse(m.ad_detected, "VLM block started on a silent screen")
+
+    def test_silent_ad_card_that_ocr_reads_still_blocks(self):
+        """Frozen/silent "Sponsored | Skip in" cards: OCR is authoritative."""
+        m = self._m(quiet=60.0, asr_verdict='unknown')
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
 
     def test_audio_playing_blocks_as_before(self):
         m = self._m(quiet=0.2)
@@ -963,20 +967,26 @@ class TestAudioGate(unittest.TestCase):
 class TestAudioGateStop(unittest.TestCase):
     """A block ends after AUDIO_GATE_STOP_QUIET_S of silence."""
 
-    def _blocking(self, quiet, elapsed=20.0):
-        # Mid-block OCR harness, with the ad still on screen (OCR and VLM
-        # both keep calling it an ad): only the audio can end it.
+    def _blocking(self, quiet, elapsed=20.0, source='vlm', ocr=False):
+        # Mid-block harness, with the VLM still calling it an ad: only the
+        # audio can end it.
         m = TestOCRTriangulationVeto._make_minus(
             self, blocking_elapsed=elapsed, vlm_no_ad_ratio=0.0,
-            asr_verdict='unknown', source='both')
+            asr_verdict='unknown', source=source)
+        m.ocr_ad_detected = ocr
         m.audio.seconds_since_audible = MagicMock(return_value=quiet)
         m._system_settings = {}
         return m
 
-    def test_long_silence_ends_the_block(self):
+    def test_long_silence_ends_a_vlm_block(self):
         m = self._blocking(quiet=12.0)
         m._update_blocking_state()
         self.assertFalse(m.ad_detected)
+
+    def test_silence_does_not_end_a_block_ocr_still_sees(self):
+        m = self._blocking(quiet=60.0, source='both', ocr=True)
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
 
     def test_short_gap_keeps_it(self):
         m = self._blocking(quiet=4.0)
