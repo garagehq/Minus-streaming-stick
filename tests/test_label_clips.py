@@ -74,12 +74,24 @@ class TestCaptionWords(unittest.TestCase):
         # Uploaded captions: one segment per line, no word offsets.
         (self.dir / 'captions' / 'c.json3').write_text(json.dumps({'events': [
             {'tStartMs': 10000, 'dDurationMs': 4000, 'segs': [{'utf8': 'here comes\nLeBron James'}]},
-            {'tStartMs': 14000, 'dDurationMs': 2000, 'segs': [{'utf8': 'again'}]}]}))
+            {'tStartMs': 14000, 'dDurationMs': 2000, 'segs': [{'utf8': '>> again'}]}]}))
         w = lc.caption_words(self.dir, 'c')
         self.assertEqual([x[0] for x in w], ['here', 'comes', 'LeBron', 'James', 'again'])
         self.assertAlmostEqual(w[0][1], 10.0)
         self.assertAlmostEqual(w[2][1], 12.0)
         self.assertAlmostEqual(w[3][2], 14.0)
+        self.assertAlmostEqual(w[4][1], 14.0)   # a speaker mark takes no time
+
+    def test_multi_word_tags_dropped_and_censoring_marked(self):
+        w = lc.drop_tags([(t, k, k + 1) for k, t in enumerate(
+            ['so', '[clears', 'throat]', 'lebron', '[', '__', ']', 'yeah', '>>', '[Music]'])])
+        self.assertEqual([x[0] for x in w], ['so', 'lebron', lc.CENSORED, 'yeah'])
+        self.assertEqual(w[2][1:], (4, 7))
+
+    def test_stray_bracket_keeps_words(self):
+        words = ['[oh'] + ['word'] * 8
+        w = lc.drop_tags([(t, k, k + 1) for k, t in enumerate(words)])
+        self.assertEqual(len(w), 9)
 
     def test_vtt_cue_words_spread(self):
         (self.dir / 'captions' / 'b.vtt').write_text(
@@ -140,6 +152,14 @@ class TestLabelAll(unittest.TestCase):
         self.assertAlmostEqual(dur, row['duration'], places=2)
         # Trim starts LEAD_S before the first word: sample index (2.0-0.15)*SR.
         self.assertEqual(first, int((2.0 - lc.LEAD_S) * SR) % 20000)
+
+    def test_clip_with_censored_word_rejected(self):
+        words = [(w, 20.0 + 0.4 * i) for i, w in
+                 enumerate('and a strong [ __ ] move by lebron james to the rim'.split())]
+        write_json3(self.farm / 'captions' / 'vid1.json3', words)
+        self.clip('c1', 1018.0)
+        st = self.run_label()
+        self.assertEqual((st['labeled'], st['rejected']), (0, 1))
 
     def test_clip_without_speech_rejected_and_not_retried(self):
         self.clip('c2', 1001.0)            # video 1..11 s: no caption words

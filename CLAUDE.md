@@ -123,6 +123,20 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
       and are garbled: `label_clips.is_rolling_vtt` makes them yield no
       words and the farm skips them at discovery. vtt text is
       html-unescaped (`&gt;&gt;` speaker marks became 'gt gt' labels).
+    - Uploaded (non-auto) json3 captions put a whole line in one segment
+      with no word offsets; its words are spread over the line, as for
+      vtt (before 3be70e0 they all got the line's start, so labels ran
+      seconds past the audio). Multi-word sound tags ("[clears throat]")
+      are dropped; a censored word ("[ __ ]") rejects the clip.
+    - `tools/audit_dataset.py` re-checks every label against Parakeet TDT
+      0.6B (independent of SenseVoice): transcribe -> review -> verify ->
+      review -> apply. It trims audible edge words the label leaves out
+      (only when re-transcribing the trimmed audio confirms it), fixes
+      anchored name misspellings, relabels line-caption clips and drops
+      labels that don't match the audio (character-level, with the
+      SenseVoice overlap as a second vote; Parakeet missing the name is
+      not held against a label). Dropped clips go to
+      `~/asr_dataset/audit/quarantine`, trimmed originals to `untrimmed/`.
     - `label_clips.HELD_OUT` keeps every evaluation video out of
       training.
     - Clip sidecars carry `clip_start_mono`. The random-clip rate is set

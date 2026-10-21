@@ -155,6 +155,11 @@ def is_rolling_vtt(path: Path) -> bool:
         return False
 
 
+# Sound tags ([Music], (applause)) and speaker-change marks.
+TAG_RE = re.compile(r'\[.*\]|\(.*\)|>>')
+CENSORED = '<censored>'
+
+
 def caption_words(farm_dir: Path, vid: str):
     """[(word, start, end)] for a video, from its json3 (word-level) or vtt
     (cue-level, words spread evenly over the cue) caption file. Roll-up vtt
@@ -180,7 +185,9 @@ def caption_words(farm_dir: Path, vid: str):
         starts.sort()
         for k, (s, ev_end, txt) in enumerate(starts):
             nxt = starts[k + 1][0] if k + 1 < len(starts) else ev_end
-            ws = txt.split()
+            ws = [w for w in txt.split() if not TAG_RE.fullmatch(w)]
+            if not ws:
+                continue
             if len(ws) == 1:
                 words.append((ws[0], s, min(max(nxt, s + 0.1), s + 1.0)))
                 continue
@@ -213,10 +220,33 @@ def caption_words(farm_dir: Path, vid: str):
                     d = (cur[1] - cur[0]) / len(ws)
                     words += [(w, cur[0] + k * d, cur[0] + (k + 1) * d) for k, w in enumerate(ws)]
                 cur = None
-    # Drop sound tags like [Music] / [Applause].
-    words = [w for w in words if not re.fullmatch(r'\[.*\]|\(.*\)|>>', w[0])]
+    words = drop_tags(words)
     _caption_cache[vid] = words
     return words
+
+
+def drop_tags(words):
+    """Drop sound tags ([Music], [clears throat], which may span several
+    words) and speaker marks. A censored word ("[ __ ]") becomes CENSORED,
+    so clips containing it are rejected: something is said that the label
+    can't hold."""
+    out, run = [], None
+    for w in words:
+        if run is not None:
+            run.append(w)
+            if len(run) > 6:                    # a stray "[", not a tag
+                out += [x for x in run if not TAG_RE.fullmatch(x[0])]
+                run = None
+            elif w[0].endswith(']'):
+                inner = ' '.join(x[0] for x in run).strip('[] ')
+                if set(inner) <= set('_ '):
+                    out.append((CENSORED, run[0][1], w[2]))
+                run = None
+        elif w[0].startswith('[') and not w[0].endswith(']'):
+            run = [w]
+        elif not TAG_RE.fullmatch(w[0]):
+            out.append(w)
+    return out
 
 
 def normalize(text):
@@ -284,7 +314,8 @@ def label_all(clips_dir=CLIPS_DIR, farm_dir=FARM_DIR, ds=DATASET_DIR, log=print)
                 continue
             ws = [w for w in caption_words(farm_dir, vid)
                   if w[1] >= v0 + EDGE_MARGIN_S and w[2] <= v1 - EDGE_MARGIN_S]
-            if len(ws) < MIN_WORDS or ws[-1][2] - ws[0][1] < MIN_SPAN_S:
+            if (len(ws) < MIN_WORDS or ws[-1][2] - ws[0][1] < MIN_SPAN_S
+                    or any(w[0] == CENSORED for w in ws)):
                 stats['rejected'] += 1
                 continue
             raw = ' '.join(x[0] for x in ws)
