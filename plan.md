@@ -44,7 +44,7 @@ The delay settings are fixed: 2.4 s (`MINUS_AV_DELAY_S=2.0`) and 1.2 s
 
 * The clip farm runs continuously (`tools/clip_farm.py`), and
   `tools/label_clips.py` labels clips with caption text that agrees with
-  the ASR. The dataset cap is 22 GB.
+  the ASR. The dataset cap is 24 GB.
 * Improve diversity:
   * skip duplicate re-uploads of the same event (same caption text);
   * favour videos with ≥0.5 mentions per minute;
