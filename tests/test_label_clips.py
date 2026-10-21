@@ -70,6 +70,17 @@ class TestCaptionWords(unittest.TestCase):
         self.assertAlmostEqual(w[1][1], 1.3)
         self.assertAlmostEqual(w[1][2], 1.7)    # ends where the next word starts
 
+    def test_json3_line_segment_words_spread(self):
+        # Uploaded captions: one segment per line, no word offsets.
+        (self.dir / 'captions' / 'c.json3').write_text(json.dumps({'events': [
+            {'tStartMs': 10000, 'dDurationMs': 4000, 'segs': [{'utf8': 'here comes\nLeBron James'}]},
+            {'tStartMs': 14000, 'dDurationMs': 2000, 'segs': [{'utf8': 'again'}]}]}))
+        w = lc.caption_words(self.dir, 'c')
+        self.assertEqual([x[0] for x in w], ['here', 'comes', 'LeBron', 'James', 'again'])
+        self.assertAlmostEqual(w[0][1], 10.0)
+        self.assertAlmostEqual(w[2][1], 12.0)
+        self.assertAlmostEqual(w[3][2], 14.0)
+
     def test_vtt_cue_words_spread(self):
         (self.dir / 'captions' / 'b.vtt').write_text(
             "WEBVTT\n\n00:00:10.000 --> 00:00:12.000\nhere comes LeBron James\n\n")

@@ -180,8 +180,15 @@ def caption_words(farm_dir: Path, vid: str):
         starts.sort()
         for k, (s, ev_end, txt) in enumerate(starts):
             nxt = starts[k + 1][0] if k + 1 < len(starts) else ev_end
-            for w in txt.split():
-                words.append((w, s, min(max(nxt, s + 0.1), s + 1.0)))
+            ws = txt.split()
+            if len(ws) == 1:
+                words.append((ws[0], s, min(max(nxt, s + 0.1), s + 1.0)))
+                continue
+            # A whole caption line in one segment (uploaded captions carry
+            # no word offsets): spread its words over the line, as for vtt.
+            end = nxt if s < nxt <= ev_end else ev_end
+            d = max(end - s, 0.1 * len(ws)) / len(ws)
+            words += [(w, s + i * d, s + (i + 1) * d) for i, w in enumerate(ws)]
     elif v.exists() and not is_rolling_vtt(v):
         cue_re = re.compile(r'(\d+):(\d+):(\d+)\.(\d+) --> (\d+):(\d+):(\d+)\.(\d+)')
         cur = None
