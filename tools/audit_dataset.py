@@ -19,11 +19,14 @@ usage: python3 tools/audit_dataset.py transcribe [--workers 2 --threads 4] [--li
        python3 tools/audit_dataset.py review       # decisions + report, changes nothing
        python3 tools/audit_dataset.py verify       # re-transcribe the proposed trims
        python3 tools/audit_dataset.py review       # again, now with checked trims
-       python3 tools/audit_dataset.py apply        # manifest backup, trims, quarantine
+       python3 tools/audit_dataset.py apply [--keep-untrimmed]   # manifest backup, trims, quarantine
 
 Transcripts go to DATASET_DIR/audit/parakeet.jsonl (resumable). Removed
-clips move to DATASET_DIR/audit/quarantine/ and the originals of trimmed
-clips to DATASET_DIR/audit/untrimmed/, so `apply` can be undone.
+clips move to DATASET_DIR/audit/quarantine/ and the manifest is backed up.
+Trims are only applied once Parakeet confirms the trimmed audio matches the
+label better; each trimmed row keeps its trim span and original duration
+under 'audit'. The original audio of trimmed clips (about half the dataset)
+is copied to DATASET_DIR/audit/untrimmed/ only with --keep-untrimmed.
 """
 import argparse
 import collections
@@ -443,13 +446,14 @@ def review(verbose=True):
 
 # ---------------------------------------------------------------- apply
 
-def apply():
+def apply(keep_untrimmed=False):
     decisions = review(verbose=False)
     ds = lc.DATASET_DIR
     stamp = time.strftime('%Y%m%d_%H%M%S')
     shutil.copy2(ds / 'manifest.jsonl', AUDIT_DIR / f'manifest.before_audit_{stamp}.jsonl')
     (AUDIT_DIR / 'quarantine').mkdir(exist_ok=True)
-    (AUDIT_DIR / 'untrimmed').mkdir(exist_ok=True)
+    if keep_untrimmed:
+        (AUDIT_DIR / 'untrimmed').mkdir(exist_ok=True)
     kept, n = [], collections.Counter()
     dropped = open(AUDIT_DIR / 'quarantine' / 'manifest.jsonl', 'a')
     for r in manifest():
@@ -469,7 +473,9 @@ def apply():
         if trim:
             a, b = trim
             x = read_wav(p)
-            shutil.copy2(p, AUDIT_DIR / 'untrimmed' / p.name)
+            if keep_untrimmed:
+                shutil.copy2(p, AUDIT_DIR / 'untrimmed' / p.name)
+            untrimmed_s = r['duration']
             with wave.open(str(p), 'wb') as w:
                 w.setnchannels(1)
                 w.setsampwidth(2)
@@ -484,6 +490,8 @@ def apply():
             n['renamed'] += 1
         r['audit'] = {'parakeet_cer': d['cer'], 'trim': trim,
                       'name_fixes': d.get('name_fixes')}
+        if trim:
+            r['audit']['untrimmed_duration'] = untrimmed_s
         kept.append(r)
     dropped.close()
     tmp = ds / 'manifest.jsonl.tmp'
@@ -501,6 +509,8 @@ def main():
     ap.add_argument('--workers', type=int, default=2)
     ap.add_argument('--threads', type=int, default=4)
     ap.add_argument('--limit', type=int)
+    ap.add_argument('--keep-untrimmed', action='store_true',
+                    help='copy the original audio of trimmed clips to audit/untrimmed/')
     args = ap.parse_args()
     if args.cmd == 'transcribe':
         transcribe(args.workers, args.threads, args.limit)
@@ -509,7 +519,7 @@ def main():
     elif args.cmd == 'verify':
         verify(args.workers, args.threads)
     else:
-        apply()
+        apply(args.keep_untrimmed)
 
 
 if __name__ == '__main__':

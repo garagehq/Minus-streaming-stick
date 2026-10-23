@@ -136,7 +136,8 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
       labels that don't match the audio (character-level, with the
       SenseVoice overlap as a second vote; Parakeet missing the name is
       not held against a label). Dropped clips go to
-      `~/asr_dataset/audit/quarantine`, trimmed originals to `untrimmed/`.
+      `~/asr_dataset/audit/quarantine`; trimmed originals are copied to
+      `untrimmed/` only with `apply --keep-untrimmed` (~half the dataset).
     - `label_clips.HELD_OUT` keeps every evaluation video out of
       training.
     - Clip sidecars carry `clip_start_mono`. The random-clip rate is set
