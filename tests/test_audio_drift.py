@@ -354,8 +354,8 @@ class TestLiveDelay(unittest.TestCase):
     def test_first_calibration_applies_and_includes_the_display(self):
         a = make_calibratable(level_ms=300.0, aq_ms=0.0, offsets={'opt': 0.0})
         a.calibrate_sync('test')
-        # 16.7 + 38 + 28 (box) + 72 (Optoma) - 55 - 15 (typical audioqueue) = 84.7
-        self.assertAlmostEqual(a.SYNC_BASELINE_MS, 84.7, places=1)
+        # 16.7 + 38 + 28 (box) + 72 (Optoma) + 20 (AUDIO_PATH_MS = -20) - 15 (typical audioqueue) = 159.7
+        self.assertAlmostEqual(a.SYNC_BASELINE_MS, 159.7, places=1)
         self.assertEqual(a.get_sync_info()['display'], 'Optoma UHD')
 
     def test_old_global_trim_migrates_without_moving_the_delay(self):
@@ -490,8 +490,8 @@ class TestAvSettingsSurviveRestart(unittest.TestCase):
         self.assertEqual(obj.audio.sync_offsets, {'opt': 259.0})
         obj.audio.video_latency_fn = lambda: obj.audio.m
         obj.audio.calibrate_sync('start')
-        # 16.7 + 38 + 28 + 72 - 55 - 15 + 259 = 343.7: where the owner set it
-        self.assertAlmostEqual(obj.audio.SYNC_BASELINE_MS, 343.7, places=1)
+        # 16.7 + 38 + 28 + 72 + 20 - 15 + 259 = 418.7: where the owner set it
+        self.assertAlmostEqual(obj.audio.SYNC_BASELINE_MS, 418.7, places=1)
 
 
 class TestNoDisplayNoCalibration(unittest.TestCase):

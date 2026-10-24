@@ -39,10 +39,14 @@ import time
 # and half a refresh until the middle of the screen is scanned out (~8).
 DISPLAY_SIDE_MS = 28.0
 
-# The audio path's own latency outside syncqueue: alsasrc latency-time
-# (10 ms) + alsasink's buffer (buffer-time 50 ms, kept nearly full).
-# audioqueue's level is measured live and added on top.
-AUDIO_PATH_MS = 55.0
+# The audio path's latency beyond syncqueue's min-threshold-time. It was
+# assumed to be +55 ms (alsasrc period + alsasink buffer), but measured from
+# the kernel's ALSA pointers (capture appl_ptr - playback hw_ptr, minus,
+# 2026-10-24) the sound reaches the DAC ~20 ms SOONER than the threshold:
+# syncqueue's level is in buffer timestamps, which run ahead of the samples
+# it really holds (level 360 ms vs 310 ms of samples in the process). With +55
+# every delay came out ~75 ms short, i.e. the sound early.
+AUDIO_PATH_MS = -20.0
 
 # audioqueue (after syncqueue) absorbs the drift between the HDMI-in and
 # HDMI-out audio clocks: it creeps up and, being leaky, drops its oldest audio
