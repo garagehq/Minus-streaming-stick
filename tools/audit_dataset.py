@@ -66,6 +66,9 @@ CUT_GUARD_S = 0.02
 # Label words corrected to what Parakeet heard when they are close in
 # spelling (caption mishearings of the names).
 NAME_FIXES = {'lebron', 'james', 'bronny'}
+# Already the name as spoken: Parakeet often drops a possessive "'s", and
+# "bron" is a nickname announcers really say.
+NAME_FORMS = {"lebron's", 'lebrons', "james'", "james's", "bronny's", 'bron', "bron's"}
 NAME_FIX_MAX_CHARS = 3
 
 
@@ -288,7 +291,7 @@ def decide(row, tr, relabelled=False):
         # Only where the words either side agree, so the alignment is sure
         # which word was misheard ("jab step" is not "james jabstep").
         anchored = all(core[x][0] == '=' for x in (k - 1, k + 1) if 0 <= x < len(core))
-        if (op == 's' and anchored and hyp[j] in NAME_FIXES and label[i] not in NAME_FIXES
+        if (op == 's' and anchored and hyp[j] in NAME_FIXES and label[i] not in NAME_FIXES | NAME_FORMS
                 and lev(label[i], hyp[j]) <= NAME_FIX_MAX_CHARS):
             fixes.append([label[i], hyp[j]])
             fixed[i] = hyp[j]

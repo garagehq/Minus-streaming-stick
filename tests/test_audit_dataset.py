@@ -54,6 +54,12 @@ class TestDecide(unittest.TestCase):
         self.assertEqual(d['text'], 'a lot of lebron fans love this')
         self.assertEqual(d['name_fixes'], [['bran', 'lebron']])
 
+    def test_possessive_and_nickname_not_changed(self):
+        d = A.decide(row("the series lebron's stats were great"), tr('the series lebron stats were great'.split()))
+        self.assertFalse(d.get('name_fixes'))
+        d = A.decide(row('cavs sneak one out bron had twelve'), tr('cavs sneak one out lebron had twelve'.split()))
+        self.assertFalse(d.get('name_fixes'))
+
     def test_unanchored_name_substitution_left_alone(self):
         d = A.decide(row('clock two times jab step put up three'),
                      tr('class two times james jabstep put up three'.split()))
