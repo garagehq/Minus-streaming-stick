@@ -246,6 +246,10 @@ def decide(row, tr, relabelled=False):
     if not label:
         return {'action': 'drop', 'why': 'empty label'}
     if not hyp:
+        # Parakeet sometimes returns nothing for clear speech (the same clip
+        # transcribes with a little padding), so SenseVoice decides alone.
+        if not relabelled and row.get('asr_overlap', 0) >= LOW_OVERLAP:
+            return {'action': 'keep', 'why': 'parakeet heard nothing; sensevoice agrees'}
         return {'action': 'drop', 'why': 'parakeet heard nothing'}
     ops = align(label, hyp)
     if relabelled:

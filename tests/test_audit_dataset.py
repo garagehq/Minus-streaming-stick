@@ -60,6 +60,11 @@ class TestDecide(unittest.TestCase):
         d = A.decide(row('cavs sneak one out bron had twelve'), tr('cavs sneak one out lebron had twelve'.split()))
         self.assertFalse(d.get('name_fixes'))
 
+    def test_empty_parakeet_transcript_falls_back_to_sensevoice(self):
+        empty = {'text': '', 'words': []}
+        self.assertEqual(A.decide(row('in a world of trouble', overlap=1.0), empty)['action'], 'keep')
+        self.assertEqual(A.decide(row('in a world of trouble', overlap=0.6), empty)['action'], 'drop')
+
     def test_unanchored_name_substitution_left_alone(self):
         d = A.decide(row('clock two times jab step put up three'),
                      tr('class two times james jabstep put up three'.split()))
