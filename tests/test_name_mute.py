@@ -235,6 +235,51 @@ class TestController(unittest.TestCase):
                                                ("LeBron", 1.0, 1.4)], t - 1.5)
         self.assertEqual([w[2] for w in sch._windows], ['asr'])
 
+    def test_edge_king_ignored_only_at_window_edges(self):
+        ctl, sch = self._ctl()
+        ctl.window_s = 3.0
+        ctl.edge_king = True
+        t0 = time.monotonic()
+        # "tal|king": window starts inside the word.
+        ctl.on_asr_words("king about this", [("king", 0.0, 0.2), ("about", 0.3, 0.6), ("this", 0.6, 0.9)], t0)
+        # "sacramento king|s": window ends inside the word.
+        ctl.on_asr_words("sacramento king", [("sacramento", 2.0, 2.6), ("king", 2.65, 2.95)], t0 + 5)
+        self.assertEqual(ctl.asr_hits, 0)
+        self.assertEqual(ctl.edge_king_skips, 2)
+        # A whole "king" inside the window and "King James" at an edge still mute.
+        ctl.on_asr_words("long live the king now", [("long", 0.5, 0.8), ("live", 0.8, 1.0), ("the", 1.0, 1.1),
+                                                   ("king", 1.1, 1.5), ("now", 1.6, 1.9)], t0 + 10)
+        ctl.on_asr_words("king james", [("king", 0.0, 0.3), ("james", 0.3, 0.7)], t0 + 20)
+        ctl.on_asr_words("lebron", [("lebron", 2.6, 2.95)], t0 + 30)
+        self.assertEqual(ctl.asr_hits, 3)
+
+    def test_edge_king_off_by_default(self):
+        ctl, sch = self._ctl()
+        ctl.window_s = 3.0
+        ctl.on_asr_words("sacramento king", [("sacramento", 2.0, 2.6), ("king", 2.65, 2.95)], time.monotonic())
+        self.assertEqual(ctl.asr_hits, 1)
+
+    def test_edge_king_skip_does_not_trigger_whole_window_fallback(self):
+        ctl, sch = self._ctl()
+        ctl.window_s = 3.0
+        ctl.edge_king = True
+        ctl.on_asr_words("the king", [("the", 2.3, 2.5), ("king", 2.6, 2.95)], time.monotonic())
+        self.assertEqual(sch._windows, [])
+
+    def test_words_log(self):
+        import json
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), 'w.jsonl')
+        os.environ['MINUS_ASR_WORDS_LOG'] = path
+        try:
+            ctl, _ = self._ctl()
+        finally:
+            del os.environ['MINUS_ASR_WORDS_LOG']
+        ctl.on_asr_words("hi there", [("hi", 0.1, 0.3), ("there", 0.3, 0.6)], 100.0)
+        row = json.loads(open(path).read())
+        self.assertEqual(row['ws'], 100.0)
+        self.assertEqual(row['words'][1], ["there", 0.3, 0.6])
+
     def test_disabled(self):
         ctl, _ = self._ctl()
         ctl.enabled = False

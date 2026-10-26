@@ -21,6 +21,7 @@ the live fill of the audio sync queue. The scheduler mutes
 
 import collections
 import difflib
+import json
 import logging
 import os
 import re
@@ -376,6 +377,12 @@ class NameMuteController:
     # so it is on by default for SenseVoice only.
     PARTIAL_EDGE_S = 0.5
     PARTIAL_MUTE_S = 0.8
+    # Edge "king": a bare "king" touching a window edge is usually a cut-off
+    # word -- the tail of "making"/"talking" when the window starts mid-word,
+    # or "Kings" with the "s" past the window end. Such a hit is ignored; a
+    # real "King" lies inside the next or previous window (hop 0.25-0.5 s)
+    # and is muted from there. Off by default (MINUS_NAME_MUTE_EDGE_KING=1).
+    EDGE_KING_S = 0.25
 
     def __init__(self, scheduler: NameMuteScheduler, matcher: NameMatcher = None,
                  partial_names: bool = False):
@@ -398,14 +405,34 @@ class NameMuteController:
         self.caption_hits = 0
         self.last_asr_text = ''
         self.last_caption_text = ''
+        self.edge_king = os.environ.get('MINUS_NAME_MUTE_EDGE_KING', '0') == '1'
+        self.edge_king_skips = 0
+        # MINUS_ASR_WORDS_LOG=<path>: append every ASR window's timed words
+        # (JSON lines), so a live run can be replayed offline.
+        self._words_log = None
+        path = os.environ.get('MINUS_ASR_WORDS_LOG')
+        if path:
+            try:
+                self._words_log = open(path, 'a', buffering=1)
+            except OSError as e:
+                logger.warning(f"ASR words log disabled: {e}")
 
     def on_asr_words(self, transcript: str, words, window_start: float):
         if not (self.enabled and self.use_asr):
             return
+        if self._words_log is not None:
+            try:
+                self._words_log.write(json.dumps({
+                    'ws': round(window_start, 3), 'len': self.window_s, 'text': transcript,
+                    'words': [(w, round(s, 3), round(e, 3)) for w, s, e in (words or [])]}) + '\n')
+            except (OSError, ValueError, TypeError):
+                pass
         spans = self.matcher.find_word_spans(words) if words else []
         if not spans and self.matcher.find(transcript):
             # No usable word timings: mute the whole window.
             spans = [(0.0, max((e for _, _, e in words), default=2.5))]
+        elif self.edge_king and spans:
+            spans = self._drop_edge_king(words, spans)
         if words:
             self._cancel_unheard_captions(words, window_start, bool(spans))
         if self.partial_names and words:
@@ -445,6 +472,17 @@ class NameMuteController:
                                     {'word_start': round(s, 3), 'word_end': round(e, 3)},
                                     replace_sources=('caption', 'caption_mid',
                                                      'asr_partial', 'asr_edge'))
+
+    def _drop_edge_king(self, words, spans):
+        """Remove bare-"king" spans that touch a window edge (see EDGE_KING_S)."""
+        kings = {(s, e) for w, s, e in words if _WORD_KING_RE.match(_norm(w))}
+        keep = []
+        for s, e in spans:
+            if (s, e) in kings and (s <= self.EDGE_KING_S or e >= self.window_s - self.EDGE_KING_S):
+                self.edge_king_skips += 1
+                continue
+            keep.append((s, e))
+        return keep
 
     def _cancel_unheard_captions(self, words, window_start: float, has_name: bool):
         """End mid-line caption mutes whose moment this window heard whole
@@ -591,6 +629,8 @@ class NameMuteController:
             'partial_names': self.partial_names,
             'partial_hits': self.partial_hits,
             'partial_cancels': self.partial_cancels,
+            'edge_king': self.edge_king,
+            'edge_king_skips': self.edge_king_skips,
             'caption_hits': self.caption_hits,
             'caption_mid_cancels': self.caption_mid_cancels,
             'last_asr_text': self.last_asr_text[:200],
