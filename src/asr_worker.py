@@ -392,6 +392,18 @@ class ASRProcess:
 
     # ----- lifecycle -----
 
+    # Heap fragmentation in the SenseVoice worker: every NPU call hands back
+    # a ~17 MB logits buffer (vocab x 171 frames). Once glibc's adaptive mmap
+    # threshold climbs past that size these land in the heap arenas, and the
+    # worker's anonymous memory ratchets up ~110 MB/h (8 h soak, 2026-10-26:
+    # 1.75 -> 2.65 GB; the model code alone, in-process, stays flat). A fixed
+    # 1 MB threshold keeps large buffers on mmap, returned on free, and two
+    # arenas limit fragmentation: in a 50 min A/B through this class the peak
+    # stopped rising after ~17 min, while the default kept setting new highs.
+    # An explicit value in the service environment wins.
+    WORKER_MALLOC_ENV = {'MALLOC_MMAP_THRESHOLD_': '1048576',
+                         'MALLOC_ARENA_MAX': '2'}
+
     def start(self) -> bool:
         """Spawn the worker process and wait up to WORKER_LOAD_TIMEOUT
         seconds for the model to load. Returns True on success."""
@@ -414,7 +426,19 @@ class ASRProcess:
                 daemon=True,
                 name=f'ASRWorker-{self.model_name}'
             )
-            self.process.start()
+            # glibc reads its malloc tunables at exec, so set them only
+            # around the spawn of this worker.
+            saved = {k: os.environ.get(k) for k in self.WORKER_MALLOC_ENV}
+            for k, v in self.WORKER_MALLOC_ENV.items():
+                os.environ.setdefault(k, v)
+            try:
+                self.process.start()
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
 
         start = time.time()
         logger.info(f"[ASRProcess] Waiting for worker to load "
