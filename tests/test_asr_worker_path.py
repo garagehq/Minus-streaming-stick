@@ -51,3 +51,14 @@ def test_worker_malloc_env_respects_explicit_value(monkeypatch):
     _start_with_fake(monkeypatch)
     assert _FakeProcess.seen['MALLOC_ARENA_MAX'] == '4'
     assert os.environ['MALLOC_ARENA_MAX'] == '4'
+
+
+def test_malloc_trimmer_is_glibc_trim():
+    trim = asr_worker._malloc_trimmer()
+    assert trim is not None
+    assert trim(0) in (0, 1)
+
+
+def test_malloc_trimmer_disabled_with_zero(monkeypatch):
+    monkeypatch.setattr(asr_worker, 'TRIM_EVERY', 0)
+    assert asr_worker._malloc_trimmer() is None

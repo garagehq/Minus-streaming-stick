@@ -25,6 +25,7 @@ The keyword module (src/asr_keywords.py) is engine-agnostic, so the
 swap from whisper.cpp to faster-whisper required no keyword changes.
 """
 
+import gc
 import logging
 import multiprocessing as mp
 import os
@@ -48,6 +49,30 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Worker process main loop
 # ---------------------------------------------------------------------------
+
+# Worker memory. Even with the mmap tunables (ASRProcess.WORKER_MALLOC_ENV)
+# the SenseVoice worker's anonymous memory grew ~80 MB/h over a 10 h soak
+# (2026-10-27: peak 1.6 -> 2.5 GB). Two causes:
+#  - rknnlite's inference() leaves its ctypes input/output buffers (the
+#    output is the ~17 MB logits array) in reference cycles, so they wait
+#    for Python's cyclic GC; between collections hundreds of MB pile up
+#    (peak 1.0 GB vs 0.52 GB baseline after just 150 calls). gc.collect(0)
+#    after each call frees them; ~2 ms.
+#  - The heap itself keeps ~17 KB of free chunks per call; malloc_trim(0)
+#    hands them back. Every TRIM_EVERY calls (~40 s at the live rate).
+TRIM_EVERY = int(os.environ.get('MINUS_ASR_TRIM_EVERY', '100'))
+
+
+def _malloc_trimmer():
+    """glibc malloc_trim, or None (non-glibc libc, or disabled with 0)."""
+    if TRIM_EVERY <= 0:
+        return None
+    try:
+        import ctypes
+        return ctypes.CDLL('libc.so.6').malloc_trim
+    except (OSError, AttributeError):
+        return None
+
 
 def resolve_engine() -> str:
     """MINUS_ASR_ENGINE, default 'sensevoice' (RK3588 NPU). Falls back to
@@ -269,6 +294,8 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
         log.info(f"[ASRWorker] Model loaded in {time.time() - load_start:.1f}s "
                  f"(engine={engine}, ready)")
         ready_event.set()
+        trim = _malloc_trimmer()
+        n_done = 0
 
         # Main request loop. `get(timeout=1.0)` returns control to check
         # shutdown_event between requests, so kill signals propagate
@@ -288,6 +315,12 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
             try:
                 text, words = _infer(wav_path)
                 response_queue.put(('ok', text, time.time() - start, words))
+                # After the reply, so neither adds latency: free this call's
+                # rknnlite cycles (~2 ms), and now and then trim the heap.
+                gc.collect(0)
+                n_done += 1
+                if trim and n_done % TRIM_EVERY == 0:
+                    trim(0)
             except FileNotFoundError as e:
                 response_queue.put(('error', f'wav not found: {e}', time.time() - start))
             except Exception as e:
