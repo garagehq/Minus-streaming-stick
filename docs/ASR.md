@@ -1,5 +1,52 @@
 # ASR (audio-based ad confirmation)
 
+## 2026-10-18: SenseVoice on the NPU, the veto back (calibrated), audio as an input
+
+From the `asr-first` experiments (the name-muter branch; its
+`docs/ASR_BENCHMARKS.md` has every measurement):
+
+- **Engine: SenseVoice-small on RK3588 NPU core 1** (`src/sensevoice_npu.py`,
+  model `happyme531/SenseVoiceSmall-RKNN2` in
+  `/home/radxa/asr_models/sensevoice-rknn`, installed by `install.sh` step
+  14). ~0.38 s per window whatever its length, ~25% of one CPU core, +3-5 C
+  over ASR off (Moonshine medium: +35 C at 86% CPU; that cost is why ASR
+  was left switched off). PaddleOCR keeps core 0. 3 s windows every 1 s.
+  `MINUS_ASR_ENGINE=sensevoice` is the default and falls back to moonshine
+  when the model or `kaldi_native_fbank`/`sentencepiece`/`soundfile` is
+  missing; `MINUS_ASR_NPU_CORE` picks the core.
+- **The start veto counts again, but only against an unsure VLM.** A
+  VLM-alone block doesn't start when ASR hears show dialog with no ad
+  language and VLM agreement is below `ASR_VETO_MAX_VLM_RATIO` (0.95,
+  `MINUS_ASR_VETO_MAX_VLM`). The cases that got the old veto removed (below)
+  were at 80% and 100%: the 100% one still blocks. OCR blocks never consult
+  ASR.
+- **Audio as an input, for VLM-alone detections** (setting
+  `block_requires_audio`, default on; Settings → "Only Block When There's
+  Sound"): menus, home-screen banners and paused screens are silent and fool
+  the VLM. A VLM-alone block doesn't start after 3 s of input below -55 dBFS
+  (`MINUS_AUDIO_GATE_START_S`, `MINUS_AUDIBLE_DBFS`) and ends after 10 s of
+  it (`MINUS_AUDIO_GATE_STOP_S`) unless the ad's own countdown says it's
+  running. OCR-detected ads block regardless of sound: gating them too left
+  silent ad cards (frozen end cards, stalled ads, static image ads) visible,
+  32% of all ad frames in a day's test (2026-10-19).
+- **Other false-positive guards (2026-10-19):** a VLM-alone start needs VLM's
+  agreement to still be >= 60% when it starts (the detection flag is sticky
+  while other gates hold it back); and overruling an ASR veto needs VLM to be
+  unanimous (>= 95%) AND confident (mean AD confidence >= 0.85). Measured before the mute, so a
+  block doesn't read as silence. Unknown audio (no pipeline, no samples)
+  never holds a block back.
+- **Audio pipeline robustness:** 200 ms alsasrc ring (was 50 ms: a busy box
+  overran it and lost 10-20% of the audio), a `srcqueue` after capture, and
+  the Python buffer probe on the ASR branch instead of the playback path (a
+  GIL stall there paused the output up to 0.7 s).
+
+Not taken from `asr-first`: the name muter, clip farm and demo tooling (that
+experiment), Parakeet/Moonshine-medium engines, and its "adaptive delay"
+(drops the A/V delay while the input is quiet), which conflicts with the
+lip-sync delay on main.
+
+## Before 2026-10-18
+
 **Moonshine tiny-en** (`moonshine-voice`, ONNX) running on 3 pinned CPU
 cores in a dedicated multiprocessing worker subprocess
 (`src/asr_worker.py`). Fed from a parallel `tee` branch of the existing

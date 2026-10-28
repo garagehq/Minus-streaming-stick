@@ -322,6 +322,24 @@ class Minus:
     switching between video and blocking overlay.
     """
 
+    # Audio as a blocking input (setting `block_requires_audio`, default on),
+    # for VLM-alone detections only: menus, home-screen banners and paused
+    # screens are silent and fool the VLM; ads on screen that OCR can read
+    # block regardless. A VLM-alone block doesn't start after this long
+    # without audio, and ends after the longer one. See _audio_quiet_seconds().
+    AUDIO_GATE_START_QUIET_S = float(os.environ.get('MINUS_AUDIO_GATE_START_S', '3'))
+    AUDIO_GATE_STOP_QUIET_S = float(os.environ.get('MINUS_AUDIO_GATE_STOP_S', '10'))
+    # An ASR veto (show dialog, no ad language) holds back a VLM-alone block
+    # only while VLM agreement is below this. See _update_blocking_state.
+    ASR_VETO_MAX_VLM_RATIO = float(os.environ.get('MINUS_ASR_VETO_MAX_VLM', '0.95'))
+    # ...and VLM overrules a veto only if its AD calls are also confident.
+    ASR_VETO_MIN_VLM_CONF = float(os.environ.get('MINUS_ASR_VETO_MIN_VLM_CONF', '0.85'))
+    # A VLM-alone block needs VLM's recent decisions to still say AD at the
+    # moment it would start (the vlm_ad_detected flag is sticky).
+    VLM_ALONE_START_MIN_RATIO = float(os.environ.get('MINUS_VLM_ALONE_MIN_START', '0.6'))
+    # ...and only on what ASR heard in the last few seconds (see the veto).
+    ASR_VETO_WINDOW_S = float(os.environ.get('MINUS_ASR_VETO_WINDOW_S', '2.5'))
+
     # ── Thermal-degraded blocking parameters (src/thermal.py) ─────────────
     # Swapped in while the kernel is actively throttling the CPU; originals
     # are restored on recovery. Rationale: throttled cores slow OCR/VLM
@@ -1093,7 +1111,7 @@ class Minus:
                 # but it isn't ready yet at construction; read from the
                 # manager attrs for the boot log line instead.
                 logger.info(f"ASR initialized (faster-whisper "
-                            f"{self.asr._model_name} + audio tap, "
+                            f"{getattr(self.asr, 'model_label', self.asr._model_name)} + audio tap, "
                             f"enabled={self.asr.enabled})")
             except Exception as e:
                 logger.warning(f"ASR init failed: {e} — running without ASR")
@@ -1471,8 +1489,21 @@ class Minus:
                     "Display output not available. Check HDMI-TX connection to TV/monitor."
                 )
                 self._start_display_retry_loop()
-                # Audio stays muted/paused; resume_watchdog will fire when the
-                # retry loop succeeds (start_display_pipeline → main resume path).
+                # Capture must come back even with no TV: the pipeline routes
+                # playback to fakesink without one, and ASR (and the audio gate)
+                # listen on the capture side. Leaving the watchdog paused here
+                # kept audio stopped after a source sleep/wake with the TV off
+                # -- ASR deaf for the rest of the night (minus, 2026-10-19,
+                # autonomous mode running with the projector off). Muting is
+                # unchanged; the retry loop's success still does the full
+                # resume + unmute.
+                if self.audio:
+                    try:
+                        self.audio.resume_watchdog()
+                    except Exception as e:
+                        logger.warning(f"[Recovery] could not resume audio capture: {e}")
+                # Audio stays muted; the retry loop's success unmutes it
+                # (start_display_pipeline → main resume path).
                 # LED state stays at no_signal — the display gate keeps the
                 # strip dark while the retry loop runs.
         finally:
@@ -2410,7 +2441,23 @@ class Minus:
         src = self._display_source() or ''
         return self._SOURCE_LABELS.get(src, src.upper())
 
-    def _asr_verdict(self) -> str:
+    def _audio_quiet_seconds(self):
+        """Seconds the HDMI input has been silent, or None (unknown/disabled).
+
+        Setting `block_requires_audio` (default on) turns the audio gate on.
+        """
+        if not (getattr(self, '_system_settings', None) or {}).get('block_requires_audio', True):
+            return None
+        audio = getattr(self, 'audio', None)
+        if audio is None or not hasattr(audio, 'seconds_since_audible'):
+            return None
+        try:
+            quiet = audio.seconds_since_audible()
+        except Exception:
+            return None
+        return float(quiet) if isinstance(quiet, (int, float)) else None
+
+    def _asr_verdict(self, window_s: float = None) -> str:
         """Return ASR's current verdict on whether audio sounds like an ad.
 
         Returns one of:
@@ -2424,7 +2471,7 @@ class Minus:
         if self.asr is None:
             return 'unknown'
         try:
-            return self.asr.verdict()
+            return self.asr.verdict(window_s) if window_s else self.asr.verdict()
         except Exception as e:
             logger.debug(f"ASR verdict error: {e}")
             return 'unknown'
@@ -2454,6 +2501,11 @@ class Minus:
     def notify_hdmi_reconnect(self):
         """Called by the health monitor when the TV output reconnects."""
         self.hdmi_reconnect_time = time.time()
+        # A display just arrived: match the audio delay to it now rather than
+        # at the next 5-minute calibration (it may be a different display,
+        # with its own EDID latency and learned offset).
+        if getattr(self, 'audio', None) is not None and hasattr(self.audio, 'request_calibration'):
+            self.audio.request_calibration(3.0)
         logger.info(
             f"[Minus] HDMI reconnect recorded; ad blocking suppressed for "
             f"{self.HDMI_RECONNECT_GRACE_SECONDS:.0f}s"
@@ -2553,6 +2605,10 @@ class Minus:
             'vlm_user_paused': self.is_vlm_user_paused(),
             'vlm_user_pause_remaining': self.get_vlm_pause_remaining(),
             'asr_verdict': self._asr_verdict(),
+            # Seconds the HDMI input has been silent (None = unknown or the
+            # audio gate is off) -- what block_requires_audio acts on.
+            'audio_quiet_s': (None if self._audio_quiet_seconds() is None
+                              else round(self._audio_quiet_seconds(), 1)),
             'asr': (self.asr.get_status() if self.asr is not None else
                     {'available': False, 'enabled': False, 'running': False}),
             'hdmi_reconnect_grace': self.is_in_hdmi_reconnect_grace(),
@@ -2834,6 +2890,16 @@ class Minus:
         duration = self.MIN_BLOCKING_DURATION_BASE - self.consecutive_ad_count * self.MIN_BLOCKING_DURATION_STEP
         return max(duration, floor)
 
+    def _vlm_ad_mean_confidence(self) -> float:
+        """Mean confidence of the AD decisions in the sliding window (0 if none)."""
+        try:
+            cutoff = time.time() - self.vlm_history_window
+            confs = [e[2] if len(e) == 3 else 0.75
+                     for e in self.vlm_decision_history if e[0] >= cutoff and e[1]]
+            return sum(confs) / len(confs) if confs else 0.0
+        except Exception:
+            return 1.0      # unknown: don't let this check hold a block back
+
     def _get_vlm_agreement(self) -> tuple:
         """
         Calculate VLM agreement percentage from sliding window using confidence-weighted votes.
@@ -3012,6 +3078,7 @@ class Minus:
             'asr_enabled': True,          # Run faster-whisper ASR confirm/veto for VLM-alone blocks
             'block_falloff': True,        # Shorten min-block duration on consecutive ads
             'hdmi_reconnect_grace': True, # Disable ad blocking for 90s after HDMI reconnect
+            'block_requires_audio': True, # No block while the input is silent (menus, pauses)
             'greyscale_preview': True,    # Desaturate the ad preview window in blocking mode
             'debug_overlay': True,        # Show BLOCKING header + bottom-left stats + top-right OCR snippet
             'ir_enabled': False,          # Show REI HDMI-switch IR remote in autonomous mode
@@ -3272,7 +3339,8 @@ class Minus:
 
     def set_optimization_setting(self, key: str, enabled: bool) -> dict:
         """Update one of the optimization toggles and persist."""
-        allowed = {'block_falloff', 'hdmi_reconnect_grace', 'greyscale_preview'}
+        allowed = {'block_falloff', 'hdmi_reconnect_grace', 'greyscale_preview',
+                   'block_requires_audio'}
         if key not in allowed:
             return {'success': False, 'error': f'unknown setting {key}'}
         self._system_settings[key] = bool(enabled)
@@ -3872,6 +3940,29 @@ class Minus:
 
         return (now - self.last_ocr_ad_time) >= self._effective_ocr_stop_seconds()
 
+    BARE_AD_KEYWORD_NAMES = frozenset({'ad', 'ads'})
+
+    def _bare_ad_uncorroborated(self, keywords_found, strong_ad_recent):
+        """A lone 'ad'/'ads' token that nothing else agrees with.
+
+        OCR reads a stray "ad" out of noisy frames (scene changes, a video
+        page loading: '4 | C | ad | fb-haus | ...'). Since 2026-10-18 that
+        alone started 17 blocks; ~9 had no VLM ad vote and no other ad
+        keyword in their whole life (3-18 s false blocks). Real ads that
+        show only "Ad" have the VLM (or ASR, or a recent strong keyword like
+        'skip in') agreeing, so require that.
+        """
+        if not keywords_found or not set(keywords_found) <= self.BARE_AD_KEYWORD_NAMES:
+            return False
+        if strong_ad_recent or self.vlm_ad_detected or self.vlm_last_state == 'ad':
+            return False
+        try:
+            if self._asr_verdict() == 'confirm':
+                return False
+        except Exception:
+            pass
+        return True
+
     def _update_blocking_state(self):
         """Update combined blocking state using weighted OCR/VLM model."""
         with self._state_lock:
@@ -3930,19 +4021,93 @@ class Minus:
                         # is caught by the GATED mid-block ASR rescue below,
                         # which only force-stops once VLM ITSELF has weakened.
                         asr_verdict = self._asr_verdict()
-                        should_start = True
+                        # The veto judges only the last few seconds of audio:
+                        # VLM needs several agreeing decisions to get here, so
+                        # those seconds are the ad's, not the video's before it.
+                        veto_now = (self._asr_verdict(self.ASR_VETO_WINDOW_S) == 'veto')
                         source = "vlm"  # base stays "vlm" for stop-logic;
                         asr_confirmed = (asr_verdict == 'confirm')  # label only
                         ad_ratio, _, total = self._get_vlm_agreement()
-                        if asr_verdict == 'confirm' and self.asr:
-                            asr_note = f" + ASR confirmed ({self.asr.last_marker_hits} markers)"
-                        elif asr_verdict == 'veto':
-                            asr_note = " (ASR veto ignored at start — trusting VLM)"
+                        # The ASR veto counts again, but only against a VLM
+                        # that isn't sure. The old unconditional veto (tiny
+                        # Whisper on the CPU) killed real ads whose copy had
+                        # no marketing words; those cases were at 80% and
+                        # 100% agreement. Now a veto (clear show dialog, no
+                        # markers) holds back a VLM-alone start below
+                        # ASR_VETO_MAX_VLM_RATIO, and a VLM that sure blocks
+                        # whatever the audio says.
+                        if ad_ratio < self.VLM_ALONE_START_MIN_RATIO:
+                            # vlm_ad_detected is sticky (it clears only on
+                            # VLM's stop hysteresis) while other gates -- home
+                            # screen, static screen, grace, audio, the ASR veto
+                            # -- hold the start back. When the last of them
+                            # cleared, blocks started on that stale flag with
+                            # VLM's own recent decisions mostly NO-AD: 17%,
+                            # 31%, 46-50% seen on minus 2026-10-19, typically
+                            # a 2-3 s block that flickered off again. VLM alone
+                            # must still be calling it an ad NOW.
+                            should_start = False
+                            if now - getattr(self, '_vlm_stale_logged_at', 0.0) >= 5.0:
+                                self._vlm_stale_logged_at = now
+                                logger.info(f"VLM suppressed - stale (agreement now "
+                                            f"{ad_ratio*100:.0f}% of {total} < "
+                                            f"{self.VLM_ALONE_START_MIN_RATIO*100:.0f}%)")
+                        elif (asr_verdict == 'veto' and veto_now
+                                and (ad_ratio < self.ASR_VETO_MAX_VLM_RATIO
+                                     or self._vlm_ad_mean_confidence() < self.ASR_VETO_MIN_VLM_CONF)):
+                            # Overruling the ear takes a VLM that is both
+                            # unanimous AND confident. Unanimity alone is cheap:
+                            # the 8 s window holds ~5 decisions, and on minus
+                            # 2026-10-19 12:45 a music video with a "Shazam for
+                            # more" overlay read 100% from five weak AD calls
+                            # (0.91, 0.50, 0.91, 0.65, 0.95; mean 0.78) after two
+                            # NO calls aged out, overruled ASR hearing lyrics, and
+                            # blocked 4.5 s -- a false positive.
+                            should_start = False
+                            logger.info(f"VLM suppressed - ASR hears show dialog, no ad "
+                                        f"language (VLM agreement {ad_ratio*100:.0f}% "
+                                        f"of {total}, mean AD confidence "
+                                        f"{self._vlm_ad_mean_confidence():.2f}; needs "
+                                        f">= {self.ASR_VETO_MAX_VLM_RATIO*100:.0f}% and "
+                                        f">= {self.ASR_VETO_MIN_VLM_CONF:.2f})")
                         else:
-                            asr_note = ''
-                        logger.info(f"VLM triggered alone (agreement: "
-                                    f"{ad_ratio*100:.0f}% of {total} "
-                                    f"decisions){asr_note}")
+                            should_start = True
+                            if asr_verdict == 'confirm' and self.asr:
+                                asr_note = f" + ASR confirmed ({self.asr.last_marker_hits} markers)"
+                            elif asr_verdict == 'veto' and veto_now:
+                                asr_note = (f" (ASR veto overruled: VLM at "
+                                            f"{ad_ratio*100:.0f}%)")
+                            elif asr_verdict == 'veto':
+                                asr_note = " (ASR heard show dialog earlier, not in the last seconds)"
+                            else:
+                                asr_note = ''
+                            logger.info(f"VLM triggered alone (agreement: "
+                                        f"{ad_ratio*100:.0f}% of {total} "
+                                        f"decisions){asr_note}")
+
+                # No sound means no ad playing: a menu, a home-screen banner, a
+                # "Sponsored" tile or a paused screen can look exactly like an
+                # ad, but ads always play audio. Seen on minus 2026-10-18: a
+                # Fire TV home banner ("amazon kids+ 1-month free") blocked
+                # for 26 s with the room silent. Fails open: when the audio
+                # level is unknown (no audio pipeline, no samples) this never
+                # holds a block back.
+                # Only VLM-alone starts: OCR reading the ad's own UI on screen
+                # ("Sponsored", "Skip in", "Send to phone") is authoritative
+                # whether or not it makes a sound. Gating OCR too left silent
+                # ad cards (frozen end cards, stalled ads, static image ads)
+                # on screen: 1101 of the 1301 visible ad frames on minus
+                # 10-19 10:45-15:00 UTC, ~32% of all ad frames.
+                if should_start and source == 'vlm':
+                    quiet = self._audio_quiet_seconds()
+                    if quiet is not None and quiet >= self.AUDIO_GATE_START_QUIET_S:
+                        if now - getattr(self, '_audio_gate_logged_at', 0.0) >= 10.0:
+                            self._audio_gate_logged_at = now
+                            logger.info(
+                                f"Blocking suppressed - no audio for {quiet:.0f}s "
+                                f"({source} saw an ad; a silent screen is a menu or "
+                                f"a pause, not an ad)")
+                        should_start = False
 
                 if should_start and self.is_in_hdmi_reconnect_grace():
                     remaining = self.get_hdmi_reconnect_grace_remaining()
@@ -4081,7 +4246,20 @@ class Minus:
                 if not release_stale and self._ad_clock_says_playing(now):
                     return
 
-                if release_stale:
+                # The audio went quiet and stayed quiet: whatever is on screen
+                # isn't an ad playing (an ad ended into a menu, or was paused).
+                # Only after the minimum block time, and never while the ad's
+                # own countdown says it is still running (checked above).
+                audio_stop = False
+                if (not release_stale and blocking_elapsed >= min_duration
+                        and self.blocking_source == 'vlm' and not self.ocr_ad_detected):
+                    quiet = self._audio_quiet_seconds()
+                    if quiet is not None and quiet >= self.AUDIO_GATE_STOP_QUIET_S:
+                        logger.info(f"[Audio] Ending {self.blocking_source} block: "
+                                    f"no audio for {quiet:.0f}s")
+                        audio_stop = should_stop = True
+
+                if release_stale or audio_stop:
                     pass
                 elif blocking_elapsed >= min_duration:
                     ocr_says_stop = self._ocr_says_stop()
@@ -4323,6 +4501,15 @@ class Minus:
                     self.last_matched_keywords = []
                     # Also clear VLM state so it doesn't immediately re-trigger
                     self.vlm_ad_detected = False
+                    # ...and OCR's. A "both" block usually ends on the VLM's
+                    # no-ad votes while OCR is still counting toward its own
+                    # stop, so ocr_ad_detected was left True and the next tick
+                    # started a new "(OCR)" block with no new ad read (seen
+                    # 4x in 20 min, 2.6-3.6 s each, each one also raising the
+                    # flap threshold). An ad that is really still on screen
+                    # is read again by OCR within a frame or two.
+                    self.ocr_ad_detected = False
+                    self.ocr_ad_detection_count = 0
                     self.vlm_decision_history.clear()
                     # Clear cached VLM-trigger frame: a pause AFTER the block
                     # ends is not "during a VLM ad block" — don't act on a
@@ -4900,6 +5087,11 @@ class Minus:
                     elif self.home_screen_detected:
                         suppress_reason = (f"home screen detected "
                                            f"(would have been {keywords_found})")
+                    elif self._bare_ad_uncorroborated(keywords_found,
+                                                      strong_ad_recent):
+                        suppress_reason = (
+                            f"bare {keywords_found} with nothing agreeing "
+                            f"(texts {all_texts[:3]})")
                     elif weak_only and not strong_ad_recent:
                         suppress_reason = (
                             f"weak-only {keywords_found}, no strong ad "

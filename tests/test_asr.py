@@ -202,6 +202,56 @@ class TestASRManager(unittest.TestCase):
                 0.5)
         self.assertEqual(m.verdict(), 'veto')
 
+    def test_pharma_disclosures_are_ad_language(self):
+        """Live on minus 2026-10-19 (SenseVoice, a Mounjaro ad): the
+        side-effect stretch had no markers and the window vetoed a real ad."""
+        from asr_keywords import count_marker_hits
+        for heard in ('to it or if you or someone in your family had medullary thyroid cancer',
+                      'serious side effects may include pancreatitis',
+                      'stop taking and call your doctor right away'):
+            self.assertGreater(count_marker_hits(heard), 0, heard)
+        # Fanatics Sportsbook ad, minus 2026-10-19: commentary-like opening,
+        # then the required disclaimers.
+        for heard in ('if you or someone you know has a gambling problem call 1 800 gambler',
+                      'must be 21 plus terms apply', 'the only sportsbook to reward every bet'):
+            self.assertGreater(count_marker_hits(heard), 0, heard)
+        for show in ('she walked into the kitchen and sat down',
+                     'the doctor will see you now said the nurse',
+                     'third and long for the colts from their own twenty one',
+                     'he bet on himself and it paid off this season'):
+            self.assertEqual(count_marker_hits(show), 0, show)
+
+    def test_no_veto_right_after_ad_language(self):
+        """An ad that said 'ask your doctor' 15 s ago is still the ad, even
+        through a stretch with no markers: no veto (but no confirm either)."""
+        import time as _time
+        m = self._make()
+        m.is_running = True
+        m._record_result('ok', 'now that you know ask your doctor about it', 0.3)
+        # age that hit out of the 8 s window, keep it inside ad context
+        m._history = type(m._history)(
+            [(t - 15.0, h, w) for (t, h, w) in m._history], maxlen=m._history.maxlen)
+        m._last_hit_time -= 15.0
+        for _ in range(3):
+            m._record_result('ok', 'she walked into the room and sat down with her brother there', 0.3)
+        self.assertEqual(m.verdict(), 'unknown')
+        m._last_hit_time -= 30.0       # long after the ad: show dialog vetoes again
+        self.assertEqual(m.verdict(), 'veto')
+
+    def test_short_window_ignores_the_previous_videos_speech(self):
+        """Zepbound ad, minus 2026-10-19: the 8 s window still held the music
+        video's lyrics when the ad began. Judged on the last 2.5 s (the ad's
+        own audio, no words yet), there is nothing to veto."""
+        m = self._make()
+        m.is_running = True
+        for _ in range(4):
+            m._record_result('ok', 'im waking up to ash and dust i wipe my brow and i sweat my rust', 0.3)
+        m._history = type(m._history)(
+            [(t - 4.0, h, w) for (t, h, w) in m._history], maxlen=m._history.maxlen)
+        m._record_result('ok', 'mm', 0.3)          # ad just started: music bed
+        self.assertEqual(m.verdict(), 'veto')       # 8 s window: the lyrics
+        self.assertEqual(m.verdict(window_s=2.5), 'unknown')
+
     def test_verdict_unknown_on_silence_window(self):
         """Several inferences with zero hits AND very little transcribed
         speech → 'unknown' (not 'veto'). Avoids vetoing when audio is
@@ -236,11 +286,12 @@ class TestASRManager(unittest.TestCase):
                     'last_transcript', 'last_marker_hits',
                     'p50_latency_s', 'p95_latency_s'):
             self.assertIn(key, s)
-        # engine label tells the UI which backend is in use. Moonshine is
-        # the default now; faster-whisper is selectable via MINUS_ASR_ENGINE.
-        expected_engine = os.environ.get('MINUS_ASR_ENGINE', 'moonshine').lower()
-        self.assertEqual(s['engine'], expected_engine)
-        self.assertIn(s['engine'], ('moonshine', 'faster-whisper'))
+        # engine label tells the UI which backend is in use: SenseVoice on
+        # the NPU where its model is installed (a Minus box), else Moonshine
+        # (dev hosts); MINUS_ASR_ENGINE overrides. Same rule as the worker.
+        from asr_worker import resolve_engine
+        self.assertEqual(s['engine'], resolve_engine())
+        self.assertIn(s['engine'], ('sensevoice', 'moonshine', 'faster-whisper'))
 
     def test_record_result_timeouts_increment_counter(self):
         m = self._make()
@@ -811,17 +862,24 @@ class TestDecisionEngineASRGate(unittest.TestCase):
         m.get_hdmi_reconnect_grace_remaining = lambda: 0
         return m
 
-    def test_vlm_alone_blocks_despite_asr_veto(self):
-        """ASR 'veto' is IGNORED at the start gate now — the visual
-        detector is trusted, so a VLM-alone block fires anyway with base
-        source 'vlm' and the +asr label OFF. (The old start-veto wrongly
-        killed real ads VLM was sure about; product-placement FPs are
-        caught by the gated mid-block rescue instead.)"""
+    def test_asr_veto_holds_back_an_unsure_vlm(self):
+        """The veto counts again (2026-10-18, SenseVoice on the NPU), but
+        only against a VLM below ASR_VETO_MAX_VLM_RATIO: at 85% agreement,
+        clear show dialog with no ad language keeps the block from starting."""
         m = self._make_minus(asr_verdict='veto')
         m.vlm_ad_detected = True
         m._update_blocking_state()
+        self.assertFalse(m.ad_detected)
+
+    def test_asr_veto_cannot_stop_a_sure_vlm(self):
+        """The cases the old unconditional veto got wrong (an insurance ad
+        at 100% whose copy had no marketing words) still block."""
+        m = self._make_minus(asr_verdict='veto')
+        m._get_vlm_agreement = MagicMock(return_value=(1.0, 0.0, 5))
+        m.vlm_ad_detected = True
+        m._update_blocking_state()
         self.assertTrue(m.ad_detected,
-                        "ASR veto must NOT suppress a VLM-alone block at start")
+                        "a VLM at 100% must block whatever ASR says")
         self.assertEqual(m.blocking_source, 'vlm')
         self.assertFalse(m.blocking_asr_confirmed)
         self.assertEqual(m._display_source(), 'vlm')
@@ -860,6 +918,257 @@ class TestDecisionEngineASRGate(unittest.TestCase):
         m._update_blocking_state()
         self.assertTrue(m.ad_detected)
         self.assertEqual(m.blocking_source, 'ocr')
+
+
+class TestAudioGate(unittest.TestCase):
+    """No sound, no ad (2026-10-18): menus, home-screen banners and paused
+    screens can look like ads, but ads always play audio."""
+
+    def _m(self, quiet, **kw):
+        m = TestDecisionEngineASRGate._make_minus(self, **kw)
+        m.audio.seconds_since_audible = MagicMock(return_value=quiet)
+        m._system_settings = {}
+        return m
+
+    def test_silent_screen_does_not_start_a_vlm_block(self):
+        m = self._m(quiet=5.0, asr_verdict='unknown')
+        m.vlm_ad_detected = True
+        m._get_vlm_agreement = MagicMock(return_value=(1.0, 0.0, 5))
+        m._update_blocking_state()
+        self.assertFalse(m.ad_detected, "VLM block started on a silent screen")
+
+    def test_silent_ad_card_that_ocr_reads_still_blocks(self):
+        """Frozen/silent "Sponsored | Skip in" cards: OCR is authoritative."""
+        m = self._m(quiet=60.0, asr_verdict='unknown')
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+    def test_audio_playing_blocks_as_before(self):
+        m = self._m(quiet=0.2)
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+    def test_unknown_audio_never_holds_a_block_back(self):
+        for quiet in (None, MagicMock()):
+            m = self._m(quiet=quiet)
+            m.ocr_ad_detected = True
+            m._update_blocking_state()
+            self.assertTrue(m.ad_detected, "an audio outage must not stop blocking")
+
+    def test_setting_off_disables_the_gate(self):
+        m = self._m(quiet=60.0)
+        m._system_settings = {'block_requires_audio': False}
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+
+class TestAudioGateStop(unittest.TestCase):
+    """A block ends after AUDIO_GATE_STOP_QUIET_S of silence."""
+
+    def _blocking(self, quiet, elapsed=20.0, source='vlm', ocr=False):
+        # Mid-block harness, with the VLM still calling it an ad: only the
+        # audio can end it.
+        m = TestOCRTriangulationVeto._make_minus(
+            self, blocking_elapsed=elapsed, vlm_no_ad_ratio=0.0,
+            asr_verdict='unknown', source=source)
+        m.ocr_ad_detected = ocr
+        m.audio.seconds_since_audible = MagicMock(return_value=quiet)
+        m._system_settings = {}
+        return m
+
+    def test_long_silence_ends_a_vlm_block(self):
+        m = self._blocking(quiet=12.0)
+        m._update_blocking_state()
+        self.assertFalse(m.ad_detected)
+
+    def test_silence_does_not_end_a_block_ocr_still_sees(self):
+        m = self._blocking(quiet=60.0, source='both', ocr=True)
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+    def test_short_gap_keeps_it(self):
+        m = self._blocking(quiet=4.0)
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+
+class TestNoReblockFromStaleOCRFlag(unittest.TestCase):
+    """A both-block ended by the VLM must not restart from OCR's old flag.
+
+    Observed live 2026-10-19: every ad ending "stopped by BOTH" re-blocked
+    0.6-1.6 s later as "(OCR)" with no new OCR ad read, ran 2.6-3.6 s, and
+    raised the flap threshold - ocr_ad_detected was still True from the ad.
+    """
+
+    def _both_block_vlm_clearing(self):
+        m = TestOCRTriangulationVeto._make_minus(
+            self, blocking_elapsed=20.0, vlm_no_ad_ratio=1.0,
+            asr_verdict='unknown', source='both')
+        m.ocr_ad_detected = True
+        m.ocr_ad_detection_count = 3
+        m.vlm_no_ad_count = 5
+        m._system_settings = {}
+        m._ad_clock_says_playing = lambda now: False
+        return m
+
+    def test_vlm_stop_clears_ocr_flag(self):
+        m = self._both_block_vlm_clearing()
+        m._update_blocking_state()
+        self.assertFalse(m.ad_detected)
+        self.assertFalse(m.ocr_ad_detected)
+        self.assertEqual(m.ocr_ad_detection_count, 0)
+
+    def test_no_restart_without_a_new_ocr_read(self):
+        m = self._both_block_vlm_clearing()
+        m._update_blocking_state()
+        m._update_blocking_state()   # next tick, nothing new from OCR
+        self.assertFalse(m.ad_detected)
+
+
+class TestBareAdNeedsCorroboration(unittest.TestCase):
+    """A lone OCR 'ad' token blocks only when something agrees."""
+
+    def _m(self, vlm=False, last='no-ad', asr='unknown'):
+        m = TestOCRTriangulationVeto._make_minus(
+            self, blocking_elapsed=0.0, vlm_no_ad_ratio=1.0,
+            asr_verdict=asr, source='ocr')
+        m.vlm_ad_detected = vlm
+        m.vlm_last_state = last
+        return m
+
+    def test_noise_ad_alone_is_suppressed(self):
+        self.assertTrue(self._m()._bare_ad_uncorroborated(['ad'], False))
+
+    def test_vlm_or_asr_or_strong_keyword_lets_it_through(self):
+        self.assertFalse(self._m(last='ad')._bare_ad_uncorroborated(['ad'], False))
+        self.assertFalse(self._m(vlm=True)._bare_ad_uncorroborated(['ads'], False))
+        self.assertFalse(self._m(asr='confirm')._bare_ad_uncorroborated(['ad'], False))
+        self.assertFalse(self._m()._bare_ad_uncorroborated(['ad'], True))
+
+    def test_other_keywords_untouched(self):
+        m = self._m()
+        self.assertFalse(m._bare_ad_uncorroborated(['ad', 'sponsored'], False))
+        self.assertFalse(m._bare_ad_uncorroborated(['skip in'], False))
+        self.assertFalse(m._bare_ad_uncorroborated([], False))
+
+
+class TestAudibleTracker(unittest.TestCase):
+    """AudioPassthrough.seconds_since_audible: None means unknown."""
+
+    def _a(self):
+        from audio import AudioPassthrough
+        a = AudioPassthrough.__new__(AudioPassthrough)
+        a.is_running = True
+        a.AUDIBLE_DBFS = -55.0
+        a._last_level_mono = 0.0
+        a._last_audible_mono = 0.0
+        a._level_since_mono = 0.0
+        return a
+
+    def test_unknown_states(self):
+        import time as _time
+        a = self._a()
+        self.assertIsNone(a.seconds_since_audible())          # no samples yet
+        a._last_level_mono = _time.monotonic() - 5.0
+        self.assertIsNone(a.seconds_since_audible())          # samples stopped
+        a.is_running = False
+        self.assertIsNone(a.seconds_since_audible())
+
+    def test_quiet_and_audible(self):
+        import time as _time
+        now = _time.monotonic()
+        a = self._a()
+        a._level_since_mono = now - 7.0
+        a._last_level_mono = now
+        self.assertGreaterEqual(a.seconds_since_audible(), 6.9)   # quiet since start
+        a._last_audible_mono = now - 1.0
+        self.assertLess(a.seconds_since_audible(), 1.5)
+
+
+class TestEngineSelection(unittest.TestCase):
+    """SenseVoice on the NPU by default, CPU moonshine when it's missing."""
+
+    def test_falls_back_without_the_model(self):
+        import asr_worker
+        with patch.dict(os.environ, {'MINUS_ASR_ENGINE': 'sensevoice'}), \
+                patch('sensevoice_npu.is_available', return_value=False):
+            self.assertEqual(asr_worker.resolve_engine(), 'moonshine')
+        with patch.dict(os.environ, {'MINUS_ASR_ENGINE': 'sensevoice'}), \
+                patch('sensevoice_npu.is_available', return_value=True):
+            self.assertEqual(asr_worker.resolve_engine(), 'sensevoice')
+        with patch.dict(os.environ, {'MINUS_ASR_ENGINE': 'moonshine'}):
+            self.assertEqual(asr_worker.resolve_engine(), 'moonshine')
+
+    def test_sys_path_is_not_grown_per_call(self):
+        import sys as _sys, asr_worker
+        before = len(_sys.path)
+        for _ in range(5):
+            asr_worker.resolve_engine()
+        self.assertLessEqual(len(_sys.path), before + 1)
+
+
+class TestStaleVLMStart(unittest.TestCase):
+    """minus 2026-10-19: VLM-alone blocks started at 17-50% agreement on the
+    sticky vlm_ad_detected flag once other gates cleared."""
+
+    def _m(self, ratio):
+        m = TestDecisionEngineASRGate._make_minus(self, asr_verdict='unknown')
+        m._get_vlm_agreement = MagicMock(return_value=(ratio, 1 - ratio, 6))
+        m.vlm_ad_detected = True
+        return m
+
+    def test_stale_flag_does_not_start_a_block(self):
+        for ratio in (0.17, 0.31, 0.5):
+            m = self._m(ratio)
+            m._update_blocking_state()
+            self.assertFalse(m.ad_detected, f"started at {ratio:.0%}")
+
+    def test_current_agreement_still_starts(self):
+        m = self._m(0.85)
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+    def test_ocr_blocks_do_not_need_vlm(self):
+        m = self._m(0.1)
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+
+class TestVetoNeedsAConfidentVLM(unittest.TestCase):
+    """minus 2026-10-19 12:45: five weak AD calls (mean 0.78) read as 100%
+    agreement and overruled ASR hearing lyrics; 4.5 s false-positive block."""
+
+    def _m(self, confs):
+        import time as _t
+        m = TestDecisionEngineASRGate._make_minus(self, asr_verdict='veto')
+        now = _t.time()
+        m.vlm_history_window = 8.0
+        m.vlm_decision_history = [(now - i, True, c) for i, c in enumerate(confs)]
+        m._get_vlm_agreement = MagicMock(return_value=(1.0, 0.0, len(confs)))
+        m.vlm_ad_detected = True
+        return m
+
+    def test_weak_unanimous_vlm_does_not_overrule_the_ear(self):
+        m = self._m([0.91, 0.50, 0.91, 0.65, 0.95])
+        m._update_blocking_state()
+        self.assertFalse(m.ad_detected)
+
+    def test_confident_unanimous_vlm_still_overrules(self):
+        m = self._m([0.97, 0.95, 0.99, 0.93, 0.96])
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+    def test_without_a_veto_weak_vlm_still_blocks(self):
+        """No ASR objection: VLM-only ads (e.g. cable TV, no on-screen text)
+        keep their old threshold."""
+        m = self._m([0.91, 0.50, 0.91, 0.65, 0.95])
+        m.asr.verdict.return_value = 'unknown'
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
 
 
 # =============================================================================

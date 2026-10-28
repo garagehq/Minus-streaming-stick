@@ -1512,6 +1512,32 @@ python3 tests/test_status_led_controller.py    # Status LED state-machine tests 
 python3 tests/test_status_leds_ui.py           # Playwright UI tests for status-LED panel
 ```
 
+**End-to-end run on a box (`tests/run_box_e2e.sh`):**
+
+The regression run before merging anything that touches detection, recovery
+or the web UI. Run it ON a Minus box as radxa, from any checkout; it never
+runs the Wi-Fi/AP tests (they took a box off the network on 2026-10-15).
+
+```bash
+python3 -m pip install --user pytest            # once
+sudo apt-get install -y adb                     # once, for --source-cycle
+tests/run_box_e2e.sh                            # full suite on the box's NPU/GStreamer (~1 min)
+tests/run_box_e2e.sh --all                      # + live Playwright UI tests + source sleep/wake (~8 min)
+```
+
+- `--live-ui` runs the three live UI files with `MINUS_LIVE_UI_TESTS=1`. They
+  act for real (the IR test presses Power on the IR blaster); IR/LED settings
+  are restored and the HDMI signal is reported before/after.
+- `--source-cycle` sleeps the Fire TV with adb (root's ADB key, so no prompt
+  on the TV), checks NO SIGNAL holds for 45 s, wakes it and checks OCR/VLM
+  resume with no Traceback. Autonomous mode is disabled for the cycle and put
+  back. `FIRE_TV_IP` overrides the IP read from the journal.
+- Baseline 2026-10-19 (PR #54): 1499 passed / 4 skipped; live UI 9 + 25 + 14
+  passed; source cycle NO SIGNAL in 10 s, signal back 5 s after wake.
+- `tests/conftest.py` fails collection if a test module replaces
+  `time.time`/`monotonic`/`sleep` at import (that once failed 23 unrelated
+  tests, only on a box).
+
 **Block-latency test harness (`tests/block_latency_harness.py`):**
 
 Headless rig for tuning the blocking decision engine. Plays Big Buck Bunny
