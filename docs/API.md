@@ -397,7 +397,7 @@ the background (`checking: true`).
                "up_to_date": false, "updatable": true, "reason": null},
               {"name": "ustreamer", "kind": "git", "mode": "source", "upstream": "origin/master", "behind": 0,
                "up_to_date": true, "updatable": false},
-              {"name": "VLM model", "kind": "model", "model": "minus-v0.1", "installed": "minus-v0.1",
+              {"name": "VLM model", "kind": "model", "model": "minus-v0.2", "installed": "minus-v0.2",
                "changed_files": [], "download_bytes": 0, "up_to_date": true, "updatable": false}]},
  "checking": false,
  "run": {"state": "done", "steps": [{"t": 1760700100.0, "msg": "Update complete ..."}]}}

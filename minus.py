@@ -201,7 +201,7 @@ os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 # Import extracted modules
 from drm import probe_drm_output
 from v4l2 import probe_v4l2_device
-from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR
+from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR, VLM_MODEL_NAME
 from capture import UstreamerCapture
 from screenshots import ScreenshotManager
 from skip_detection import check_skip_opportunity, extract_ad_seconds_remaining
@@ -3397,7 +3397,7 @@ class Minus:
 
         vlm_loaded = False
         for attempt in range(1, 4):
-            logger.info(f"Loading VLM model (minus-v0.1)... attempt {attempt}/3")
+            logger.info(f"Loading VLM model ({VLM_MODEL_NAME})... attempt {attempt}/3")
             try:
                 if self.vlm.load_model():
                     logger.info("VLM model loaded successfully")

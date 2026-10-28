@@ -167,7 +167,7 @@ else
     echo "    unattended-upgrades already installed"
 fi
 
-# Vision model (minus-v0.1, ~740 MB from Hugging Face). Which model and where
+# Vision model (minus-v0.2, ~740 MB from Hugging Face). Which model and where
 # it goes is models/vlm_model.json; the same code downloads model updates from
 # Settings -> Minus Updates, so a new model (e.g. v0.2) arrives the same way.
 # Files already present are verified by checksum, not downloaded again.

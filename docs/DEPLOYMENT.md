@@ -109,7 +109,7 @@ re-convert them.
 
 ### 6. Install the VLM (Optional)
 
-For ad detection using minus-v0.1 (a fine-tuned LFM2.5-VL-450M) on the Axera
+For ad detection using minus-v0.2 (a fine-tuned LFM2.5-VL-450M) on the Axera
 AX-M1. Minus runs without it, in OCR-only mode, but detection quality drops
 substantially.
 
@@ -122,8 +122,8 @@ pip3 install --break-system-packages axengine
 lspci | grep -i axera                       # expect 1f4b:0650
 axcl-smi info
 
-# Download the model from https://huggingface.co/TheGarageDev/Minus-v0.1
-# Models should be at: /home/radxa/axera_models/minus-v0.1/
+# Download the model from https://huggingface.co/TheGarageDev/Minus-v0.2
+# Models should be at: /home/radxa/axera_models/minus-v0.2/
 ```
 
 If the VLM fails to load with an error about `libaxcl_*.so`, see the broken
@@ -140,7 +140,7 @@ All configuration can be done via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MINUS_USTREAMER_PATH` | `/home/radxa/ustreamer-patched` | Path to ustreamer binary |
-| `MINUS_VLM_MODEL_DIR` | `/home/radxa/axera_models/minus-v0.1` | VLM model directory |
+| `MINUS_VLM_MODEL_DIR` | `/home/radxa/axera_models/minus-v0.2` | VLM model directory |
 | `MINUS_OCR_MODEL_DIR` | `models/paddleocr` in the repo | OCR model directory |
 | `MINUS_ANIMATION_START` | `0.3` | Blocking animation duration (seconds) |
 | `MINUS_ANIMATION_END` | `0.25` | Unblocking animation duration (seconds) |
@@ -294,7 +294,7 @@ sudo systemctl restart minus
 ### VLM Not Working
 
 1. Check Axera card: `axcl_smi`
-2. Check model files: `ls /home/radxa/axera_models/minus-v0.1/`
+2. Check model files: `ls /home/radxa/axera_models/minus-v0.2/`
 3. Check dependencies: `pip3 show axengine`
 
 ### Audio Issues

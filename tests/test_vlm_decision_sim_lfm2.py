@@ -6,8 +6,10 @@ Re-uses every scenario / DecisionEngine / scoring / sweep helper from
 monkey-patches the per-frame VLM model: instead of bootstrapping from
 iter4's `threshold_sweep_raw.json` at threshold 0.76, it bootstraps from
 the LFM2 holdout dump at `~/axera_models/nontrained_test_data/
-eval_results_fused_rmsfp32.json` (800 images, 97.0% accuracy / 99.25%
-non-ad / 94.75% ad) using `p_yes_norm = sigmoid(yes_logit - no_logit)`
+eval_results_fused_rmsfp32.json` (800 images; write it with the installed
+model's `eval_fused.py`: minus-v0.2 measures 99.1% accuracy / 98.5% non-ad /
+99.8% ad on the NPU, minus-v0.1 95.6% / 97.5% / 93.8%; set MINUS_LFM2_HOLDOUT
+to use a results file somewhere else) using `p_yes_norm = sigmoid(yes_logit - no_logit)`
 and the argmax decision rule (threshold = 0.5).
 
 Run:
@@ -29,7 +31,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 import block_latency_harness as H        # noqa: E402
 import test_vlm_decision_sim as S        # noqa: E402
 
-LFM2_HOLDOUT = '/home/radxa/axera_models/nontrained_test_data/eval_results_fused_rmsfp32.json'
+LFM2_HOLDOUT = os.environ.get(
+    'MINUS_LFM2_HOLDOUT',
+    '/home/radxa/axera_models/nontrained_test_data/eval_results_fused_rmsfp32.json')
 
 
 def _load_lfm2_scores():

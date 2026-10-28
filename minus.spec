@@ -7,7 +7,7 @@ Build with:
 
 Note: Models are external and must be present at runtime:
     - PaddleOCR models: models/paddleocr/ in this repository (or MINUS_OCR_MODEL_DIR)
-    - VLM model: /home/radxa/axera_models/minus-v0.1/ (https://huggingface.co/TheGarageDev/Minus-v0.1)
+    - VLM model: /home/radxa/axera_models/minus-v0.2/ (https://huggingface.co/TheGarageDev/Minus-v0.2)
 
 The executable expects these to be in their standard locations.
 """
