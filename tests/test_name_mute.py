@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from name_mute import NameMatcher, NameMuteScheduler, NameMuteController  # noqa: E402
+from name_mute import CaptionLag, NameMatcher, NameMuteScheduler, NameMuteController  # noqa: E402
 
 
 class FakeAudio:
@@ -236,6 +236,33 @@ class TestController(unittest.TestCase):
         ctl.on_caption_texts(["breaking news"], t - 0.5)
         ctl.on_caption_texts(["fans questioning LeBron and his GOAT status"], t)
         self.assertEqual([w[2] for w in sch._windows], ['caption_mid'])
+
+    def test_caption_lag_late_track(self):
+        # Live 7UvFi7O-TWE: a broadcast-style track ran ~4.7 s behind speech.
+        lag = CaptionLag()
+        for i in range(5):
+            c0 = 1000.0 + 15 * i
+            lag.asr(c0)                                  # ASR heard the name
+            late = lag.caption(c0 + 4.7, c0 + 4.8)       # shown 4.7 s later
+        self.assertTrue(late)
+
+    def test_caption_lag_on_time_track(self):
+        lag = CaptionLag()
+        for i in range(6):
+            c0 = 1000.0 + 15 * i
+            lag.asr(c0)
+            late = lag.caption(c0 + 0.2, c0 + 0.3)
+            # A caption ASR missed must not pair with this earlier mention.
+            lag.caption(c0 + 4.0, c0 + 4.1)
+        self.assertFalse(late)
+
+    def test_late_captions_do_not_mute(self):
+        ctl, sch = self._ctl()
+        now = time.monotonic()
+        ctl.caption_lag._lags.extend([(now - 10 * i, 4.7) for i in range(3)])
+        ctl.on_caption_texts(["here comes LeBron"], now)
+        self.assertEqual(sch._windows, [])
+        self.assertEqual(ctl.caption_late_skips, 1)
 
     def test_caption_ocr_misread_is_same_mention(self):
         ctl, _ = self._ctl()

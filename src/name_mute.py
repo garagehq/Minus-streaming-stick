@@ -323,6 +323,64 @@ class NameMuteScheduler:
         }
 
 
+class CaptionLag:
+    """How late the on-screen captions are relative to the speech.
+
+    Each caption hit, once old enough that ASR has had its say (SETTLE_S), is
+    paired with the nearest ASR name hit; the lag is caption frame time minus
+    the ASR word start. YouTube's auto captions show within ~0.3 s of the word
+    (live, 17 of 18 held-out videos); a broadcast-style track ran ~4.7 s
+    behind, past the A/V delay, so every caption mute landed on the wrong
+    words. Captions count as late while the median of the recent lags is
+    over LATE_S.
+    """
+    SETTLE_S = 2.5     # past ASR's detection latency (p90 ~1.8 s)
+    PAIR_S = 6.0       # a caption up to this long after an ASR hit pairs with it
+    LATE_S = 1.5
+    MIN_SAMPLES = 3
+    KEEP = 7
+    HORIZON_S = 180.0
+
+    def __init__(self):
+        self._asr = []                       # ASR name word starts (capture time)
+        self._pending = []                   # caption hit times not yet paired
+        self._caps = []                      # all recent caption hit times
+        self._lags = collections.deque(maxlen=self.KEEP)   # (time, lag)
+
+    def asr(self, c0: float):
+        self._asr.append(c0)
+
+    def caption(self, t: float, now: float) -> bool:
+        """Record a caption hit at capture time t; True if captions run late."""
+        self._settle(now)
+        self._pending.append(t)
+        self._caps.append(t)
+        return self.late(now)
+
+    def late(self, now: float) -> bool:
+        lags = sorted(l for t, l in self._lags if now - t < self.HORIZON_S)
+        return len(lags) >= self.MIN_SAMPLES and lags[len(lags) // 2] > self.LATE_S
+
+    def _settle(self, now: float):
+        keep = []
+        for t in self._pending:
+            if now - t < self.SETTLE_S:
+                keep.append(t)
+                continue
+            near = [a for a in self._asr if -1.0 < t - a < self.PAIR_S]
+            if not near:
+                continue
+            a = min(near, key=lambda a: abs(t - a))
+            # One to one: a caption whose own mention ASR missed must not
+            # pair with an earlier mention that has a closer caption.
+            if all(abs(c - a) >= abs(t - a) for c in self._caps if c != t):
+                self._lags.append((t, t - a))
+        self._pending = keep
+        oldest = min(keep, default=now) - self.PAIR_S - 3.0
+        self._asr = [a for a in self._asr if a >= oldest]
+        self._caps = [c for c in self._caps if c >= oldest - self.PAIR_S]
+
+
 class NameMuteController:
     """Turns ASR words and caption OCR text into scheduled mutes.
 
@@ -423,6 +481,8 @@ class NameMuteController:
         self._recent_captions = {}   # caption key -> last seen (monotonic)
         self.asr_hits = 0
         self.caption_hits = 0
+        self.caption_late_skips = 0
+        self.caption_lag = CaptionLag()
         self.last_asr_text = ''
         self.last_caption_text = ''
         self.edge_king = os.environ.get('MINUS_NAME_MUTE_EDGE_KING', '1') == '1'
@@ -484,6 +544,7 @@ class NameMuteController:
             self._recent_asr.append((center, truncated))
             if not near:
                 self.asr_hits += 1
+                self.caption_lag.asr(c0)
             # The ASR word span is the most precise timing there is: it
             # narrows any coarser mute (caption line, partial name, cut-off
             # word) for the same mention to itself -- except that an
@@ -613,6 +674,11 @@ class NameMuteController:
                         continue
                     self.caption_hits += 1
                     self.last_caption_text = line
+                    if self.caption_lag.caption(capture_time, now) and self.use_asr:
+                        # Captions behind the speech by more than they can
+                        # cover: their mute would land on the wrong words.
+                        self.caption_late_skips += 1
+                        continue
                     pad_after = self.CAPTION_AFTER_S
                     if (hit.end() >= len(norm.rstrip())
                             and 'james' not in hit.group(0)):
@@ -687,6 +753,8 @@ class NameMuteController:
             'edge_king_skips': self.edge_king_skips,
             'caption_hits': self.caption_hits,
             'caption_mid_cancels': self.caption_mid_cancels,
+            'caption_late_skips': self.caption_late_skips,
+            'captions_late': self.caption_lag.late(time.monotonic()),
             'last_asr_text': self.last_asr_text[:200],
             'last_caption_text': self.last_caption_text[:200],
         })
