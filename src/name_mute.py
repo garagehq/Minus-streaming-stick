@@ -375,6 +375,12 @@ class NameMuteController:
     # hears the moment the name would have been spoken whole, without the
     # name, ends that mute.
     MID_LINE_WORDS = 3
+    # ...unless an OCR frame this recent showed the start of the same line
+    # without the name: the line grew, so it is a rolling caption, whose
+    # name is muted like any other caption hit (live, captions on,
+    # 2026-10-29: 8 of 9 mid-line hits were spoken mentions, and the cancel
+    # cost one -- "influence you LeBron I want you", ASR missed the name).
+    CAPTION_GREW_S = 2.0
 
     # Partial names: a "le…"/"lebr…" fragment that is the last word of an
     # ASR window and starts within PARTIAL_EDGE_S of its end mutes
@@ -407,6 +413,7 @@ class NameMuteController:
         self.partial_names = partial_names if env is None else env != '0'
         self._recent_partial = []    # capture starts of provisional mutes
         self._recent_mid = []        # capture times of mid-line caption hits
+        self._recent_lines = []      # (capture time, normalized line), all lines
         self.caption_mid_cancels = 0
         self.partial_hits = 0
         self.partial_cancels = 0
@@ -578,6 +585,10 @@ class NameMuteController:
         now = time.monotonic()
         self._recent_captions = {k: v for k, v in self._recent_captions.items()
                                  if now - v[0] < self.CAPTION_MEMORY_S}
+        earlier = [n for t, n in self._recent_lines if capture_time - self.CAPTION_GREW_S <= t < capture_time]
+        self._recent_lines = [(t, n) for t, n in self._recent_lines
+                              if capture_time - t < self.CAPTION_GREW_S]
+        self._recent_lines += [(capture_time, _norm(l)) for l, _ in lines if _norm(l)]
         for line, meta in lines:
             norm = _norm(line)
             if not norm:
@@ -606,7 +617,12 @@ class NameMuteController:
                     if (hit.end() >= len(norm.rstrip())
                             and 'james' not in hit.group(0)):
                         pad_after += self.CAPTION_LINE_END_EXTRA_S
-                    mid = len(rest.split()) >= self.MID_LINE_WORDS
+                    before = norm[:hit.start()].strip()
+                    mid = (len(rest.split()) >= self.MID_LINE_WORDS
+                           and not any(
+                               4 <= len(n) <= len(before) and difflib.SequenceMatcher(
+                                   None, n, before[:len(n)]).ratio() >= 0.85
+                               for n in earlier))
                     if mid:
                         self._recent_mid.append(capture_time)
                     self.scheduler.schedule(capture_time, capture_time,

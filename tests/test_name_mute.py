@@ -221,6 +221,22 @@ class TestController(unittest.TestCase):
         ctl.on_caption_results([self._ocr("and here comes LeBron James", 0.92)], t + 0.5, fs)
         self.assertEqual(ctl.caption_hits, 1)
 
+    def test_caption_mid_line_grown_is_not_provisional(self):
+        # Live Q-cq99Szoyc: "influence you" then "influence you LeBron I want
+        # you" -- a rolling caption, so ASR not hearing the name keeps the mute.
+        ctl, sch = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["influence you"], t - 0.5)
+        ctl.on_caption_texts(["influence you LeBron I want you"], t)
+        self.assertEqual([w[2] for w in sch._windows], ['caption'])
+
+    def test_caption_mid_line_whole_banner_is_provisional(self):
+        ctl, sch = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["breaking news"], t - 0.5)
+        ctl.on_caption_texts(["fans questioning LeBron and his GOAT status"], t)
+        self.assertEqual([w[2] for w in sch._windows], ['caption_mid'])
+
     def test_caption_ocr_misread_is_same_mention(self):
         ctl, _ = self._ctl()
         t = time.monotonic()
