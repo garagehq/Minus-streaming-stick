@@ -4,6 +4,7 @@ OCR Worker Process - runs OCR in separate process for hard timeout capability.
 This allows us to actually KILL stuck OCR inference instead of just timing out.
 """
 
+import gc
 import os
 import re
 import sys
@@ -112,6 +113,7 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
                             import numpy as np
                             warmup_img = np.random.randint(0, 255, (540, 960, 3), dtype=np.uint8)
                             _ = ocr.ocr(warmup_img)
+                            gc.collect(0)
                             last_inference_time = time.time()
                             logger.debug("[OCRWorker] Keepalive inference completed")
                         except:
@@ -141,6 +143,11 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
                     last_inference_time = time.time()
                 else:
                     response_queue.put(('error', 'Unknown request type'))
+                # rknnlite's inference() leaves its ctypes input/output
+                # buffers in reference cycles; without a collection they pile
+                # up until Python's cyclic GC runs (worker swung 60-580 MB
+                # over a soak, 2026-10-28). ~2 ms, after the reply.
+                gc.collect(0)
 
             except Exception as e:
                 logger.error(f"[OCRWorker] Error processing request: {e}")
