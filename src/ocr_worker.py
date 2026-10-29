@@ -19,6 +19,37 @@ except RuntimeError:
     pass  # Already set
 
 
+# Heap upkeep (minus, 2026-10-29 soak): the worker's RSS grew ~110 MB/h. Most
+# of it was freed-but-unreturned glibc heap from the RKNN inference calls:
+# malloc_trim(0) on the live worker gave back 109 MB at once. A smaller part
+# (~30 MB/h) survived the trim. So the worker trims every TRIM_EVERY requests
+# (~0.7 ms), and OCRProcess restarts it between requests once its RSS is still
+# over RSS_CAP_MB (~1 s of models + warmup; at the observed rate about daily).
+TRIM_EVERY = 500
+RSS_CAP_MB = 1024
+
+
+def _trim_heap():
+    """malloc_trim(0): hand freed heap pages back to the kernel."""
+    try:
+        import ctypes
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _rss_mb(pid):
+    """RSS of `pid` in MB, or None if it can't be read."""
+    try:
+        with open(f'/proc/{pid}/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return None
+
+
 def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event):
     """
     Main function for OCR worker process.
@@ -99,6 +130,7 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
         # Process requests with keepalive
         last_inference_time = time.time()
         KEEPALIVE_INTERVAL = 20.0  # Run keepalive if idle for 20s
+        served = 0
 
         while not shutdown_event.is_set():
             try:
@@ -130,17 +162,22 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
                     frame_rgb = frame_data
 
                 if request_type == 'ocr':
-                    result = ocr.ocr(frame_rgb)
-                    response_queue.put(('ok', result))
-                    last_inference_time = time.time()
+                    reply = ('ok', ocr.ocr(frame_rgb))
                 elif request_type == 'check_ad':
                     # OCR + keyword check (check_ad_keywords returns a 4-tuple)
                     ocr_results = ocr.ocr(frame_rgb)
                     is_ad, keywords, _texts, _terminal = ocr.check_ad_keywords(ocr_results)
-                    response_queue.put(('ok', (is_ad, keywords, ocr_results)))
-                    last_inference_time = time.time()
+                    reply = ('ok', (is_ad, keywords, ocr_results))
                 else:
-                    response_queue.put(('error', 'Unknown request type'))
+                    reply = ('error', 'Unknown request type')
+                if reply[0] == 'ok':
+                    last_inference_time = time.time()
+                    served += 1
+                    # Trim before replying, so OCRProcess's RSS check on
+                    # this reply sees the trimmed heap.
+                    if served % TRIM_EVERY == 0:
+                        _trim_heap()
+                response_queue.put(reply)
 
             except Exception as e:
                 logger.error(f"[OCRWorker] Error processing request: {e}")
@@ -201,6 +238,7 @@ class OCRProcess:
         self.is_ready = False
         self._restart_count = 0
         self._consecutive_timeouts = 0
+        self._served = 0
 
     def start(self):
         """Start the OCR worker process."""
@@ -223,6 +261,7 @@ class OCRProcess:
             daemon=True
         )
         self.process.start()
+        self._served = 0  # in step with the new worker's own request count
 
         # Wait for models to load (up to 30s)
         if self.ready_event.wait(timeout=30.0):
@@ -312,6 +351,7 @@ class OCRProcess:
             if status == 'ok':
                 # Reset consecutive timeout counter on success
                 self._consecutive_timeouts = 0
+                self._check_worker_memory()
                 return result if result is not None else []
             else:
                 # Worker reported an error — it did not observe the frame.
@@ -326,6 +366,24 @@ class OCRProcess:
             )
             self.restart()
             return None
+
+    def _check_worker_memory(self):
+        """Every TRIM_EVERY replies (the worker trims just before that reply), replace
+        the worker if its RSS is still over RSS_CAP_MB. Runs between requests,
+        so no frame waits on a dying worker, and it is not a timeout: no
+        backoff, and it does not count toward restart_count."""
+        self._served += 1
+        if self._served % TRIM_EVERY or self.process is None:
+            return
+        rss = _rss_mb(self.process.pid)
+        if rss is None or rss <= RSS_CAP_MB:
+            return
+        import logging
+        logging.getLogger('Minus.OCR').info(
+            f"[OCRProcess] Worker RSS {rss} MB after trim exceeds {RSS_CAP_MB} MB "
+            f"({self._served} requests) - restarting it (planned)")
+        self.kill()
+        self.start()
 
     def release(self):
         """Release the OCR worker process."""
