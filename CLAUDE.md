@@ -239,6 +239,13 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     [95% CI 92.4-96.4] vs 82.5% stock. Five held-out videos turned out to
     be re-uploads of training videos and are excluded (asr_eval/leak).
   - *False mutes* on non-LeBron video: ~0.6/h, all bare "king".
+  - *Captions on* (36 held-out videos, 2026-10-29): 98.6% [96.9-99.3] from
+    the first syllable (stock 93.3% on 9 of them), after fixing caption
+    dedup (new line = lower on screen or different text after the name),
+    keeping a caption's earlier start when ASR replaces it, not cancelling
+    mid-line hits on a line seen growing, ignoring captions while they run
+    >1.5 s behind ASR (`CaptionLag`), and skipping name text <0.65x caption
+    height (graphics). Details in docs/ASR_BENCHMARKS.md.
   - *6 h single-start soak* (10 dense held-out segments, 5 non-LeBron
     videos): 90.7% vs 89.1% for the same videos in short runs, no audible
     false mutes, memory flat (ASR worker ~530 MB, OCR worker ~130 MB).

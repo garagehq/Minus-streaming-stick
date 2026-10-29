@@ -430,6 +430,69 @@ frame-change correlation. It refuses to build if samples were lost. Don't
 trust the recorder's `.idx` arrival times for alignment: they are stamped
 in Python and lag when the GIL is busy.
 
+## Captions on: fine-tuned SenseVoice + caption fixes (Oct 29)
+
+Held-out videos (`holdout_videos.json[18:]` minus the five re-uploads of
+training videos), 240 s each, TV YouTube captions on ("English
+(auto-generated)" via `KEYCODE_CAPTIONS`), 2.35 s effective delay, edge-king
+on. "From the first syllable" = fully muted, or only the last 30 ms or less
+of the name's start audible (the usual onset metric); most remaining
+"partials" are a bit of "...James" after a muted "LeBron".
+
+| Config | Videos | From the first syllable | Fully muted |
+|---|---|---|---|
+| Stock SenseVoice, old caption code | 9 (batch 0) | 111/119 = 93.3% [87.3-96.6] | 79.8% |
+| Fine-tuned, old caption code | 18 (batches 0-1) | 224/231 = 97.0% [93.9-98.5] | 87.0% |
+| Fine-tuned, new caption code | 36 (batches 0-3) | **412/418 = 98.6% [96.9-99.3]** | 92.1% |
+
+Same videos, old vs new code: batch 0 96.8% -> 98.4%, batch 1 97.2% -> 98.1%
+(batch 1 was not used to find the fixes).
+
+**What the misses were** (old code, batches 0-1) and what changed:
+
+* *Caption dedup merged two mentions* (`_seen_caption`). "basket for LeBron
+  so I'm good..." then "basket for LeBron that's why..." 4 s later share the
+  text before the name; every line *starting* with the name had the same
+  key ("lebron"), so "LeBron comes down..." swallowed "LeBron." 11 s later.
+  Now a line lower on screen than where the entry was last seen (roll-up
+  captions only move up) or with different text after the name is a new
+  mention. Stock missed the same ones: it is caption logic, not the model.
+* *ASR replaced an on-time caption mute with a late one.* The ASR window
+  narrows a pending caption window to itself; SenseVoice's word start can
+  land 0.1-0.3 s into the name. The ASR window now keeps the caption's
+  earlier start (`keep_head_sources`): ~40% of ASR mutes start ~0.3 s
+  earlier.
+* *Mid-line caption hit cancelled.* A name in the middle of a newly seen
+  line mutes provisionally (could be a banner) and is cancelled when ASR
+  hears that moment without it; 8 of 9 such hits were spoken, and the
+  cancel lost one ("influence you LeBron I want you"). A line an OCR frame
+  in the last 2 s showed growing toward the name is a caption, not
+  provisional.
+* *Late caption track* (one video of 18): a broadcast-style track ran ~4.7 s
+  behind the speech, past the delay, so each of its caption mutes cut
+  1.4-2 s of the wrong words (~15 s per 4 min). `CaptionLag` pairs caption
+  hits one-to-one with ASR hits; while the median lag is over 1.5 s,
+  captions don't mute. Replayed over all 27 recorded runs it engaged only
+  on that video.
+* *Small graphics* (news headline, ticker, scoreboard) reappear every
+  20-60 s and mute each time. Name lines under 0.65x the median caption
+  height are skipped: 13 of 71 off-mention caption hits vs 2 of 647 real
+  ones. (Committed after the runs; replayed offline only.)
+
+**Left over** (6 of 418): OCR never read the line (2), a caption shown
+0.9-1.7 s late at the start of a line with ASR also missing (2), ASR
+missing a short name with no caption (2).
+
+**Cost:** total mute is 2.3-2.7x the spoken name (2.1-2.3x with the old
+code), ~0.25 s more per mention, mostly just before the name. Off-mention
+mutes that cut audio: 5-8 per 9 videos (36 min), about half of them names
+the caption track doesn't have (the ground truth misses them) and the rest
+on-screen text.
+
+Scripts: `asr_eval/live/cc_ab.sh` (A/B) and `cc_ab2.sh` (new-code runs);
+results in `asr_eval/live/runs/*_{ftcc,stcc,ftcc2}_b*`. Commits: a892f7b
+(batch 1), 662547d (batch 0), 67a252c (batches 2-3), 7323d0f (size filter).
+
 ## Training clips for fine-tuning
 
 `src/asr_clips.py` (on by default, `MINUS_ASR_CLIPS=0` to disable) saves
