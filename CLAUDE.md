@@ -228,6 +228,27 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   the caption word vs 0.2-0.4s. Rejected: whisper.cpp on the Mali GPU
   (slower than CPU, see docs/GPU_SETUP.md), Moonshine streaming (falls
   behind real time), sherpa-onnx keyword spotting (27% recall).
+- **Fine-tuned SenseVoice + edge-king rule: the default (2026-10-29).**
+  `sensevoice_npu.SENSEVOICE_DIR` picks `~/asr_models/sensevoice-rknn-minus-ft`
+  (fine-tuned on the clip-farm dataset) when installed, else the stock model.
+  - *Edge-king rule* (`MINUS_NAME_MUTE_EDGE_KING`, now default 1): a bare
+    "king" within 0.25 s of a window edge is ignored (a cut-off
+    "making"/"Kings"); the real word lands inside a neighbouring window.
+  - *Held-out live tests* (captions off, 2.35 s effective delay, paired by
+    video, 75 videos): 94.6% of mentions muted from the first syllable
+    [95% CI 92.4-96.4] vs 82.5% stock. Five held-out videos turned out to
+    be re-uploads of training videos and are excluded (asr_eval/leak).
+  - *False mutes* on non-LeBron video: ~0.6/h, all bare "king".
+  - *6 h single-start soak* (10 dense held-out segments, 5 non-LeBron
+    videos): 90.7% vs 89.1% for the same videos in short runs, no audible
+    false mutes, memory flat (ASR worker ~530 MB, OCR worker ~130 MB).
+  - *Leaks fixed on the way:* rknnlite's `inference()` leaves its ctypes
+    input/output buffers (17 MB for SenseVoice) in reference cycles, so
+    both the ASR and OCR workers call `gc.collect(0)` after each reply;
+    the ASR worker also `malloc_trim`s every 100 calls
+    (`MINUS_ASR_TRIM_EVERY`) and runs with `MALLOC_ARENA_MAX=2`.
+  - *Testing:* `tests/test_wifi_portal.py` submits real Wi-Fi connects
+    through the live portal; never run it on a box you reach over Wi-Fi.
 - **Measured live at 2s delay (SenseVoice)**, two held-out videos, 17-18
   min each: 19/23 mentions fully muted (83%, before the caption line-end
   and window-start fixes) and 15/16 (94%, after; the miss is at the
