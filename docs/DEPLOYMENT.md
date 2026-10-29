@@ -122,9 +122,26 @@ pip3 install --break-system-packages axengine
 lspci | grep -i axera                       # expect 1f4b:0650
 axcl-smi info
 
-# Download the model from https://huggingface.co/TheGarageDev/Minus-v0.2
-# Models should be at: /home/radxa/axera_models/minus-v0.2/
+# Download the model (~740 MB). install.sh already does this step.
+sudo python3 tools/minus_update.py --install-model
+ls /home/radxa/axera_models/minus-v0.2/
+# expect: vision_encoder_512.axmodel  fused_models/ (16 files)  decode_models/post_d.axmodel  embed.npy  tokenizer.json
 ```
+
+The compiled NPU model is the [`axera/`](https://huggingface.co/TheGarageDev/Minus-v0.2/tree/main/axera)
+folder of [TheGarageDev/Minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2); the files at the
+repo root are the full-precision transformers weights, for servers, and are not needed on the box.
+`minus_update.py` downloads only `axera/`, checks every file against Hugging Face's checksums and
+puts its contents directly in the directory above (which repo, folder and directory: [`models/vlm_model.json`](../models/vlm_model.json)).
+To fetch it by hand instead:
+
+```bash
+hf download TheGarageDev/Minus-v0.2 --include "axera/*" --local-dir /tmp/minus-v0.2
+mkdir -p /home/radxa/axera_models/minus-v0.2
+cp -r /tmp/minus-v0.2/axera/. /home/radxa/axera_models/minus-v0.2/
+```
+
+Minus-v0.1 has the same `axera/` folder, if you ever need the previous model.
 
 If the VLM fails to load with an error about `libaxcl_*.so`, see the broken
 symlink entry in [CLAUDE.md](../CLAUDE.md) for the one-line fix.

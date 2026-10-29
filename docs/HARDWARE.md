@@ -13,7 +13,7 @@ from the development unit, which is noted as such.
 | Part | What to buy | Approx. | Why this part |
 |---|---|---|---|
 | Single-board computer | [Radxa ROCK 5B+](https://radxa.com/products/rock5/5bp/) (full-size HDMI in) or [ROCK 5B](https://radxa.com/products/rock5/5b/) (micro-HDMI in), **8 GB RAM recommended, 4 GB minimum** | $130 - $190 | The RK3588 is the only affordable SoC with a **4K@60 HDMI receiver** (`rk_hdmirx`), plus the VPU that encodes 4K JPEG in hardware and the NPU that runs OCR. The HDMI input is the non-negotiable part: boards without it cannot do passthrough. |
-| AI accelerator | [Radxa AICore AX-M1](https://radxa.com/products/aicore/ax-m1/) (Axera AX8850, 24 TOPS INT8, 8 GB LPDDR4X, M.2 2280 M-key, ≤ 8 W) | ~$150 | Runs minus-v0.2, the 450M vision-language model, at ~370 ms per frame. The RK3588's own NPU is already busy with OCR and is not fast enough for the VLM on top of it. |
+| AI accelerator | [Radxa AICore AX-M1](https://radxa.com/products/aicore/ax-m1/) (Axera AX8850, 24 TOPS INT8, 4 or 8 GB LPDDR4X, M.2 2280 M-key, ≤ 8 W) | ~$150 | Runs minus-v0.2, the 450M vision-language model, at ~370 ms per frame. The RK3588's own NPU is already busy with OCR and is not fast enough for the VLM on top of it. |
 | Storage | 64 GB+ eMMC module or [A2-rated microSD](https://www.amazon.com/s?k=64GB+A2+microSD+card) | $15 - $30 | The OS, plus screenshots collected for training. The dev unit runs a 64 GB card. |
 | Power supply | USB-C **PD** adapter, 30 W or better: [Radxa Power PD 30W](https://radxa.com/products/accessories/power-pd-30w/) is a safe default, or any [30 W+ USB-C PD supply](https://www.amazon.com/s?k=30W+USB-C+PD+power+adapter) | ~$20 | The board plus the accelerator draw real current under 4K passthrough. A 5 V/2 A phone charger will brown out and cause random pipeline restarts. |
 | Cooling | Heatsink **and** fan: [Radxa Heatsink 6240B](https://radxa.com/products/accessories/heatsink-6240b/) (get **V2.0** for the 5B+; V1.0's fins interfere with it), or a 40 mm fan on the PWM header | $10 - $25 | Not optional. Measured on the dev unit: sustained 4K60 passthrough sits at **80 - 85 °C with the fan at full**, which is where the SoC starts thermal-throttling. Minus has a [thermal governor](../src/thermal.py) that drops to 30 fps when this happens, but passive cooling alone will throttle constantly. |
@@ -39,7 +39,13 @@ subprocesses total roughly **1.2 GB resident**, and ustreamer adds ~140 MB. A
 known glibc allocator behaviour lets that climb toward ~1.7 GB between HDMI
 signal-loss events (see the arena note in [CLAUDE.md](../CLAUDE.md)), so 4 GB
 leaves little headroom for anything else on the box. The accelerator has its
-own 8 GB and does not consume host RAM for the model.
+own memory and does not consume host RAM for the model.
+
+**AX-M1: 4 GB or 8 GB.** The VLM is the only thing Minus runs on the card, and it
+needs well under 1 GB of it. Measured on the dev unit (8 GB card, `axcl-smi`):
+minus-v0.2 uses **563 MiB** of the card's NPU memory (CMM) and the card's own OS
+~180 MiB, out of 7,040 MiB CMM + 945 MiB system. A 4 GB card has several times
+that, so either works; the dev unit happens to have the 8 GB one.
 
 **M.2 slots.** The AX-M1 is M.2 2280 M-key. The ROCK 5B+ has **two** M-key
 slots (PCIe 3.0 x2 each), so the accelerator and an NVMe SSD can coexist. The
@@ -130,7 +136,7 @@ Minus uses two models, and they are distributed differently.
 | Model | Where it runs | Where it comes from |
 |---|---|---|
 | **PaddleOCR PP-OCRv6** (detection + recognition; PP-OCRv3 also ships as a rollback) | RK3588 NPU | **In this repository**, at [`models/paddleocr/`](../models/paddleocr/). Nothing to download. |
-| **minus-v0.2** (450M vision-language ad classifier) | Axera AX-M1 | [Hugging Face: TheGarageDev/Minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2) → `/home/radxa/axera_models/minus-v0.2/` |
+| **minus-v0.2** (450M vision-language ad classifier) | Axera AX-M1 | [Hugging Face: TheGarageDev/Minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2), the compiled [`axera/`](https://huggingface.co/TheGarageDev/Minus-v0.2/tree/main/axera) folder (~740 MB) → `/home/radxa/axera_models/minus-v0.2/`. `install.sh` downloads it. |
 
 The OCR models are ~17 MB for both generations and ship with the code, so a fresh clone can read ad
 UI text immediately. See [`models/paddleocr/README.md`](../models/paddleocr/README.md)
