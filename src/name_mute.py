@@ -439,6 +439,14 @@ class NameMuteController:
     # 2026-10-29: 8 of 9 mid-line hits were spoken mentions, and the cancel
     # cost one -- "influence you LeBron I want you", ASR missed the name).
     CAPTION_GREW_S = 2.0
+    # Text much smaller than the captions is a graphic (news headline,
+    # ticker, scoreboard), which reappears every few tens of seconds and
+    # mutes each time. Live, captions on (2026-10-29, 27 runs): hits under
+    # 0.65x the median caption height were 13 of 71 off-mention hits and 2
+    # of 647 real ones. Relative, since caption size is a viewer setting;
+    # off until CAPTION_H_MIN_SAMPLES heights have been seen.
+    CAPTION_MIN_REL_H = 0.65
+    CAPTION_H_MIN_SAMPLES = 10
 
     # Partial names: a "le…"/"lebr…" fragment that is the last word of an
     # ASR window and starts within PARTIAL_EDGE_S of its end mutes
@@ -482,6 +490,8 @@ class NameMuteController:
         self.asr_hits = 0
         self.caption_hits = 0
         self.caption_late_skips = 0
+        self.caption_small_skips = 0
+        self._caption_h = collections.deque(maxlen=50)   # heights of name lines
         self.caption_lag = CaptionLag()
         self.last_asr_text = ''
         self.last_caption_text = ''
@@ -656,6 +666,14 @@ class NameMuteController:
                 continue
             if line.upper() == line and any(c.isalpha() for c in line):
                 continue   # all-caps: an on-screen graphic, not a caption
+            h = meta.get('h')
+            if h and any(m.search(norm) for m in (_FULL_NAME_RE, _FIRST_NAME_RE, _KING_JAMES_RE)):
+                small = (len(self._caption_h) >= self.CAPTION_H_MIN_SAMPLES and h <
+                         self.CAPTION_MIN_REL_H * sorted(self._caption_h)[len(self._caption_h) // 2])
+                self._caption_h.append(h)
+                if small:
+                    self.caption_small_skips += 1
+                    continue
             for m in (_FULL_NAME_RE, _FIRST_NAME_RE, _KING_JAMES_RE):
                 for hit in m.finditer(norm):
                     if _is_graphic_name(line):
@@ -754,6 +772,7 @@ class NameMuteController:
             'caption_hits': self.caption_hits,
             'caption_mid_cancels': self.caption_mid_cancels,
             'caption_late_skips': self.caption_late_skips,
+            'caption_small_skips': self.caption_small_skips,
             'captions_late': self.caption_lag.late(time.monotonic()),
             'last_asr_text': self.last_asr_text[:200],
             'last_caption_text': self.last_caption_text[:200],

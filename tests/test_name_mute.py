@@ -264,6 +264,22 @@ class TestController(unittest.TestCase):
         self.assertEqual(sch._windows, [])
         self.assertEqual(ctl.caption_late_skips, 1)
 
+    def test_small_text_graphic_ignored(self):
+        # Live wmhgcxHzC2Y: a news headline "LeBron says he's "50/50"..." at
+        # ~half caption height kept coming back and muting.
+        ctl, sch = self._ctl()
+        t, fs = time.monotonic(), (1080, 1920)
+        for i in range(10):
+            ctl.on_caption_results([self._ocr(f"line {i} with LeBron", 0.92)], t - 100 + 9 * i, fs)
+        hits = ctl.caption_hits
+        small = self._ocr("LeBron says he's 50/50 on a return", 0.85)
+        small['box'] = [[p[0], 0.85 * 1080 + (p[1] - 0.85 * 1080) * 0.45] for p in small['box']]
+        ctl.on_caption_results([small], t, fs)
+        self.assertEqual(ctl.caption_hits, hits)
+        self.assertEqual(ctl.caption_small_skips, 1)
+        ctl.on_caption_results([self._ocr("and here comes LeBron", 0.92)], t + 1, fs)
+        self.assertEqual(ctl.caption_hits, hits + 1)
+
     def test_caption_ocr_misread_is_same_mention(self):
         ctl, _ = self._ctl()
         t = time.monotonic()
