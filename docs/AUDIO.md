@@ -122,6 +122,16 @@ class AudioPassthrough:
         self.volume.set_property('mute', False)
 ```
 
+**A block's mute survives a pipeline rebuild (Oct 2026).** The real pipeline
+(`src/audio.py`) is built with the *current* mute state (`volume ... mute=true`
+while `is_muted`), and the volume element is set muted again as soon as it is
+found. Every rebuild path (the watchdog restart, `restart()`, and `stop()` +
+`start()` on an HDMI reconnect) therefore comes up muted mid-block. Before
+this, `start()` built a fresh `mute=false` pipeline while `is_muted` stayed
+`True`: a TV that re-hotplugged during a blocked ad let the ad's sound play for
+the rest of the block, and every check still read "muted"
+(`tests/test_audio_mute_survives_rebuild.py`).
+
 ### Integration with Ad Blocker
 
 ```python

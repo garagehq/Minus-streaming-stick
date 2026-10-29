@@ -2,10 +2,10 @@
 
 ## Overview
 
-HDMI passthrough with real-time ML-based ad detection and blocking using dual NPUs + CPU ASR:
+HDMI passthrough with real-time ML-based ad detection and blocking using dual NPUs (OCR + ASR on the RK3588 NPU, the VLM on the Axera NPU):
 - **PaddleOCR PP-OCRv6** on RK3588 NPU (~180ms p50 / ~275ms p90 per frame, 1.5s hard timeout). PP-OCRv3 ships alongside as a rollback (`MINUS_OCR_MODEL_VERSION=v3`); each generation is bound to its own dictionary and DB thresholds in `src/config.py`.
-- **LFM2.5-VL-450M (ft-v2-fused-v2)** on Axera LLM 8850 NPU — **prefill-only on 16 fused decoder layers, ~0.37s per frame deterministic** (1.5s soft / 2s hard timeout). Replaced FastVLM-0.5B iter4 (May 2026): 97.0% holdout accuracy / 99.2% non-ad-recall vs iter4's 94.75% / 95.25%, structurally simpler (no KV cache, no autoregressive decode for `detect_ad` OR autonomous-mode `query_image`, no ml_dtypes bfloat16 ceremony). Both inference paths share one model — no FastVLM dependency anymore. See *FastVLM iter4 → LFM2.5-VL Migration* under Known Issues.
-- **Moonshine tiny-en (ONNX) ASR** on 3 pinned CPU cores (~1.6s per **2s** audio window, max <2s even on dense continuous speech). Runs in a multiprocessing worker subprocess (mirrors OCR/VLM worker pattern) for hard-timeout safety. **CONFIRM-ONLY** audio signal on top of OCR+VLM: decorates the block label (`+asr`) and does a gated mid-block rescue, but **never suppresses a block at start** (the old VETO was removed in 2026-05 — it was killing real ads VLM was sure about). Never fires blocking alone. Engine-selectable via `MINUS_ASR_ENGINE` (faster-whisper fallback for cool/idle hosts; on the thermally-throttled production box faster-whisper's fixed 30s encoder is ~3.3-5s/window — too slow, hence Moonshine which processes audio proportionally). Was whisper.cpp → faster-whisper → Moonshine. See [docs/ASR.md](docs/ASR.md) and *Moonshine ASR migration + decision-engine retune* under Known Issues.
+- **minus-v0.2** (fine-tuned LFM2.5-VL-450M, [TheGarageDev/Minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2)) on Axera LLM 8850 NPU — **prefill-only on 16 fused decoder layers, ~0.37s per frame deterministic** (1.5s soft / 2s hard timeout). 99.1% on the 800-image holdout measured on the NPU (minus-v0.1: 95.6%), screen-state check 95.9% (v0.1: always MENU). The LFM family replaced FastVLM-0.5B iter4 (May 2026), structurally simpler (no KV cache, no autoregressive decode for `detect_ad` OR autonomous-mode `query_image`, no ml_dtypes bfloat16 ceremony). Both inference paths share one model — no FastVLM dependency anymore. See *FastVLM iter4 → LFM2.5-VL Migration* under Known Issues.
+- **SenseVoice-small ASR on RK3588 NPU core 1** (since 2026-10-18; ~0.38s per 3s window, a window every 1s; Moonshine tiny-en on 3 CPU cores is the fallback). See [docs/ASR.md](docs/ASR.md) for the current decision rules (confirm, a calibrated veto against an unsure VLM, the audio gate); the rest of this bullet describes the older Moonshine setup. Runs in a multiprocessing worker subprocess (mirrors OCR/VLM worker pattern) for hard-timeout safety. **CONFIRM-ONLY** audio signal on top of OCR+VLM: decorates the block label (`+asr`) and does a gated mid-block rescue, but **never suppresses a block at start** (the old VETO was removed in 2026-05 — it was killing real ads VLM was sure about). Never fires blocking alone. Engine-selectable via `MINUS_ASR_ENGINE` (faster-whisper fallback for cool/idle hosts; on the thermally-throttled production box faster-whisper's fixed 30s encoder is ~3.3-5s/window — too slow, hence Moonshine which processes audio proportionally). Was whisper.cpp → faster-whisper → Moonshine. See [docs/ASR.md](docs/ASR.md) and *Moonshine ASR migration + decision-engine retune* under Known Issues.
 - **Spanish vocabulary practice** during ad blocks!
 
 ## Documentation
@@ -19,7 +19,7 @@ HDMI passthrough with real-time ML-based ad detection and blocking using dual NP
 | [docs/DEBUG_GLITCHES.md](docs/DEBUG_GLITCHES.md) | Video glitch debugging notes |
 | [docs/FPS_DEBUGGING.md](docs/FPS_DEBUGGING.md) | FPS tracking and optimization |
 | [docs/AUDIO.md](docs/AUDIO.md) | Audio passthrough documentation |
-| [docs/ASR.md](docs/ASR.md) | Moonshine (ONNX) ASR — audio-based ad CONFIRM signal on top of OCR+VLM (worker process, 2s window, veto removed 2026-05) |
+| [docs/ASR.md](docs/ASR.md) | ASR (SenseVoice on the RK3588 NPU since 2026-10-18; Moonshine CPU fallback): confirms blocks, vetoes VLM-alone blocks on show dialog, audio gate |
 | [docs/VLM_NPU_DEGRADATION.md](docs/VLM_NPU_DEGRADATION.md) | Investigation of "NPU degradation" — root cause is per-image output-length variance; fix is `max_new_tokens` cap |
 | [docs/IR_TRANSMITTER.md](docs/IR_TRANSMITTER.md) | IR transmitter for the REI 8K HDMI switch (PWM3 on pin 38) — wiring, NEC codes, API, troubleshooting |
 | [docs/IR_RECEIVER.md](docs/IR_RECEIVER.md) | IR receiver eval on pin 3 (`gpiochip4 11`) — bench-tested decode of NEC remotes, gotchas, sketch for a future `IRReceiver` module |
@@ -457,7 +457,7 @@ Streaming UIs render a `Skip Intro` button that OCR sometimes reads as `Sk1p Int
 
 When ads are detected, the screen shows a full blocking overlay **rendered at 60fps via ustreamer's native MPP blocking mode**:
 - **Pixelated Background**: Blurred/pixelated version of the screen from ~6 seconds before the ad
-- **Header** (debug only): `[ BLOCKING // OCR ]`, `[ BLOCKING // VLM ]`, or `[ BLOCKING // OCR+VLM ]`
+- **Header** (debug only): `[ BLOCKING // OCR ]`, `[ BLOCKING // VLM ]`, `[ BLOCKING // OCR+VLM ]`, plus `+ASR` once ASR confirms (`OCR+ASR`, `VLM+ASR`, `OCR+VLM+ASR`). The per-frame `OCR #N ... [BLOCKING ...]` log tag uses the same parts.
 - **Spanish vocabulary**: Random intermediate-level word with translation
 - **Example sentence**: Shows the word in context
 - **Rotation**: New vocabulary every 11-15 seconds
@@ -1735,6 +1735,18 @@ This caused the new pipeline to fail with "device in use" because the old pipeli
 - After 3+ consecutive pipeline failures, the system now kills ustreamer (`pkill -9 ustreamer`) to force-release MPP resources
 - The health monitor detects ustreamer is down and restarts it + the video pipeline with clean MPP state
 - This auto-recovers from stuck MPP decoder without manual service restart
+
+### Blocked ad's sound played after an HDMI reconnect (Fixed - Oct 2026)
+
+**Symptom (2026-10-29, live):** a blocked Vinted ad (OCR + VLM, audio MUTED) played its sound for the rest of the block after the TV re-hotplugged twice mid-block.
+
+**Root cause:** on an HDMI reconnect `DRMAdBlocker` restarts audio with `AudioPassthrough.stop()` + `start()`. `_init_pipeline()` built the playback chain with a hard-coded `volume ... mute=false` and `start()` never re-applied the mute (the watchdog restart paths did), while `is_muted` stayed `True`, so the status API, the decision engine and `unmute()` all believed audio was muted.
+
+**Fix (#56):** the volume element is built with the current mute state and set muted again right after `get_by_name('vol')`; every rebuild path comes up muted mid-block. Test: `tests/test_audio_mute_survives_rebuild.py`.
+
+### Per-frame log tag never said +ASR (Fixed - Oct 2026)
+
+The `OCR #N: ... [BLOCKING ...]` tag was built from the OCR and VLM flags only, so it only ever said OCR / VLM / OCR+VLM even after ASR confirmed the block (the overlay header and `ASR confirmed active block → ...` did name it; ASR confirms dozens of blocks a day, usually a few seconds after OCR starts one). It now comes from `Minus._ocr_log_blocking_tag()` (OCR / VLM / ASR parts). The mid-block ASR upgrade also requires an active block: a statically suppressed ad used to log `ASR confirmed active block →` with an empty label. Test: `tests/test_blocking_labels.py`.
 
 ### Audio Device Mismatch on Display Reconnect (Fixed - Apr 2026)
 

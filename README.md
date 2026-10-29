@@ -26,8 +26,8 @@ Minus is a 4K@60fps HDMI passthrough. Your Roku, Fire TV, or Google TV plugs int
               ┌───────────────┼────────────────┐
               ▼               ▼                ▼
      ┌────────────────┐ ┌──────────────┐ ┌──────────────┐
-     │  PaddleOCR     │ │  minus-v0.2  │ │  Moonshine   │
-     │  RK3588 NPU    │ │  (VLM)       │ │  ASR (CPU)   │
+     │  PaddleOCR     │ │  minus-v0.2  │ │  SenseVoice  │
+     │  RK3588 NPU    │ │  (VLM)       │ │  ASR (NPU)   │
      │  reads ad UI   │ │  Axera NPU   │ │  hears ad    │
      │  text ~200ms   │ │  ~370ms      │ │  language    │
      └────────────────┘ └──────────────┘ └──────────────┘
@@ -39,7 +39,7 @@ Minus is a 4K@60fps HDMI passthrough. Your Roku, Fire TV, or Google TV plugs int
 
 - OCR (PaddleOCR PP-OCRv6 on the RK3588's NPU, ~200ms a frame) reads on-screen ad UI like "Skip in 5", "Ad 2 of 3", and countdown timers, including the character misreads OCR makes on real TVs. When an ad shows its own countdown, Minus reads the number and counts it down in real time, so it knows the ad is still running even while OCR briefly loses the text. That clock only ever helps hold a block that the detectors already started. On its own it never starts one.
 - [minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2), a 450M-parameter vision-language model fine-tuned for this exact job, looks at the raw frame and answers "is this an advertisement?" in about 370ms on an Axera AX8850 NPU. It needs no text on screen to work.
-- ASR (Moonshine tiny-en on CPU) transcribes the audio and listens for marketing language as a confirmation signal.
+- ASR (SenseVoice-small on the RK3588's NPU, Moonshine on the CPU as a fallback) transcribes the audio. Ad language confirms a block; show dialog with no ad language holds back a block that only an unsure vision model wanted.
 
 When the votes say "ad", audio mutes immediately and the screen switches to an overlay rendered at 60fps inside the hardware JPEG encoder (no desktop stack, no X11). When the ad ends the show comes back after a few seconds, about 5 in practice. Minus waits for several clean frames and a short floor before it lets go, because OCR routinely loses an ad's text for a few seconds mid-ad, and releasing on the first gap would flash the ad back on screen.
 
