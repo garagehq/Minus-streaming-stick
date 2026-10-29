@@ -2441,6 +2441,20 @@ class Minus:
         src = self._display_source() or ''
         return self._SOURCE_LABELS.get(src, src.upper())
 
+    def _ocr_log_blocking_tag(self) -> str:
+        """Tag for the per-frame `OCR #N` log line: every signal behind the
+        active block right now, e.g. ' [BLOCKING OCR+VLM+ASR]'. ASR is named once
+        it has confirmed the block (it usually does a few seconds in), the same
+        rule as the overlay label; it used to be left out of this tag entirely."""
+        if not self.ad_detected:
+            return ""
+        if self.static_blocking_suppressed:
+            return " [AD DETECTED - STATIC SUPPRESSED]"
+        parts = [name for name, on in (("OCR", self.ocr_ad_detected),
+                                       ("VLM", self.vlm_ad_detected),
+                                       ("ASR", self.blocking_asr_confirmed)) if on]
+        return f" [BLOCKING {'+'.join(parts)}]" if parts else ""
+
     def _audio_quiet_seconds(self):
         """Seconds the HDMI input has been silent, or None (unknown/disabled).
 
@@ -4214,7 +4228,10 @@ class Minus:
                 # both→both+asr, vlm→vlm+asr). ASR usually confirms a few seconds
                 # after an instant OCR block, so this is the common path for the
                 # "+ASR" label to actually appear. Logic/stop behaviour unchanged.
-                if not self.blocking_asr_confirmed and self._asr_verdict() == 'confirm':
+                # Only an active block can be upgraded (an ad that is detected but
+                # statically suppressed has no blocking_source: logged an empty label).
+                if (self.blocking_source and not self.blocking_asr_confirmed
+                        and self._asr_verdict() == 'confirm'):
                     self.blocking_asr_confirmed = True
                     logger.info(f"ASR confirmed active block → {self._display_source_label()}")
 
@@ -5184,16 +5201,7 @@ class Minus:
 
                 # Log
                 total_time = (time.time() - start_time) * 1000
-                blocking_info = ""
-                if self.ad_detected:
-                    if self.static_blocking_suppressed:
-                        blocking_info = " [AD DETECTED - STATIC SUPPRESSED]"
-                    elif self.ocr_ad_detected and self.vlm_ad_detected:
-                        blocking_info = " [BLOCKING OCR+VLM]"
-                    elif self.ocr_ad_detected:
-                        blocking_info = " [BLOCKING OCR]"
-                    elif self.vlm_ad_detected:
-                        blocking_info = " [BLOCKING VLM]"
+                blocking_info = self._ocr_log_blocking_tag()
 
                 if all_texts:
                     text_preview = ' | '.join(all_texts)[:120]
