@@ -134,6 +134,11 @@ class TestStandaloneScreensAreSerialised(unittest.TestCase):
             with lock:
                 built.append(p)
             return p
+        # Don't fork the real modetest: six concurrent probes under full-suite
+        # load occasionally fail, and a probe with no connector makes the
+        # screen skip its build, so the test then saw no pipeline at all.
+        real_probe = ab.probe_drm_output
+        ab.probe_drm_output = lambda: {'connector_id': b.connector_id, 'plane_id': b.plane_id}
         ab.Gst.parse_launch = fake_parse
         try:
             barrier = threading.Barrier(len(calls))
@@ -146,6 +151,7 @@ class TestStandaloneScreensAreSerialised(unittest.TestCase):
             for t in ts: t.join()
         finally:
             ab.Gst.parse_launch = real
+            ab.probe_drm_output = real_probe
         return built
 
     def assert_one_live(self, b, built):
