@@ -381,7 +381,9 @@ class NameMuteController:
     # word -- the tail of "making"/"talking" when the window starts mid-word,
     # or "Kings" with the "s" past the window end. Such a hit is ignored; a
     # real "King" lies inside the next or previous window (hop 0.25-0.5 s)
-    # and is muted from there. Off by default (MINUS_NAME_MUTE_EDGE_KING=1).
+    # and is muted from there. On by default (MINUS_NAME_MUTE_EDGE_KING=0
+    # turns it off); live it cut fine-tuned SenseVoice's false mutes on
+    # non-LeBron video to ~0.6/h with no lost mentions.
     EDGE_KING_S = 0.25
 
     def __init__(self, scheduler: NameMuteScheduler, matcher: NameMatcher = None,
@@ -405,7 +407,7 @@ class NameMuteController:
         self.caption_hits = 0
         self.last_asr_text = ''
         self.last_caption_text = ''
-        self.edge_king = os.environ.get('MINUS_NAME_MUTE_EDGE_KING', '0') == '1'
+        self.edge_king = os.environ.get('MINUS_NAME_MUTE_EDGE_KING', '1') == '1'
         self.edge_king_skips = 0
         # MINUS_ASR_WORDS_LOG=<path>: append every ASR window's timed words
         # (JSON lines), so a live run can be replayed offline.

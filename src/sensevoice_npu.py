@@ -15,7 +15,11 @@ import sys
 
 import numpy as np
 
-SENSEVOICE_DIR = os.environ.get('MINUS_SENSEVOICE_DIR', '/home/radxa/asr_models/sensevoice-rknn')
+# The LeBron fine-tune (asr_eval, 2026-10-25) when installed, else stock.
+_FT_DIR = '/home/radxa/asr_models/sensevoice-rknn-minus-ft'
+_STOCK_DIR = '/home/radxa/asr_models/sensevoice-rknn'
+SENSEVOICE_DIR = os.environ.get('MINUS_SENSEVOICE_DIR') or (
+    _FT_DIR if os.path.isfile(os.path.join(_FT_DIR, 'sense-voice-encoder.rknn')) else _STOCK_DIR)
 FRAME_S = 0.06       # LFR frame: 6 x 10 ms
 N_PROMPT = 4         # language, event, emotion and text-norm query frames
 LANG_EN = 4          # embedding row for English

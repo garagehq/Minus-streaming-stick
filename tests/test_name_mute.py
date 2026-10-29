@@ -253,8 +253,19 @@ class TestController(unittest.TestCase):
         ctl.on_asr_words("lebron", [("lebron", 2.6, 2.95)], t0 + 30)
         self.assertEqual(ctl.asr_hits, 3)
 
-    def test_edge_king_off_by_default(self):
+    def test_edge_king_on_by_default(self):
         ctl, sch = self._ctl()
+        ctl.window_s = 3.0
+        ctl.on_asr_words("sacramento king", [("sacramento", 2.0, 2.6), ("king", 2.65, 2.95)], time.monotonic())
+        self.assertEqual(ctl.asr_hits, 0)
+        self.assertEqual(ctl.edge_king_skips, 1)
+
+    def test_edge_king_off_with_env(self):
+        os.environ['MINUS_NAME_MUTE_EDGE_KING'] = '0'
+        try:
+            ctl, sch = self._ctl()
+        finally:
+            del os.environ['MINUS_NAME_MUTE_EDGE_KING']
         ctl.window_s = 3.0
         ctl.on_asr_words("sacramento king", [("sacramento", 2.0, 2.6), ("king", 2.65, 2.95)], time.monotonic())
         self.assertEqual(ctl.asr_hits, 1)
