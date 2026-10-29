@@ -111,6 +111,14 @@ class TestParentReplacesOversizedWorker(unittest.TestCase):
         p.kill.assert_not_called()
         p.start.assert_not_called()
 
+    def test_a_failing_check_never_turns_a_result_into_a_timeout(self):
+        p = self.process(ow.RSS_CAP_MB + 200)
+        p.kill.side_effect = RuntimeError('boom')
+        p.restart = MagicMock()
+        for _ in range(ow.TRIM_EVERY):
+            self.assertEqual(p.ocr(b'f'), [])
+        p.restart.assert_not_called()
+
     def test_unreadable_rss_does_nothing(self):
         p = self.process(None)
         for _ in range(ow.TRIM_EVERY):

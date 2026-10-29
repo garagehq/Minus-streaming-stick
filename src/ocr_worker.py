@@ -371,19 +371,25 @@ class OCRProcess:
         """Every TRIM_EVERY replies (the worker trims just before that reply), replace
         the worker if its RSS is still over RSS_CAP_MB. Runs between requests,
         so no frame waits on a dying worker, and it is not a timeout: no
-        backoff, and it does not count toward restart_count."""
-        self._served += 1
-        if self._served % TRIM_EVERY or self.process is None:
-            return
-        rss = _rss_mb(self.process.pid)
-        if rss is None or rss <= RSS_CAP_MB:
-            return
+        backoff, and it does not count toward restart_count.
+
+        Never raises: it runs inside ocr()'s try, whose bare except treats
+        any exception as a hard timeout (frame lost, worker killed)."""
         import logging
-        logging.getLogger('Minus.OCR').info(
-            f"[OCRProcess] Worker RSS {rss} MB after trim exceeds {RSS_CAP_MB} MB "
-            f"({self._served} requests) - restarting it (planned)")
-        self.kill()
-        self.start()
+        try:
+            self._served = getattr(self, '_served', 0) + 1
+            if self._served % TRIM_EVERY or self.process is None:
+                return
+            rss = _rss_mb(self.process.pid)
+            if rss is None or rss <= RSS_CAP_MB:
+                return
+            logging.getLogger('Minus.OCR').info(
+                f"[OCRProcess] Worker RSS {rss} MB after trim exceeds {RSS_CAP_MB} MB "
+                f"({self._served} requests) - restarting it (planned)")
+            self.kill()
+            self.start()
+        except Exception as e:
+            logging.getLogger('Minus.OCR').warning(f"[OCRProcess] Worker memory check failed: {e}")
 
     def release(self):
         """Release the OCR worker process."""
