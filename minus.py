@@ -351,6 +351,7 @@ class Minus:
         self.ustreamer_process = None
         self.frame_capture = None
         self.running = False
+        self._stop_requested = False   # SIGTERM/SIGINT seen (see main())
         self.blocking_active = False
         self._hdmi_recovery_in_progress = False  # Prevent main loop interference during HDMI recovery
         self._hdmi_signal_lost = False  # Pause detection workers when HDMI signal is lost
@@ -5136,7 +5137,7 @@ class Minus:
                 logger.warning("No ad_blocker available - waiting for HDMI without display")
 
             # Poll for HDMI signal every 2 seconds (even if no-signal display failed)
-            self.running = True
+            self.running = not self._stop_requested
 
             # Reconnect the remote NOW rather than after the picture appears.
             #
@@ -5200,7 +5201,7 @@ class Minus:
             self.ad_blocker.start_loading_mode()
 
         # Start ML threads flag - set early so threads can start
-        self.running = True
+        self.running = not self._stop_requested
 
         # Start display (will transition from loading to live when ready)
         if not self.start_display():
@@ -5508,9 +5509,15 @@ def main():
             sys.exit(1)
 
     def signal_handler(sig, frame):
-        logger.info("Shutting down...")
-        minus.stop()
-        sys.exit(0)
+        # Only set flags: run()'s loop sees them within a second and calls
+        # stop() on the main thread. Doing the shutdown in here re-entered
+        # whatever the main thread was in the middle of ("reentrant call
+        # inside BufferedWriter" while it was logging). A second signal
+        # skips the clean stop.
+        if minus._stop_requested:
+            os._exit(1)
+        minus._stop_requested = True
+        minus.running = False
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

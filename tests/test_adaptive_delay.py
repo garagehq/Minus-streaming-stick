@@ -131,6 +131,9 @@ class TestQueueSwitch(unittest.TestCase):
         time.sleep(2.5)
         lo, hi = self.latency('v', time.monotonic() - 0.5)
         self.assertAlmostEqual(lo, 1.5, delta=0.05)
+        lv = ad.queue_levels()
+        self.assertAlmostEqual(lv['video_queue_ms'], 1500, delta=50)
+        self.assertAlmostEqual(lv['av_skew_ms'], 0, delta=50)
 
         t = time.monotonic()
         ad._switch(LIVE)

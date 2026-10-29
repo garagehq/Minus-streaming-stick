@@ -254,6 +254,18 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     both the ASR and OCR workers call `gc.collect(0)` after each reply;
     the ASR worker also `malloc_trim`s every 100 calls
     (`MINUS_ASR_TRIM_EVERY`) and runs with `MALLOC_ARENA_MAX=2`.
+  - *Clean stop (2026-10-29):* `minus.service` has `KillMode=mixed`
+    (`TimeoutStopSec=30`): SIGTERM reaches minus.py only, and it stops its
+    children in order. With the default every child got SIGTERM at once;
+    ustreamer's death looked like HDMI loss, recovery and the OCR wrapper
+    respawned workers, and every stop hung the full 90 s. The signal handler
+    now only sets `_stop_requested`/`running` (shutting down inside it
+    re-entered the log writer). Stop takes ~7 s. Reinstall the unit after
+    pulling (`sudo cp minus.service /etc/systemd/system/` keeps local
+    PYTHONPATH edits out -- or add the two lines by hand) + daemon-reload.
+  - *A/V sync:* `/api/status` -> `adaptive_delay` reports `audio_queue_ms`,
+    `video_queue_ms` and `av_skew_ms` = (audio - 300) - video, ~0 in sync.
+    Without a display on HDMI-out there is no video pipeline (video None).
   - *Testing:* `tests/test_wifi_portal.py` submits real Wi-Fi connects
     through the live portal; never run it on a box you reach over Wi-Fi.
 - **Measured live at 2s delay (SenseVoice)**, two held-out videos, 17-18

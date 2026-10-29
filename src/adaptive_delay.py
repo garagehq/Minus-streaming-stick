@@ -153,8 +153,29 @@ class AdaptiveDelay:
         logger.info(f"[AdaptiveDelay] -> {mode} ({len(queues)} queues, "
                     f"{(time.monotonic() - t) * 1000:.0f} ms, input {level})")
 
+    def queue_levels(self) -> dict:
+        """Fill of both delay queues and their skew, in ms.
+
+        The audio queue holds the delay plus its 300 ms baseline (matching
+        the video path's own latency), the video queue the delay alone, so
+        in sync av_skew_ms = (audio - 300) - video ~ 0 (one frame of jitter,
+        ~33 ms). Positive: sound behind the picture.
+        """
+        out = {}
+        for name, src in (('audio', self.audio), ('video', self.video)):
+            try:
+                plan = src.delay_queue_plan(self.mode == LIVE)
+                out[name + '_queue_ms'] = (None if plan is None else
+                                           round(plan[0].get_property('current-level-time') / 1e6, 1))
+            except Exception:
+                out[name + '_queue_ms'] = None
+        a, v = out['audio_queue_ms'], out['video_queue_ms']
+        out['av_skew_ms'] = None if a is None or v is None else round(a - 300.0 - v, 1)
+        return out
+
     def get_status(self) -> dict:
         return {'enabled': True, 'mode': self.mode, 'delay_s': self.delay_s,
+                **self.queue_levels(),
                 'input_dbfs': None if self.input_dbfs is None else round(self.input_dbfs, 1),
                 'quiet_dbfs': QUIET_DBFS, 'onset_s': ONSET_S, 'quiet_s': QUIET_S,
                 'switches': dict(self.switches), 'last_switch': self.last_switch,
