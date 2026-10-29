@@ -185,6 +185,42 @@ class TestController(unittest.TestCase):
         ctl.on_caption_texts(["LeBron again on the break"], t + 2.0)
         self.assertEqual(ctl.caption_hits, 2)
 
+    def test_caption_same_text_before_name_new_line(self):
+        # Live huIf_aCNRtY: two lines 4 s apart share "basket for LeBron".
+        ctl, _ = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["basket for LeBron so I'm good with that"], t)
+        ctl.on_caption_texts(["basket for LeBron that's why I would"], t + 4.0)
+        self.assertEqual(ctl.caption_hits, 2)
+
+    @staticmethod
+    def _ocr(text, y):
+        # One OCR box on a 1080-line frame, centered at fraction y, 50 px tall.
+        return {'text': text, 'box': [[400, y * 1080 - 25], [1500, y * 1080 - 25],
+                                      [1500, y * 1080 + 25], [400, y * 1080 + 25]]}
+
+    def test_caption_line_lower_on_screen_is_new(self):
+        # Live v220meS2-P8: "LeBron comes down..." scrolls up and off, then
+        # "LeBron." appears on the bottom row 11 s later.
+        ctl, _ = self._ctl()
+        t, fs = time.monotonic(), (1080, 1920)
+        ctl.on_caption_results([self._ocr("LeBron comes down", 0.92)], t, fs)
+        ctl.on_caption_results([self._ocr("LeBron comes down awkwardly but it's", 0.87),
+                                self._ocr("right back up", 0.92)], t + 3.0, fs)
+        self.assertEqual(ctl.caption_hits, 1)
+        ctl.on_caption_results([self._ocr("was fouled here", 0.87),
+                                self._ocr("LeBron.", 0.92)], t + 11.0, fs)
+        self.assertEqual(ctl.caption_hits, 2)
+
+    def test_caption_merged_two_row_box_same_mention(self):
+        # OCR sometimes boxes both rows as one line: its center sits half a
+        # line above the bottom row; that is not a new line.
+        ctl, _ = self._ctl()
+        t, fs = time.monotonic(), (1080, 1920)
+        ctl.on_caption_results([self._ocr("and here comes LeBron", 0.895)], t, fs)
+        ctl.on_caption_results([self._ocr("and here comes LeBron James", 0.92)], t + 0.5, fs)
+        self.assertEqual(ctl.caption_hits, 1)
+
     def test_caption_ocr_misread_is_same_mention(self):
         ctl, _ = self._ctl()
         t = time.monotonic()
@@ -201,7 +237,7 @@ class TestController(unittest.TestCase):
         ctl.on_caption_texts(["LeBron"], t)
         ctl.on_caption_texts(["LeBron drives to the rim"], t + 1.0)
         self.assertEqual(ctl.caption_hits, 1)
-        ctl._recent_captions = {k: (v[0] - ctl.CAPTION_MEMORY_S - 1, v[1])
+        ctl._recent_captions = {k: (v[0] - ctl.CAPTION_MEMORY_S - 1,) + v[1:]
                                 for k, v in ctl._recent_captions.items()}
         ctl.on_caption_texts(["LeBron for three"], t + 12.0)
         self.assertEqual(ctl.caption_hits, 2)
@@ -234,6 +270,19 @@ class TestController(unittest.TestCase):
         ctl.on_asr_words("here comes LeBron", [("here", 0.5, 0.7), ("comes", 0.7, 1.0),
                                                ("LeBron", 1.0, 1.4)], t - 1.5)
         self.assertEqual([w[2] for w in sch._windows], ['asr'])
+
+    def test_asr_replacing_caption_keeps_earlier_caption_start(self):
+        # Live SlbOahDInOU: the caption caught the name's start, ASR placed
+        # it 0.3 s late; the ASR window must not uncover the first syllable.
+        ctl, sch = self._ctl()
+        t = time.monotonic()
+        ctl.on_caption_texts(["and LeBron"], t)
+        cap = sch._windows[0]
+        ctl.on_asr_words("and LeBron remember", [("and", 0.2, 0.4), ("LeBron", 0.5, 0.9),
+                                                 ("remember", 0.9, 1.3)], t)
+        self.assertEqual([w[2] for w in sch._windows], ['asr'])
+        self.assertAlmostEqual(sch._windows[0][0], cap[0])
+        self.assertAlmostEqual(sch._windows[0][1], t + 0.9 + sch._delay_fn() + sch.PAD_AFTER_S)
 
     def test_edge_king_ignored_only_at_window_edges(self):
         ctl, sch = self._ctl()

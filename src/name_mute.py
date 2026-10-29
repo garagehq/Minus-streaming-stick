@@ -186,13 +186,15 @@ class NameMuteScheduler:
     def schedule(self, capture_start: float, capture_end: float,
                  source: str, label: str, meta: dict = None,
                  pad_before: float = None, pad_after: float = None,
-                 replace_sources=()):
+                 replace_sources=(), keep_head_sources=()):
         """Mute the playback of audio captured in [capture_start, capture_end].
 
         replace_sources: windows from these sources that overlap this one
         are narrowed first, so a precise detection replaces a coarse one for
         the same mention instead of widening it: dropped if not yet
         playing, cut to end with this window if they are.
+        keep_head_sources: a dropped window from these sources that starts
+        earlier still sets this one's start (its tail is what goes).
         """
         delay = max(0.0, float(self._delay_fn() or 0.0))
         pb = self.PAD_BEFORE_S if pad_before is None else pad_before
@@ -207,6 +209,8 @@ class NameMuteScheduler:
                     if w[2] in replace_sources and w[0] < end + 0.8 and w[1] > start - 0.8:
                         if w[0] > now:
                             self._narrowed(w, w[0])      # not started: drop
+                            if w[2] in keep_head_sources and w[0] < start:
+                                start = w[0]
                             continue
                         w = self._narrowed(w, min(w[1], max(now, end)))
                     kept.append(w)
@@ -356,6 +360,13 @@ class NameMuteController:
     # status"), over at least this many characters.
     CAPTION_AFTER_FUZZY_RATIO = 0.75
     CAPTION_AFTER_MIN_CHARS = 5
+    # A same-text mention on a line this many line-heights lower than where
+    # it was last seen is a new caption line (roll-up captions move up); a
+    # merged two-row OCR box moves its center by only ~half a line.
+    CAPTION_NEW_LINE_DROP = 0.7
+    # Text after the name less similar than this (over CAPTION_AFTER_MIN_CHARS
+    # or more) is a different line even when the text before it matches.
+    CAPTION_NEW_AFTER_RATIO = 0.5
     # Rolling captions add words at the end of the line, so a mention is
     # first seen at (or one or two words from) the end. A line that shows up
     # with the name further in, followed by MID_LINE_WORDS or more words, is
@@ -468,12 +479,16 @@ class NameMuteController:
                 self.asr_hits += 1
             # The ASR word span is the most precise timing there is: it
             # narrows any coarser mute (caption line, partial name, cut-off
-            # word) for the same mention to itself.
+            # word) for the same mention to itself -- except that an
+            # earlier caption start is kept: SenseVoice's start can land
+            # past the name's first syllable (live, captions on, 2026-10-29:
+            # costs ~0.2 s more mute per name).
             self.scheduler.schedule(c0, c1, 'asr_edge' if truncated else 'asr',
                                     transcript.strip()[:80],
                                     {'word_start': round(s, 3), 'word_end': round(e, 3)},
                                     replace_sources=('caption', 'caption_mid',
-                                                     'asr_partial', 'asr_edge'))
+                                                     'asr_partial', 'asr_edge'),
+                                    keep_head_sources=('caption',))
 
     def _drop_edge_king(self, words, spans):
         """Remove bare-"king" spans that touch a window edge (see EDGE_KING_S)."""
@@ -580,7 +595,10 @@ class NameMuteController:
                     key = (norm[:hit.start()] + hit.group(0).split(' ')[0])[-40:]
                     ctx = norm[:hit.start()].strip()[-20:]
                     rest = norm[hit.end():].strip()
-                    if self._seen_caption(key, ctx, rest[:20], now):
+                    # Text after the name, the same whichever pattern matched.
+                    tail = re.sub(r'^\S+(?: james\b)?\s*', '', norm[hit.start():])
+                    if self._seen_caption(key, ctx, rest[:20], now,
+                                          meta.get('y'), meta.get('h'), tail[:20]):
                         continue
                     self.caption_hits += 1
                     self.last_caption_text = line
@@ -597,27 +615,45 @@ class NameMuteController:
                                             pad_before=self.CAPTION_BEFORE_S,
                                             pad_after=pad_after)
 
-    def _seen_caption(self, key: str, ctx: str, after: str, now: float) -> bool:
+    def _seen_caption(self, key: str, ctx: str, after: str, now: float,
+                      y: float = None, h: float = None, tail: str = None) -> bool:
         """Has this caption mention been seen recently? Records it either way.
 
         Exact key, or a fuzzy match on the text before the name (when there
         is enough of it) or after it, which absorbs OCR misreads of one
         line. Matching entries are refreshed, so text that stays on screen
         (a banner) stays seen for as long as it is there.
+
+        Not the same mention, whatever the text: a line lower on screen
+        than where the entry was last seen (roll-up captions only move up,
+        so it is a new line -- "LeBron comes down..." then "LeBron." 11 s
+        later, "basket for LeBron so..." then "basket for LeBron that's..."),
+        or one whose text after the name clearly differs.
         """
         def similar(a, b, ratio, n):
             k = min(len(a), len(b))
             return k >= n and difflib.SequenceMatcher(None, a[:k], b[:k]).ratio() >= ratio
 
-        matches = [k for k, (_, c, a) in self._recent_captions.items()
-                   if k == key
-                   or (len(ctx) >= 4 and len(c) >= 4 and difflib.SequenceMatcher(
-                       None, ctx, c).ratio() >= self.CAPTION_FUZZY_RATIO)
-                   or similar(after, a, self.CAPTION_AFTER_FUZZY_RATIO,
-                              self.CAPTION_AFTER_MIN_CHARS)]
+        tail = after if tail is None else tail
+
+        def same_line(t, ey):
+            if y is not None and h and ey is not None and y - ey > self.CAPTION_NEW_LINE_DROP * h:
+                return False
+            k = min(len(t), len(tail))
+            return not (k >= self.CAPTION_AFTER_MIN_CHARS and difflib.SequenceMatcher(
+                None, t[:k], tail[:k]).ratio() < self.CAPTION_NEW_AFTER_RATIO)
+
+        matches = [k for k, (_, c, a, ey, t) in self._recent_captions.items()
+                   if (k == key
+                       or (len(ctx) >= 4 and len(c) >= 4 and difflib.SequenceMatcher(
+                           None, ctx, c).ratio() >= self.CAPTION_FUZZY_RATIO)
+                       or similar(after, a, self.CAPTION_AFTER_FUZZY_RATIO,
+                                  self.CAPTION_AFTER_MIN_CHARS))
+                   and same_line(t, ey)]
         for k in matches:
-            self._recent_captions[k] = (now,) + self._recent_captions[k][1:]
-        self._recent_captions[key] = (now, ctx, after)
+            _, c, a, ey, t = self._recent_captions[k]
+            self._recent_captions[k] = (now, c, a, y if y is not None else ey, t)
+        self._recent_captions[key] = (now, ctx, after, y, tail)
         return bool(matches)
 
     def get_status(self) -> dict:
