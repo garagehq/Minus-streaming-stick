@@ -1983,6 +1983,22 @@ This caused the new pipeline to fail with "device in use" because the old pipeli
 - The health monitor detects ustreamer is down and restarts it + the video pipeline with clean MPP state
 - This auto-recovers from stuck MPP decoder without manual service restart
 
+### Blocked ad's sound played after an HDMI reconnect (Fixed - Oct 2026)
+
+**Symptom (2026-10-29, live):** a blocked Vinted ad (OCR + VLM, audio MUTED) played its sound for the rest of the block after the TV re-hotplugged twice mid-block.
+
+**Root cause:** on an HDMI reconnect `DRMAdBlocker` restarts audio with `AudioPassthrough.stop()` + `start()`. `_init_pipeline()` built the playback chain with a hard-coded `volume ... mute=false` and `start()` never re-applied the mute (the watchdog restart paths did), while `is_muted` stayed `True`, so the status API, the decision engine and `unmute()` all believed audio was muted.
+
+**Fix (#56):** the volume element is built with the current mute state and set muted again right after `get_by_name('vol')`; every rebuild path comes up muted mid-block. On asr-first the same applies to a LeBron name mute in progress (`_name_muted`). Test: `tests/test_audio_mute_survives_rebuild.py`.
+
+### ~800 MB leak per HDMI-source sleep: unread GStreamer bus messages (Fixed - Oct 2026)
+
+**Symptom (2026-10-29, overnight soak):** the main process grew by ~800 MB every time the Fire TV went to sleep and did not give it back after wake.
+
+**Root cause:** with the source asleep, `alsasrc` posts a "Dropped samples" WARNING many times a second. Every pipeline called `bus.add_signal_watch()`, but that only dispatches messages from a GLib main loop, and Minus runs none, so nothing ever popped the bus and every message (with its GError and debug string) stayed queued until the pipeline was destroyed.
+
+**Fix (#57):** `src/gst_bus.py` `drop_unconsumed_messages(bus)` installs a bus sync handler that DROPs every message except ERROR and EOS, which the code does read. It is applied right after every `add_signal_watch()` (audio pipeline, and the video / NO SIGNAL / loading pipelines in `ad_blocker.py`). Any new pipeline must do the same. Measured after the fix: memory flat through a sleep (~480–580 MB) and back to ~490 MB after wake. Test: `tests/test_gst_bus_no_backlog.py`.
+
 ### Audio Device Mismatch on Display Reconnect (Fixed - Apr 2026)
 
 **Symptom:** No audio after TV wakes up from standby. Audio pipeline starts on wrong HDMI output (e.g., `hw:0,0` instead of `hw:1,0`).

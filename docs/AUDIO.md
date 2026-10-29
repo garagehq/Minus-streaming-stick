@@ -215,6 +215,10 @@ gst-launch-1.0 alsasrc device=hw:4,0 ! audioconvert ! volume mute=false ! alsasi
 - Some sources may not send audio (check source device)
 - May need to wait for stable signal before starting audio pipeline
 
+### Memory Growth While the Source Sleeps
+
+With the HDMI source asleep, `alsasrc` posts "Dropped samples" warnings many times a second. Minus runs no GLib main loop, so `bus.add_signal_watch()` never dispatches them, and before #57 they piled up on the bus (~800 MB per Fire TV sleep). Every pipeline now calls `gst_bus.drop_unconsumed_messages(bus)` after `add_signal_watch()`, keeping only ERROR and EOS. Do the same for any new pipeline.
+
 ### Audio Crackling/Pops
 
 - Increase buffer size: `buffer-time=200000` on alsasrc/alsasink
