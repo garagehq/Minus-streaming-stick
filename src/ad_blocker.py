@@ -35,6 +35,7 @@ import cv2
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
+from gst_bus import drop_unconsumed_messages
 
 # Import vocabulary from extracted module
 from vocabulary import SPANISH_VOCABULARY, VOCABULARY_COMBINED
@@ -434,6 +435,7 @@ class DRMAdBlocker:
 
             self.bus = self.pipeline.get_bus()
             self.bus.add_signal_watch()
+            drop_unconsumed_messages(self.bus)  # no GLib main loop: don't queue messages forever
             self.bus.connect('message::error', self._on_error)
             self.bus.connect('message::eos', self._on_eos)
             self.bus.connect('message::warning', self._on_warning)
@@ -1213,6 +1215,7 @@ class DRMAdBlocker:
 
             self.bus = self.pipeline.get_bus()
             self.bus.add_signal_watch()
+            drop_unconsumed_messages(self.bus)  # no GLib main loop: don't queue messages forever
             self.bus.connect('message::error', self._on_error)
 
             # Get the textoverlay element for animation
@@ -1411,6 +1414,7 @@ class DRMAdBlocker:
 
             self.bus = self.pipeline.get_bus()
             self.bus.add_signal_watch()
+            drop_unconsumed_messages(self.bus)  # no GLib main loop: don't queue messages forever
             self.bus.connect('message::error', self._on_error)
 
             # Get the textoverlay element for animation

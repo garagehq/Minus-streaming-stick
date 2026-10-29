@@ -45,6 +45,7 @@ import wave
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
+from gst_bus import drop_unconsumed_messages
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +453,7 @@ class AudioPassthrough:
             # Set up bus message handling for error detection
             self.bus = self.pipeline.get_bus()
             self.bus.add_signal_watch()
+            drop_unconsumed_messages(self.bus)  # no GLib main loop: don't queue messages forever
             self.bus.connect('message::error', self._on_error)
             self.bus.connect('message::eos', self._on_eos)
             self.bus.connect('message::state-changed', self._on_state_changed)
