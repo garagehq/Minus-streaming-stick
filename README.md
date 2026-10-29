@@ -26,8 +26,8 @@ Minus is a 4K@60fps HDMI passthrough. Your Roku, Fire TV, or Google TV plugs int
               ┌───────────────┼────────────────┐
               ▼               ▼                ▼
      ┌────────────────┐ ┌──────────────┐ ┌──────────────┐
-     │  PaddleOCR     │ │  minus-v0.1  │ │  Moonshine   │
-     │  RK3588 NPU    │ │  (VLM)       │ │  ASR (CPU)   │
+     │  PaddleOCR     │ │  minus-v0.2  │ │  SenseVoice  │
+     │  RK3588 NPU    │ │  (VLM)       │ │  ASR (NPU)   │
      │  reads ad UI   │ │  Axera NPU   │ │  hears ad    │
      │  text ~200ms   │ │  ~370ms      │ │  language    │
      └────────────────┘ └──────────────┘ └──────────────┘
@@ -38,26 +38,47 @@ Minus is a 4K@60fps HDMI passthrough. Your Roku, Fire TV, or Google TV plugs int
 ```
 
 - OCR (PaddleOCR PP-OCRv6 on the RK3588's NPU, ~200ms a frame) reads on-screen ad UI like "Skip in 5", "Ad 2 of 3", and countdown timers, including the character misreads OCR makes on real TVs. When an ad shows its own countdown, Minus reads the number and counts it down in real time, so it knows the ad is still running even while OCR briefly loses the text. That clock only ever helps hold a block that the detectors already started. On its own it never starts one.
-- [minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1), a 450M-parameter vision-language model fine-tuned for this exact job, looks at the raw frame and answers "is this an advertisement?" in about 370ms on an Axera AX8850 NPU. It needs no text on screen to work.
-- ASR (Moonshine tiny-en on CPU) transcribes the audio and listens for marketing language as a confirmation signal.
+- [minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2), a 450M-parameter vision-language model fine-tuned for this exact job, looks at the raw frame and answers "is this an advertisement?" in about 370ms on an Axera AX8850 NPU. It needs no text on screen to work.
+- ASR (SenseVoice-small on the RK3588's NPU, Moonshine on the CPU as a fallback) transcribes the audio. Ad language confirms a block; show dialog with no ad language holds back a block that only an unsure vision model wanted.
 
 When the votes say "ad", audio mutes immediately and the screen switches to an overlay rendered at 60fps inside the hardware JPEG encoder (no desktop stack, no X11). When the ad ends the show comes back after a few seconds, about 5 in practice. Minus waits for several clean frames and a short floor before it lets go, because OCR routinely loses an ad's text for a few seconds mid-ad, and releasing on the first gap would flash the ad back on screen.
 
 ## The model
 
-minus-v0.1 is published on Hugging Face: [TheGarageDev/Minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1).
+minus-v0.2 is published on Hugging Face: [TheGarageDev/Minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2).
 
 It's a fine-tune of [LiquidAI's LFM2.5-VL-450M](https://huggingface.co/LiquidAI) trained on frames captured from real TV streams and compiled into fused-layer models for the Axera NPU. Inference is prefill-only: the yes/no answer is read straight from the logits without generating any tokens, so latency is deterministic.
 
-| Metric | Value |
-|---|---|
-| Accuracy (800-image holdout) | 97.0% |
-| Ad recall | 94.8% |
-| Non-ad recall (false-positive resistance) | 99.2% |
-| Inference latency | ~0.37s per frame |
-| Parameters | 450M |
+Measured on the box's Axera NPU:
 
-The same model also classifies screen state (playing / paused / menu / dialog / screensaver) for autonomous mode.
+| Metric | minus-v0.2 | minus-v0.1 |
+|---|---|---|
+| Accuracy (800-image holdout) | **99.1%** | 95.6% |
+| Ad recall | **99.8%** | 93.8% |
+| Non-ad recall (false-positive resistance) | **98.5%** | 97.5% |
+| Accuracy on 328 frames v0.1 got wrong or flip-flopped on | **95.1%** | 83.2% |
+| Screen-state check (autonomous mode) | **95.9%** | 13.5% (always "menu") |
+| Inference latency | ~0.37s per frame | ~0.37s per frame |
+| Parameters | 450M | 450M |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/minus-v02-800-dark.png">
+  <img alt="Mistakes on the 800-image test: v0.1 missed 25 ads and blocked 10 non-ads; v0.2 missed 1 and blocked 6" src="docs/images/minus-v02-800-light.png" width="640">
+</picture>
+
+v0.2 is trained on the picture the box actually gives it: the frame squashed straight to 512×512. Earlier models were trained on aspect-correct resizes and lost about 2.5 points of accuracy to that difference on the box. It also learned from two more months of the box's own footage, every label checked by eye where two models disagreed.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/minus-v02-hard-dark.png">
+  <img alt="On 328 frames v0.1 got wrong or flip-flopped on: v0.1 missed 46 ads, v0.2 missed 11" src="docs/images/minus-v02-hard-light.png" width="640">
+</picture>
+
+The same model also classifies screen state (playing / paused / menu / dialog / screensaver) for autonomous mode. v0.1 answered "menu" for every screen; v0.2 was trained for it, and in testing it never mistook playing video for a screen that needs action (all 135 playing frames read correctly; a false "paused", "dialog" or "screensaver" would make autonomous mode press a button).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/minus-v02-screen-dark.png">
+  <img alt="Screen-state check, share read correctly: v0.2 95.9% overall vs v0.1 13.5%" src="docs/images/minus-v02-screen-light.png" width="640">
+</picture>
 
 ### What ships where
 
@@ -66,7 +87,7 @@ The two models are distributed differently, which trips people up when setting u
 | Model | Runs on | Where it comes from |
 |---|---|---|
 | PaddleOCR PP-OCRv6 detection + recognition (default), plus PP-OCRv3 as a rollback | RK3588 NPU | **In this repository**, [`models/paddleocr/`](models/paddleocr/). ~17 MB for both generations, nothing to download. |
-| minus-v0.1 (450M VLM) | Axera AX-M1 | [Hugging Face](https://huggingface.co/TheGarageDev/Minus-v0.1), the `axera/` folder (~740 MB). `install.sh` downloads it into `/home/radxa/axera_models/minus-v0.1/`; which model and where are set in [`models/vlm_model.json`](models/vlm_model.json) |
+| minus-v0.2 (450M VLM) | Axera AX-M1 | [Hugging Face](https://huggingface.co/TheGarageDev/Minus-v0.2), the `axera/` folder (~740 MB). `install.sh` downloads it into `/home/radxa/axera_models/minus-v0.2/`; which model and where are set in [`models/vlm_model.json`](models/vlm_model.json) |
 
 OCR needs three files per generation, all present in the repo: a detection model that finds text regions, a recognition model that reads each region, and the character dictionary the output is decoded through. Each generation has its own dictionary, and the two are not interchangeable. `MINUS_OCR_MODEL_VERSION` picks one: `v6` (the default) or `v3`. The loader keeps each model paired with its own dictionary and thresholds, so they can't be mixed up. v6 was chosen on latency: 183ms p50 and 274ms p90 in production, and a tighter tail that keeps text-heavy ad frames under the hard timeout. A rotated-text classifier is also included, but Minus doesn't load it, since TV overlay text is never upside down. [`models/paddleocr/README.md`](models/paddleocr/README.md) has the details and checksums.
 
@@ -98,7 +119,7 @@ Roughly **$350-$450** in parts. Full bill of materials, part links, and sizing n
 | Component | Notes |
 |---|---|
 | [Radxa ROCK 5B+](https://radxa.com/products/rock5/5bp/) or [ROCK 5B](https://radxa.com/products/rock5/5b/), 8 GB RAM recommended (4 GB minimum) | RK3588 SoC. The 4K@60 HDMI **input** is the part that matters: boards without one can't do passthrough. Also provides the NPU for OCR and the VPU for 4K60 JPEG encoding. |
-| [Radxa AICore AX-M1](https://radxa.com/products/aicore/ax-m1/) (Axera AX8850, M.2 2280 M-key, 24 TOPS, 8 GB) | Runs minus-v0.1 at ~370ms per inference |
+| [Radxa AICore AX-M1](https://radxa.com/products/aicore/ax-m1/) (Axera AX8850, M.2 2280 M-key, 24 TOPS, 8 GB) | Runs minus-v0.2 at ~370ms per inference |
 | [Radxa Heatsink 6240B](https://radxa.com/products/accessories/heatsink-6240b/), heatsink **and** fan ([docs](https://docs.radxa.com/en/accessories/heatsink-case/heatsink-6240b)) | Required. This is Radxa's cooler for the ROCK 5B / 5B+ / 5T. For the 5B+, get **V2.0**: V1.0 has fins that hit the 5B+. 4K60 passthrough runs around 80 °C with the fan going; past 83 °C Minus drops to 30fps until it cools. Passive cooling alone will throttle. |
 | [Radxa Power PD 30W](https://radxa.com/products/accessories/power-pd-30w/), or any [30 W+ USB-C PD supply](https://www.amazon.com/s?k=30W+USB-C+PD+power+adapter) | Required. Radxa's own supply is the one they test the ROCK 5B against. An underpowered supply (a 5 V/2 A phone charger, say) causes random pipeline restarts. |
 | 2x [certified High Speed HDMI cables](https://www.amazon.com/s?k=certified+high+speed+HDMI+cable+18Gbps+4K60), 18 Gbps | Source → Minus → TV. Keep them short; marginal cables show up as "No Signal" at 4K60. |
@@ -206,7 +227,7 @@ Minus auto-detects the connected HDMI output, resolution, DRM plane, and audio d
 
 - [Minus-chrome-extension](https://github.com/garagehq/Minus-chrome-extension): the same idea for your browser, as a Chrome extension.
 - [garagehq/ustreamer](https://github.com/garagehq/ustreamer): our ustreamer fork with RK3588 MPP hardware encoding, NV12/NV24/BGR24 capture, and the 60fps blocking-overlay compositor.
-- [TheGarageDev/Minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1): the model, on Hugging Face.
+- [TheGarageDev/Minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2): the model, on Hugging Face ([Minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1), the previous one).
 
 ## Support
 

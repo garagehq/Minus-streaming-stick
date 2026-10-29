@@ -337,7 +337,8 @@ def test_switching_to_a_new_model_is_a_manifest_change(tmp_path, hf):
 
 def test_manifest_and_config_agree():
     m = json.loads((ROOT / 'models' / 'vlm_model.json').read_text())
-    assert m['hf_repo'] == 'TheGarageDev/Minus-v0.1' and m['subfolder'] == 'axera'
+    assert m['hf_repo'] == 'TheGarageDev/Minus-v0.2' and m['subfolder'] == 'axera'
+    assert m['name'] == 'minus-v0.2' and m['local_dir'].endswith('/minus-v0.2')
     import config
     if not os.environ.get('MINUS_VLM_MODEL_DIR'):
         assert config.VLM_MODEL_DIR == m['local_dir']

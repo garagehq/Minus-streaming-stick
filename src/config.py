@@ -108,16 +108,14 @@ class MinusConfig:
 
 # External paths (configurable via environment variables)
 USTREAMER_PATH = _get_env_path('MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-patched')
-# minus-v0.1 ad-classifier — fine-tuned LFM2.5-VL-450M (iter28) compiled for
-# fused-layer NPU3 prefill with logit-argmax decisions.
-# Published at https://huggingface.co/TheGarageDev/Minus-v0.1
-# (benchmarks: ~/axera_models/BENCHMARKS.md). detect_ad AND autonomous-mode
-# query_image both share this single model — there is no FastVLM dependency
-# anymore. Which model (and where it lives) comes from models/vlm_model.json, so
-# moving to a new model (e.g. Minus v0.2) is a manifest change that the
-# Settings -> Updates check then offers to download (src/updates.py). Override
-# with MINUS_VLM_MODEL_DIR.
-def _manifest_model_dir(default='/home/radxa/axera_models/minus-v0.1'):
+# Vision model: Minus v0.2 (TheGarageDev/Minus-v0.2), a fine-tuned LFM2.5-VL-450M
+# compiled for fused-layer NPU3 prefill with logit-argmax decisions. It is
+# trained on the box's own input (frames squashed to 512x512) and answers both
+# detect_ad and autonomous-mode query_image (screen state). Which model (and
+# where it lives) comes from models/vlm_model.json, so moving to a new model is
+# a manifest change that the Settings -> Updates check then offers to download
+# (src/updates.py). Override with MINUS_VLM_MODEL_DIR.
+def _manifest_model_dir(default='/home/radxa/axera_models/minus-v0.2'):
     try:
         import json as _json
         manifest = Path(__file__).resolve().parent.parent / 'models' / 'vlm_model.json'
@@ -127,6 +125,9 @@ def _manifest_model_dir(default='/home/radxa/axera_models/minus-v0.1'):
 
 
 VLM_MODEL_DIR = _get_env_path('MINUS_VLM_MODEL_DIR', _manifest_model_dir())
+# Name shown in logs and on-screen messages: the model directory's name
+# (e.g. 'minus-v0.2'), so it is right even with MINUS_VLM_MODEL_DIR set.
+VLM_MODEL_NAME = Path(VLM_MODEL_DIR).name
 # PaddleOCR det/rec RKNN models. They ship in the repository
 # (models/paddleocr/, see its README) so a fresh clone needs no download;
 # the legacy rknn-llm demo path is only used when the repo copy is absent.

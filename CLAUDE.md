@@ -2,10 +2,10 @@
 
 ## Overview
 
-HDMI passthrough with real-time ML-based ad detection and blocking using dual NPUs + CPU ASR:
+HDMI passthrough with real-time ML-based ad detection and blocking using dual NPUs (OCR + ASR on the RK3588 NPU, the VLM on the Axera NPU):
 - **PaddleOCR PP-OCRv6** on RK3588 NPU (~180ms p50 / ~275ms p90 per frame, 1.5s hard timeout). PP-OCRv3 ships alongside as a rollback (`MINUS_OCR_MODEL_VERSION=v3`); each generation is bound to its own dictionary and DB thresholds in `src/config.py`.
-- **LFM2.5-VL-450M (ft-v2-fused-v2)** on Axera LLM 8850 NPU — **prefill-only on 16 fused decoder layers, ~0.37s per frame deterministic** (1.5s soft / 2s hard timeout). Replaced FastVLM-0.5B iter4 (May 2026): 97.0% holdout accuracy / 99.2% non-ad-recall vs iter4's 94.75% / 95.25%, structurally simpler (no KV cache, no autoregressive decode for `detect_ad` OR autonomous-mode `query_image`, no ml_dtypes bfloat16 ceremony). Both inference paths share one model — no FastVLM dependency anymore. See *FastVLM iter4 → LFM2.5-VL Migration* under Known Issues.
-- **Moonshine tiny-en (ONNX) ASR** on 3 pinned CPU cores (~1.6s per **2s** audio window, max <2s even on dense continuous speech). Runs in a multiprocessing worker subprocess (mirrors OCR/VLM worker pattern) for hard-timeout safety. **CONFIRM-ONLY** audio signal on top of OCR+VLM: decorates the block label (`+asr`) and does a gated mid-block rescue, but **never suppresses a block at start** (the old VETO was removed in 2026-05 — it was killing real ads VLM was sure about). Never fires blocking alone. Engine-selectable via `MINUS_ASR_ENGINE` (faster-whisper fallback for cool/idle hosts; on the thermally-throttled production box faster-whisper's fixed 30s encoder is ~3.3-5s/window — too slow, hence Moonshine which processes audio proportionally). Was whisper.cpp → faster-whisper → Moonshine. See [docs/ASR.md](docs/ASR.md) and *Moonshine ASR migration + decision-engine retune* under Known Issues.
+- **minus-v0.2** (fine-tuned LFM2.5-VL-450M, [TheGarageDev/Minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2)) on Axera LLM 8850 NPU — **prefill-only on 16 fused decoder layers, ~0.37s per frame deterministic** (1.5s soft / 2s hard timeout). 99.1% on the 800-image holdout measured on the NPU (minus-v0.1: 95.6%), screen-state check 95.9% (v0.1: always MENU). The LFM family replaced FastVLM-0.5B iter4 (May 2026), structurally simpler (no KV cache, no autoregressive decode for `detect_ad` OR autonomous-mode `query_image`, no ml_dtypes bfloat16 ceremony). Both inference paths share one model — no FastVLM dependency anymore. See *FastVLM iter4 → LFM2.5-VL Migration* under Known Issues.
+- **SenseVoice-small ASR on RK3588 NPU core 1** (since 2026-10-18; ~0.38s per 3s window, a window every 1s; Moonshine tiny-en on 3 CPU cores is the fallback). See [docs/ASR.md](docs/ASR.md) for the current decision rules (confirm, a calibrated veto against an unsure VLM, the audio gate); the rest of this bullet describes the older Moonshine setup. Runs in a multiprocessing worker subprocess (mirrors OCR/VLM worker pattern) for hard-timeout safety. **CONFIRM-ONLY** audio signal on top of OCR+VLM: decorates the block label (`+asr`) and does a gated mid-block rescue, but **never suppresses a block at start** (the old VETO was removed in 2026-05 — it was killing real ads VLM was sure about). Never fires blocking alone. Engine-selectable via `MINUS_ASR_ENGINE` (faster-whisper fallback for cool/idle hosts; on the thermally-throttled production box faster-whisper's fixed 30s encoder is ~3.3-5s/window — too slow, hence Moonshine which processes audio proportionally). Was whisper.cpp → faster-whisper → Moonshine. See [docs/ASR.md](docs/ASR.md) and *Moonshine ASR migration + decision-engine retune* under Known Issues.
 - **Spanish vocabulary practice** during ad blocks!
 
 ## Documentation
@@ -19,7 +19,7 @@ HDMI passthrough with real-time ML-based ad detection and blocking using dual NP
 | [docs/DEBUG_GLITCHES.md](docs/DEBUG_GLITCHES.md) | Video glitch debugging notes |
 | [docs/FPS_DEBUGGING.md](docs/FPS_DEBUGGING.md) | FPS tracking and optimization |
 | [docs/AUDIO.md](docs/AUDIO.md) | Audio passthrough documentation |
-| [docs/ASR.md](docs/ASR.md) | Moonshine (ONNX) ASR — audio-based ad CONFIRM signal on top of OCR+VLM (worker process, 2s window, veto removed 2026-05) |
+| [docs/ASR.md](docs/ASR.md) | ASR (SenseVoice on the RK3588 NPU since 2026-10-18; Moonshine CPU fallback): confirms blocks, vetoes VLM-alone blocks on show dialog, audio gate |
 | [docs/VLM_NPU_DEGRADATION.md](docs/VLM_NPU_DEGRADATION.md) | Investigation of "NPU degradation" — root cause is per-image output-length variance; fix is `max_new_tokens` cap |
 | [docs/IR_TRANSMITTER.md](docs/IR_TRANSMITTER.md) | IR transmitter for the REI 8K HDMI switch (PWM3 on pin 38) — wiring, NEC codes, API, troubleshooting |
 | [docs/IR_RECEIVER.md](docs/IR_RECEIVER.md) | IR receiver eval on pin 3 (`gpiochip4 11`) — bench-tested decode of NEC remotes, gotchas, sketch for a future `IRReceiver` module |
@@ -195,7 +195,7 @@ sudo systemctl start minus
 ```bash
 # Paths (override defaults for different installations)
 MINUS_USTREAMER_PATH=/path/to/ustreamer     # Default: /home/radxa/ustreamer-patched
-MINUS_VLM_MODEL_DIR=/path/to/vlm/models     # Default: /home/radxa/axera_models/minus-v0.1
+MINUS_VLM_MODEL_DIR=/path/to/vlm/models     # Default: local_dir in models/vlm_model.json (/home/radxa/axera_models/minus-v0.2)
 MINUS_OCR_MODEL_DIR=/path/to/ocr/models     # Default: models/paddleocr/ in the repo
                                             # (falls back to /home/radxa/rknn-llm/.../paddleocr)
 
@@ -457,7 +457,7 @@ Streaming UIs render a `Skip Intro` button that OCR sometimes reads as `Sk1p Int
 
 When ads are detected, the screen shows a full blocking overlay **rendered at 60fps via ustreamer's native MPP blocking mode**:
 - **Pixelated Background**: Blurred/pixelated version of the screen from ~6 seconds before the ad
-- **Header** (debug only): `[ BLOCKING // OCR ]`, `[ BLOCKING // VLM ]`, or `[ BLOCKING // OCR+VLM ]`
+- **Header** (debug only): `[ BLOCKING // OCR ]`, `[ BLOCKING // VLM ]`, `[ BLOCKING // OCR+VLM ]`, plus `+ASR` once ASR confirms (`OCR+ASR`, `VLM+ASR`, `OCR+VLM+ASR`). The per-frame `OCR #N ... [BLOCKING ...]` log tag uses the same parts.
 - **Spanish vocabulary**: Random intermediate-level word with translation
 - **Example sentence**: Shows the word in context
 - **Rotation**: New vocabulary every 11-15 seconds
@@ -528,16 +528,20 @@ Unlike the old GStreamer approach (limited to ~4fps), the ustreamer blocking mod
 
 ## VLM Model
 
-**LFM2.5-VL-450M-ft-v2-fused-v2** on Axera LLM 8850 NPU (fused-layer prefill, no decode):
+**minus-v0.2** (fine-tuned LFM2.5-VL-450M, [TheGarageDev/Minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2))
+on Axera LLM 8850 NPU (fused-layer prefill, no decode). The model is chosen by
+`models/vlm_model.json`; `config.VLM_MODEL_NAME` is the model directory's name (used in logs and the
+loading overlay). See *minus-v0.2* below for what changed from minus-v0.1.
 - `detect_ad()` is **prefill-only**: vision encoder (~185ms) → 16 fused
   decoder layers (~185ms) → post (LM head) → last-token vocab logits.
   Decision is `argmax of max(YES_logits) vs max(NO_logits)` over the 4
   spelling variants each (`Yes`/`yes`/` Yes`/` yes` etc.). Calibrated on
-  an 800-image holdout: **97.0% accuracy, 94.8% ad-recall, 99.2% non-ad-recall**.
+  an 800-image holdout, measured on the NPU: **minus-v0.2 99.1% accuracy, 99.8% ad-recall, 98.5%
+  non-ad-recall** (minus-v0.1: 95.6% / 93.8% / 97.5%).
   Also exposes a softmax-normalized `p_yes_norm` over the {YES,NO}
   subspace for an optional tunable threshold via env
   `MINUS_VLM_AD_THRESHOLD` (default `0.5` ≡ argmax; gain from tuning is
-  small since argmax is already at 97%).
+  small since argmax is already at 99%).
 - `query_image()` is **also prefill-only** — autonomous-mode screen
   classification (`PLAYING / PAUSED / DIALOG / MENU / SCREENSAVER`)
   uses the same prefill loop and looks up the first-token logit for
@@ -589,9 +593,9 @@ Unlike the old GStreamer approach (limited to ~4fps), the ustreamer blocking mod
 
 Both modes share the same model. Concurrent callers (detection loop calling `detect_ad`, autonomous mode calling `query_image`) are serialized by `VLMProcess._call_lock` so they cannot cross responses on the shared queue or race on the timeout / latency state. See *VLMProcess Cross-Thread Race* under Known Issues for the full rationale.
 
-minus-v0.1 on-disk layout (fine-tuned LFM2.5-VL-450M iter28, published at https://huggingface.co/TheGarageDev/Minus-v0.1; renamed from `LFM2/LFM2-450M-ft-iter28` in Aug 2026):
+On-disk layout (identical for minus-v0.1 and minus-v0.2; the updater keeps the previous model as `<dir>.prev`):
 ```
-/home/radxa/axera_models/minus-v0.1/
+/home/radxa/axera_models/minus-v0.2/
 ├── vision_encoder_512.axmodel              # Vision encoder (input "pixel_values")
 ├── fused_models/
 │   ├── l{0,1,3,4,6,7,9,11,13,15}_conv_fused.axmodel   # 10× conv layers
@@ -616,6 +620,25 @@ minus-v0.1 on-disk layout (fine-tuned LFM2.5-VL-450M iter28, published at https:
 | Parameters | 0.45B | 0.5B |
 
 Non-ad-recall jumped from 95.25% → 99.2% — the iter4 home-screen false-positive class is essentially eliminated at the model level. `query_image` no longer needs decode infrastructure, so there is no longer a separate FastVLM model loaded for autonomous mode — one model serves both paths.
+
+### minus-v0.2 (Oct 2026)
+
+Drop-in replacement for minus-v0.1 (same files, prompts, token ids, 320-token window, latency). Numbers measured on
+the box's NPU, v0.1 → v0.2: 800-image holdout 95.6% → **99.1%** (25 → 1 missed ads, 10 → 6 false positives); 328
+frames v0.1 got wrong or flip-flopped on 83.2% → **95.1%**; screen-state check (193 hand-labeled frames) 13.5% →
+**95.9%**. What changed:
+
+- **Trained on the box's input.** `_encode_image` squashes the frame to 512×512; every earlier model was trained on
+  aspect-correct resizes and lost ~2.5 points to that mismatch (v0.1's server copy: 99.1% on normal input, 96.5% squashed).
+- **New data:** 19,133 frames the box saved 2026-10-07 → 10-26, labels checked by two models plus a visual review.
+  `vlm_spastic/` frames were again mostly show content (342 of 440 kept), not ads.
+- **A trained screen-state head.** v0.1 answered MENU to every `query_image` (29,974 / 29,979 on a box), so autonomous
+  mode ran on its OCR guards. v0.2 returns real PLAYING / PAUSED / DIALOG / MENU / SCREENSAVER answers; the existing
+  guards (audio-flowing vetoes for PAUSED / SCREENSAVER, the player-overlay MENU veto, the ECP screensaver check) still
+  apply. On the 135 playing frames of the test set it never returned an action-taking class.
+- **Axera build keeps the residual stream in FP32** (both residual adds + attention score/mask add per layer, on top
+  of the RMSNorm chains). With only the RMSNorms in FP32, rounding in the residual stream added up over 16 layers and
+  cost the screen check 17 points on the NPU. Conversion scripts: the model repo's `conversion/` folder.
 
 ### Latency-based auto-recovery
 
@@ -688,7 +711,7 @@ pkill -9 ustreamer    # Kill orphaned ustreamer
 
 **VLM not loading:**
 - Check Axera card: `axcl_smi`
-- Verify model files exist in `/home/radxa/axera_models/minus-v0.1/`
+- Verify model files exist in `/home/radxa/axera_models/minus-v0.2/` (the `local_dir` in `models/vlm_model.json`)
 - Ensure Python dependencies: `pip3 show axengine`
 
 **OCR not detecting:**
@@ -1712,6 +1735,18 @@ This caused the new pipeline to fail with "device in use" because the old pipeli
 - After 3+ consecutive pipeline failures, the system now kills ustreamer (`pkill -9 ustreamer`) to force-release MPP resources
 - The health monitor detects ustreamer is down and restarts it + the video pipeline with clean MPP state
 - This auto-recovers from stuck MPP decoder without manual service restart
+
+### Blocked ad's sound played after an HDMI reconnect (Fixed - Oct 2026)
+
+**Symptom (2026-10-29, live):** a blocked Vinted ad (OCR + VLM, audio MUTED) played its sound for the rest of the block after the TV re-hotplugged twice mid-block.
+
+**Root cause:** on an HDMI reconnect `DRMAdBlocker` restarts audio with `AudioPassthrough.stop()` + `start()`. `_init_pipeline()` built the playback chain with a hard-coded `volume ... mute=false` and `start()` never re-applied the mute (the watchdog restart paths did), while `is_muted` stayed `True`, so the status API, the decision engine and `unmute()` all believed audio was muted.
+
+**Fix (#56):** the volume element is built with the current mute state and set muted again right after `get_by_name('vol')`; every rebuild path comes up muted mid-block. Test: `tests/test_audio_mute_survives_rebuild.py`.
+
+### Per-frame log tag never said +ASR (Fixed - Oct 2026)
+
+The `OCR #N: ... [BLOCKING ...]` tag was built from the OCR and VLM flags only, so it only ever said OCR / VLM / OCR+VLM even after ASR confirmed the block (the overlay header and `ASR confirmed active block → ...` did name it; ASR confirms dozens of blocks a day, usually a few seconds after OCR starts one). It now comes from `Minus._ocr_log_blocking_tag()` (OCR / VLM / ASR parts). The mid-block ASR upgrade also requires an active block: a statically suppressed ad used to log `ASR confirmed active block →` with an empty label. Test: `tests/test_blocking_labels.py`.
 
 ### Audio Device Mismatch on Display Reconnect (Fixed - Apr 2026)
 

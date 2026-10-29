@@ -1,9 +1,12 @@
 """
 VLM (Vision Language Model) integration for Minus.
 
-Uses minus-v0.1 (fine-tuned LFM2.5-VL-450M, iter28 — published at
-https://huggingface.co/TheGarageDev/Minus-v0.1) on the Axera LLM 8850
-NPU for ad detection AND autonomous-mode screen-state classification.
+Uses the Minus vision model named in models/vlm_model.json (minus-v0.2, a
+fine-tuned LFM2.5-VL-450M published at https://huggingface.co/TheGarageDev/Minus-v0.2)
+on the Axera LLM 8850 NPU for ad detection AND autonomous-mode screen-state
+classification. minus-v0.2 was trained on the exact input this file builds
+(frame squashed to 512x512, the prompts below), including the screen-state
+question.
 
 Both `detect_ad()` and `query_image()` are prefill-only on the 16
 fused decoder layers — no autoregressive decode, no KV cache state
@@ -13,8 +16,8 @@ deterministic (vision ~185ms + prefill ~185ms).
 - `detect_ad`: argmax of max(YES_logits) vs max(NO_logits) from the
   last-token vocab logits. Also exposes `p_yes_norm` for an optional
   tunable threshold (env `MINUS_VLM_AD_THRESHOLD`); default 0.5 ≡
-  argmax. Holdout (800 images): 97.0% acc, 94.8% ad-recall, 99.2%
-  non-ad-recall.
+  argmax. Holdout (800 images, measured on the NPU): minus-v0.2 99.1% acc,
+  99.8% ad-recall, 98.5% non-ad-recall (minus-v0.1: 95.6% / 93.8% / 97.5%).
 
 - `query_image`: prefill-only multi-class logit lookup over the first
   token of each screen-state class (PLAYING / PAUSED / DIALOG / MENU /
@@ -40,7 +43,7 @@ Migration notes vs FastVLM-0.5B iter4 (the previous model):
     strings in `_build_prompt_ids()` without recalibrating.
 
 Reference: /home/radxa/axera_models/LFM2/MINUS_INTEGRATION_GUIDE.md
-Working standalone: /home/radxa/axera_models/minus-v0.1/infer_vlm_fused.py
+Working standalone: <model dir>/infer_vlm_fused.py (e.g. /home/radxa/axera_models/minus-v0.2/)
 
 Model is loaded ONCE at startup (~8s) and kept running.
 """
@@ -55,7 +58,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from config import VLM_MODEL_DIR
+from config import VLM_MODEL_DIR, VLM_MODEL_NAME
 
 logger = logging.getLogger('Minus.VLM')
 
@@ -146,9 +149,9 @@ class VLMManager:
     )
 
     # Decision threshold on p_yes_norm. Default 0.5 == argmax (equivalent
-    # to max(YES_logits) > max(NO_logits)). LFM holdout-calibrated argmax
-    # gives 97.0% accuracy / 94.8% ad-recall / 99.2% non-ad-recall — the
-    # gain from threshold tuning is small. Override via env to bias
+    # to max(YES_logits) > max(NO_logits)). On the 800-image holdout the
+    # argmax gives minus-v0.2 99.1% accuracy / 99.8% ad-recall / 98.5%
+    # non-ad-recall on the NPU — the gain from threshold tuning is small. Override via env to bias
     # ad-recall vs non-ad-recall without re-running inference.
     AD_THRESHOLD = float(os.environ.get('MINUS_VLM_AD_THRESHOLD', '0.5'))
 
@@ -186,7 +189,7 @@ class VLMManager:
                 logger.error(f"{label} not found: {p}")
                 return
 
-        logger.info(f"VLM using minus-v0.1 (LFM2.5-VL) at: {LFM_MODEL_DIR}")
+        logger.info(f"VLM using {VLM_MODEL_NAME} (LFM2.5-VL) at: {LFM_MODEL_DIR}")
 
     # ------------------------------------------------------------------
     # Loading

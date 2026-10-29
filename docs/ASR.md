@@ -188,7 +188,11 @@ Notes:
   stays the base `ocr`/`vlm`/`both` for all stop-logic. Set at start from
   the ASR verdict and **upgraded mid-block** when ASR later confirms
   (the common path — OCR blocks instantly, ASR confirms a few seconds in).
-  Overlay headers: `OCR+ASR`, `VLM+ASR`, `OCR+VLM+ASR`.
+  Overlay headers: `OCR+ASR`, `VLM+ASR`, `OCR+VLM+ASR`. The per-frame log tag
+  (`OCR #N: ... [BLOCKING OCR+VLM+ASR]`) names ASR the same way once it has
+  confirmed the block (`Minus._ocr_log_blocking_tag`; before Oct 2026 it only
+  ever said OCR / VLM / OCR+VLM). A mid-block upgrade only applies to an active
+  block, so it is logged as `ASR confirmed active block → OCR+VLM+ASR`.
 - `verdict='confirm'`: ≥1 marker hit in the rolling 8-second window.
 - `verdict='veto'`: 0 marker hits AND ≥10 alpha-words. NO LONGER suppresses
   at start; only feeds the gated mid-block rescue.

@@ -651,7 +651,11 @@ class SystemNotification(NotificationOverlay):
 
     def show_vlm_loading(self):
         """Show VLM loading notification."""
-        text = "[ LOADING VLM ]\n\nminus-v0.1"
+        try:
+            from config import VLM_MODEL_NAME
+        except Exception:
+            VLM_MODEL_NAME = "vision model"
+        text = f"[ LOADING VLM ]\n\n{VLM_MODEL_NAME}"
         self.show(text, duration=None)
 
     def show_vlm_ready(self):

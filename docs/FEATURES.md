@@ -10,7 +10,7 @@ Minus is an HDMI passthrough device that detects and blocks advertisements in re
 
 **Dual-NPU ML Pipeline:**
 - **PaddleOCR PP-OCRv6** on RK3588 NPU (~180ms p50 / ~275ms p90 per frame) — detects text-based ad indicators, and reads an ad's own countdown to know how long to hold the block
-- **[minus-v0.1](https://huggingface.co/TheGarageDev/Minus-v0.1)** (fine-tuned LFM2.5-VL-450M) on Axera LLM 8850 NPU (~0.37s per frame, prefill-only on 16 fused decoder layers, no decode loop) — visual content analysis
+- **[minus-v0.2](https://huggingface.co/TheGarageDev/Minus-v0.2)** (fine-tuned LFM2.5-VL-450M) on Axera LLM 8850 NPU (~0.37s per frame, prefill-only on 16 fused decoder layers, no decode loop) — visual content analysis
 - Both workers run in dedicated **subprocesses** (`src/ocr_worker.py`, `src/vlm_worker.py`) with hard timeouts so a stuck NPU inference can never freeze the detection loop. The worker processes ship with warmup inferences, keepalive pings, and soft/hard timeout escalation.
 
 **Detection Methods:**
