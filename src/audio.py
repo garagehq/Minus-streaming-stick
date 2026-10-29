@@ -384,7 +384,11 @@ class AudioPassthrough:
                 f"max-size-time={int(self.SYNC_MAX_MS * 1e6)} max-size-buffers=0 max-size-bytes=0 ! "
                 f"queue max-size-buffers=10 max-size-time=100000000 leaky=downstream name=audioqueue ! "
                 f"audioconvert ! "
-                f"volume name=vol volume=1.0 mute=false ! "
+                # Built with the CURRENT mute state: start() after stop() (the
+                # HDMI-reconnect path in DRMAdBlocker) rebuilds the pipeline
+                # mid-block or mid-name-mute, and a hard-coded mute=false played
+                # the sound while is_muted stayed True (seen live 2026-10-29).
+                f"volume name=vol volume=1.0 mute={'true' if (self.is_muted or self._name_muted) else 'false'} ! "
                 f"{output_recorder.tee_chain(sink)}"
             )
             if self.asr_tap is not None:
@@ -436,6 +440,8 @@ class AudioPassthrough:
 
             # Get volume element for mute control
             self.volume = self.pipeline.get_by_name('vol')
+            if (self.is_muted or self._name_muted) and self.volume:
+                self.volume.set_property('mute', True)
 
             # Set up bus message handling for error detection
             self.bus = self.pipeline.get_bus()
