@@ -68,3 +68,36 @@ class TestSkipRelease(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestSkipVerified(unittest.TestCase):
+    """minus, 2026-10-30 04:49: the skip press landed while "Skip in 1" was
+    still counting, the forced unblock ran anyway, and the ad's sound played
+    for ~2 s until it re-blocked. The unblock now waits for an OCR read taken
+    after the press and keeps the block if the ad is still there."""
+
+    def test_still_showing(self):
+        import minus as M
+        f = M.Minus._ad_still_showing_after_skip
+        self.assertTrue(f(['Sponsored • Join Us Today', '90+', 'Skip I']))
+        self.assertTrue(f(['Skip in', '3']))
+        self.assertFalse(f(['CLEAN BANDIT']))
+        self.assertFalse(f([]))
+        self.assertFalse(f(None))
+
+    def test_unblock_thread_checks_before_releasing(self):
+        src = (ROOT / 'minus.py').read_text()
+        body = src[src.index('def _unblock_after_skip'):src.index('threading.Thread(target=_unblock_after_skip')]
+        check = body.index('_ad_still_showing_after_skip')
+        self.assertLess(check, body.index('self._skip_release = True'))
+        self.assertLess(check, body.index('self.audio.unmute()'))
+        self.assertIn('last_ocr_texts_time', body)
+
+    def test_retry_flag_resets_when_the_block_ends(self):
+        m = TestSkipRelease._blocking(self)
+        m._skip_retry_used = True
+        m.ocr_ad_detected = False
+        m.vlm_ad_detected = False
+        m._skip_release = True
+        m._update_blocking_state()
+        self.assertFalse(m._skip_retry_used)

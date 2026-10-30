@@ -831,6 +831,8 @@ class Minus:
         # _update_blocking_state ends it instead of holding it on new content.
         self._static_resume_release = False
         self._skip_release = False   # set by the skip thread; the next tick ends the block
+        self._skip_retry_used = False  # one retry per block when a skip press misses
+        self.last_ocr_texts_time = 0.0
 
         # Strong-ad-signal override for static suppression. Some video ads
         # (Michelob "Skip MI 15", graphic banner ads, etc.) have so little
@@ -3997,6 +3999,15 @@ class Minus:
             pass
         return True
 
+    @staticmethod
+    def _ad_still_showing_after_skip(texts) -> bool:
+        """After a skip press: does the screen still show an ad's own UI?
+        "Skip in" is a countdown (the press could not have worked);
+        "Sponsored" is the ad label, still there if the ad, or the next ad in
+        the pod, is playing."""
+        combined = ' '.join(str(t) for t in (texts or [])).lower()
+        return 'skip in' in combined or 'sponsored' in combined
+
     def _update_blocking_state(self):
         """Update combined blocking state using weighted OCR/VLM model."""
         with self._state_lock:
@@ -4566,6 +4577,7 @@ class Minus:
                     # Reset skip state for next ad
                     self.skip_available = False
                     self.skip_attempted_this_ad = False
+                    self._skip_retry_used = False
                     self.last_skip_countdown = None
                     self.skip_countdown = None
                     stopper = 'SKIP' if skip_release else (source_was.upper() if source_was else 'unknown')
@@ -4838,6 +4850,7 @@ class Minus:
 
                 # Store OCR texts and check for home screen / video interface keywords
                 self.last_ocr_texts = all_texts
+                self.last_ocr_texts_time = time.time()
 
                 # Feed every frame's text to autonomous mode's music-drift
                 # detector. It watches for an H:MM:SS runtime, which is on
@@ -5058,8 +5071,34 @@ class Minus:
 
                             # After successful skip, immediately stop blocking
                             # Wait briefly for skip animation, then force unblock
+                            pressed_at = time.time()
+
                             def _unblock_after_skip():
                                 time.sleep(1.5)  # Brief delay for skip animation
+                                # Did it work? Wait for an OCR read taken after
+                                # the press: an ad still on screen means the
+                                # press missed (countdown not done, focus
+                                # elsewhere). Unblocking anyway played the ad's
+                                # sound until it re-blocked (minus 04:49:48,
+                                # "Skip in" still showing). Keep the block and
+                                # allow one retry instead.
+                                deadline = pressed_at + 3.5
+                                while (getattr(self, 'last_ocr_texts_time', 0.0) <= pressed_at
+                                       and time.time() < deadline):
+                                    time.sleep(0.2)
+                                if (getattr(self, 'last_ocr_texts_time', 0.0) > pressed_at
+                                        and self._ad_still_showing_after_skip(self.last_ocr_texts)):
+                                    retry = not getattr(self, "_skip_retry_used", False)
+                                    self._skip_retry_used = True
+                                    if retry:
+                                        self.skip_attempted_this_ad = False
+                                    logger.info(
+                                        "[SKIP] Ad still on screen after the skip press "
+                                        f"({' | '.join(map(str, self.last_ocr_texts))[:80]!r}) — "
+                                        f"keeping the block{'; one retry after the cooldown' if retry else ''}")
+                                    if self.ad_blocker:
+                                        self.ad_blocker.set_skip_status(False, "Skip missed")
+                                    return
                                 logger.info("[SKIP] Forcing unblock after skip")
                                 self.ocr_ad_detected = False
                                 self.vlm_ad_detected = False
