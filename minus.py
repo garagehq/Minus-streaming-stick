@@ -1424,9 +1424,14 @@ class Minus:
         """
         logger.warning(f"[Recovery] HDMI format changed to {new_format} - restarting ustreamer")
 
-        # Skip if display is disconnected (retry loop handles reconnection)
+        # No TV: ustreamer still has to follow the new format -- OCR (caption
+        # muting) and autonomous mode read its frames. Skipping it left them
+        # on a dead/garbled capture until a TV came back. The display retry
+        # loop builds the display pipeline against the new ustreamer when a
+        # TV is connected. (Port of 588b440, PR #68.)
         if not self.display_connected:
-            logger.debug("[Recovery] Skipping format change recovery - display disconnected")
+            logger.info("[Recovery] No display - restarting ustreamer only for the new format")
+            self._restart_ustreamer()
             return
 
         # Show loading screen while we adapt to new format

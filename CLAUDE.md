@@ -319,7 +319,10 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     display was attached, so a dead ustreamer stayed dead (no frames,
     signal reported lost). It now always restarts ustreamer; only the
     display pipeline restart needs a display
-    (`tests/test_ustreamer_recovery.py`).
+    (`tests/test_ustreamer_recovery.py`). Ported from PR #68 (588b440):
+    a source format change restarts ustreamer with no display too, and
+    the liveness check is `pgrep -f '^\S*ustreamer'` (a bare `ustreamer`
+    matched any shell or grep that mentioned it).
 - **Roku.** `tools/roku_lebron.py` finds the Roku and deep-links YouTube
   to a list of LeBron commentary videos. Turn captions on in the YouTube
   player (or Roku Settings > Accessibility > Captions) for the OCR path.
