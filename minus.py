@@ -5071,6 +5071,9 @@ class Minus:
                                 # ad" and could re-arm, and the end was logged
                                 # "stopped by unknown" (3x in 25 min on minus).
                                 self._skip_release = True
+                                # And drop the ad's votes now, so the VLM thread
+                                # can't re-flag it before that tick runs.
+                                self.vlm_decision_history.clear()
                                 if self.ad_blocker:
                                     self.ad_blocker.hide()
                                 if self.audio:
