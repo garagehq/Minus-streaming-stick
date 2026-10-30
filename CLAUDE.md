@@ -1764,9 +1764,25 @@ The `OCR #N: ... [BLOCKING ...]` tag was built from the OCR and VLM flags only, 
 
 The audio guard for destructive actions (`_audio_recently_flowing`) only knew about audio autonomous mode had sampled, and it doesn't sample during a block. After an 18 s block the 20 s window had lapsed, YouTube's icon rail (single OCR characters) read as a keyboard, and the 4x Back + navigate escape went to the account picker and the Amazon Appstore. The guard now asks `audio.seconds_since_audible()` first (HDMI input, before the mute, tracked continuously). Test: `tests/test_autonomous_recent_audio.py`.
 
+### Shorts detector fired on ordinary video (Fixed - Oct 2026)
+
+`_vertical_panel_edges` (two strong column-brightness edges at 9:16 spacing, full height, same boundaries 2 s apart) fired on 34 of 600 regular frames on minus: a lit performer between dark speaker cabinets, static studio shots, 4:3 videos. A locked-off camera passes the 2 s recheck, and the Shorts exit backed out of a playing music video. It now also requires almost no fine detail left of the panel (Laplacian variance <= `_VPANEL_SIDE_DETAIL_MAX` = 10): a real Short has a blurred backdrop (<= 2.1) or black bars there, the false hits measured >= 27 (median 252). 0 of 600 after. The right side is not checked (the TV Shorts player's title/@handle column).
+
+### Skip presses are verified (Oct 2026)
+
+A skip press can miss (countdown not finished, focus elsewhere). Unblocking blind 1.5 s later played the ad's sound until OCR re-blocked it. Judging the first OCR read after the press was wrong the other way: reads lag the screen, so a successful skip stayed blocked and the ad clock held it over the video for 30 s. `_unblock_after_skip` now releases on the first OCR read from >= 1 s after the press that shows no "Skip in" / "Sponsored" (`_ad_still_showing_after_skip`), and calls it a miss only if every read for 6 s still does: the block stays (muted) and one retry is allowed (`_skip_retry_used`, reset when the block ends). `last_ocr_texts_time` timestamps each read. Tests: `tests/test_skip_release.py`.
+
 ### Skipped ads: "stopped by unknown" (Fixed - Oct 2026)
 
 `_unblock_after_skip` cleared `blocking_source` itself, outside the decision tick: the ad's countdown clock could keep holding the block (41 s once), the VLM vote history re-flagged the ad, and the end was logged "stopped by unknown". The skip thread now hides/unmutes, clears the VLM history and sets `_skip_release`; the next `_update_blocking_state` tick ends the block like any other ("stopped by SKIP"), bypassing the ad clock. Test: `tests/test_skip_release.py`.
+
+### Main-process heap trim (Oct 2026)
+
+With the display pipeline running the main process grew ~80 MB/h (312 -> 537 MB in 2.5 h), almost all freed-but-unreturned memory in glibc's per-thread arenas (malloc_trim(0) on the live process returned 112 MB). `HealthMonitor._trim_process_heap()` trims every `HEAP_TRIM_INTERVAL_S` (300 s) from the health loop and logs when it frees >= 32 MB.
+
+### Open: display pipeline keeps decoding with the TV off
+
+When the TV is switched off the health monitor only logs "HDMI output disconnected"; the display pipeline keeps decoding 4K (~80% of a core plus the VPU: mppjpegdec 60%, souphttpsrc 8%), which held minus at 78-84 C in thermal-degraded mode all night vs ~65 C with no display. Candidate fix: after the TV has been off for a while, stop the display pipeline and hand off to `_start_display_retry_loop()` (the path that brings the display up when a TV appears). Needs a hands-on TV off/on test before shipping.
 
 ### Clean-stop drop-in on updated boxes (Oct 2026)
 
