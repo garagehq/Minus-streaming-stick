@@ -1877,6 +1877,7 @@ class AutonomousMode:
     _VPANEL_EDGE_MIN = 3.0     # min column-profile gradient at BOTH edges
     _VPANEL_EDGE_TOL = 0.02    # cross-frame edge-position agreement
     _VPANEL_MIN_SPAN = 0.90    # panel must fill ~the whole frame height
+    _VPANEL_SIDE_DETAIL_MAX = 10.0   # Laplacian variance left of the panel
 
     def _vertical_panel_edges(self, frame):
         """Locate the pillarbox boundaries of a vertical (9:16) video panel.
@@ -1957,6 +1958,23 @@ class AutonomousMode:
             span = (rows_idx[-1] - rows_idx[0] + 1) / float(h)
             if span < self._VPANEL_MIN_SPAN:
                 return None
+
+            # Left of the panel a Short has a blurred backdrop (or black
+            # bars): almost no fine detail. Ordinary video that happens to
+            # have two strong edges at pillarbox spacing -- a lit performer
+            # between dark speaker cabinets, a static studio shot, a 4:3
+            # video -- has real scenery there. On minus (2026-10-30) the
+            # checks above fired on 34 of 600 regular frames, and a Shorts
+            # exit backed out of a playing music video; their left-side
+            # Laplacian variance was >= 27 (median 252), a blurred backdrop
+            # measures <= 2.1. The right side is skipped: the TV Shorts
+            # player puts the title / @handle column there.
+            lo, hi = int(h * 0.10), int(h * 0.90)
+            x0, x1 = int(w * 0.03), int(w * left_pos) - int(w * 0.02)
+            if x1 - x0 >= 8:
+                side_detail = float(cv2.Laplacian(gray[lo:hi, x0:x1], cv2.CV_64F).var())
+                if side_detail > self._VPANEL_SIDE_DETAIL_MAX:
+                    return None
 
             return left_pos, right_pos
         except Exception as e:
