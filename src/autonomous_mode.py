@@ -1483,6 +1483,24 @@ class AutonomousMode:
         minutes, so it still gets handled one cycle after the window
         expires (~1 min at the 33s cycle cadence).
         """
+        # The audio module tracks the HDMI input continuously (before the
+        # mute, on the ASR tap). _last_audio_flowing_time is only refreshed
+        # when this class happens to sample, and it doesn't sample during a
+        # block: right after an 18 s block the window had lapsed, the
+        # post-skip frame read as a "keyboard" and the Back+navigate escape
+        # walked YouTube into the account picker and the Appstore (minus,
+        # 2026-10-30 01:33). None (unknown) falls through to the old check.
+        audio = getattr(self._ad_blocker, 'audio', None) if self._ad_blocker else None
+        since = getattr(audio, 'seconds_since_audible', None)
+        if callable(since):
+            try:
+                quiet = since()
+            except Exception:
+                quiet = None
+            if isinstance(quiet, (int, float)) and not isinstance(quiet, bool):
+                if quiet < self._AUDIO_RECENT_WINDOW:
+                    self._last_audio_flowing_time = time.time()
+                    return True
         if self._is_audio_flowing():
             return True
         if self._last_audio_flowing_time is None:
