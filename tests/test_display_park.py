@@ -137,6 +137,34 @@ class TestRecoveryWithoutDisplay(unittest.TestCase):
         self.assertFalse(pat.search('ugrep -c ustreamer'))
 
 
+class TestReconnectSingleBringUp(unittest.TestCase):
+    """TV back: exactly one of the retry loop / health monitor restarts the
+    display (minus 2026-10-30 18:20 did it twice)."""
+
+    def _hm(self, parked=False):
+        from health import HealthMonitor
+        hm = HealthMonitor.__new__(HealthMonitor)
+        hm.minus = MagicMock()
+        hm.minus.ad_blocker.parked = parked
+        return hm
+
+    def test_display_down_at_reconnect_is_left_to_retry_loop(self):
+        # The retry loop already started it (parked now False): no 2nd restart.
+        hm = self._hm(parked=False)
+        self.assertEqual(hm._restart_display_for_reconnect(True), 'retry_loop')
+        hm.minus.ad_blocker.restart.assert_not_called()
+
+    def test_still_parked_is_left_to_retry_loop(self):
+        hm = self._hm(parked=True)
+        self.assertEqual(hm._restart_display_for_reconnect(False), 'retry_loop')
+        hm.minus.ad_blocker.restart.assert_not_called()
+
+    def test_live_display_is_restarted_with_reinit(self):
+        hm = self._hm(parked=False)
+        self.assertEqual(hm._restart_display_for_reconnect(False), 'restart')
+        hm.minus.ad_blocker.restart.assert_called_once_with(hdmi_reconnect=True)
+
+
 class TestHealthParkTimer(unittest.TestCase):
 
     def _hm(self):

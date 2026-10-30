@@ -400,6 +400,18 @@ class HealthMonitor:
                         except Exception as e:
                             logger.warning(f"[HealthMonitor] notify_hdmi_reconnect failed: {e}")
 
+                    # Who brings the display up? Decided NOW, before the wait:
+                    # with the display down (parked for TV-off, or never up
+                    # because Minus started without a TV) the display retry
+                    # loop owns it, polls sysfs every few seconds and usually
+                    # starts it during the 2 s below -- which also clears
+                    # `parked`. Checking after the wait saw a running display
+                    # and restarted it a second time: an extra DPMS cycle, an
+                    # extra audio restart, counted as a failure (minus,
+                    # 2026-10-30 18:20).
+                    retry_loop_owns_display = bool(
+                        self.minus and not getattr(self.minus, 'display_connected', True))
+
                     # Give HDMI link time to fully establish before restarting
                     # The TV needs time to complete HDCP handshake and EDID negotiation
                     logger.info("[HealthMonitor] Waiting 2s for HDMI link to stabilize...")
@@ -417,15 +429,7 @@ class HealthMonitor:
                     else:
                         # We have HDMI input but output reconnected - restart display pipeline
                         # with hdmi_reconnect=True to trigger DPMS cycle and DRM re-probe
-                        logger.info("[HealthMonitor] Restarting display pipeline for reconnected output (with HDMI reinit)")
-                        if self.minus and self.minus.ad_blocker and getattr(self.minus.ad_blocker, 'parked', False):
-                            logger.info("[HealthMonitor] Display was parked - the display retry loop brings it up")
-                        elif self.minus and self.minus.ad_blocker:
-                            try:
-                                self.minus.ad_blocker.restart(hdmi_reconnect=True)
-                                logger.info("[HealthMonitor] Display pipeline restart with HDMI reinit requested")
-                            except Exception as e:
-                                logger.error(f"[HealthMonitor] Failed to restart display pipeline: {e}")
+                        self._restart_display_for_reconnect(retry_loop_owns_display)
 
                 elif not output_connected and self._last_hdmi_output_connected:
                     # Output just disconnected (TV turned off)
@@ -740,6 +744,28 @@ class HealthMonitor:
             return False, -1
         except Exception:
             return False, -1
+
+    def _restart_display_for_reconnect(self, retry_loop_owns_display: bool) -> str:
+        """TV came back with HDMI input present: restart the display once.
+
+        retry_loop_owns_display is decided when the TV appears (before the
+        link-settle wait): a display that was down then -- parked for TV-off
+        or never started -- is brought up by the display retry loop, so
+        restarting it here too would do it twice.
+        """
+        ab = getattr(self.minus, 'ad_blocker', None) if self.minus else None
+        if ab is None:
+            return 'none'
+        if retry_loop_owns_display or getattr(ab, 'parked', False):
+            logger.info("[HealthMonitor] Display was down - the display retry loop brings it up")
+            return 'retry_loop'
+        logger.info("[HealthMonitor] Restarting display pipeline for reconnected output (with HDMI reinit)")
+        try:
+            ab.restart(hdmi_reconnect=True)
+            logger.info("[HealthMonitor] Display pipeline restart with HDMI reinit requested")
+        except Exception as e:
+            logger.error(f"[HealthMonitor] Failed to restart display pipeline: {e}")
+        return 'restart'
 
     def _maybe_park_display(self, output_connected: bool, now: float = None) -> bool:
         """TV off for DISPLAY_PARK_AFTER_S: park the display pipeline.
