@@ -228,6 +228,40 @@ class HealthMonitor:
         really gone afterwards is still caught on the first tick after."""
         self._suppress_until = max(getattr(self, '_suppress_until', 0.0), time.time() + float(seconds))
 
+    def _check_audio_unmute(self):
+        # Audio unmute watchdog - ensure audio is not muted when not blocking
+        # This prevents audio from getting stuck muted due to race conditions or bugs.
+        #
+        # ad_blocker.hide() now unmutes synchronously in the same locked
+        # section that clears is_visible, so this should never fire. The two
+        # reads below are still not atomic with respect to each other, so
+        # require the condition to hold across two consecutive checks before
+        # acting — that way a sub-millisecond straddle can't produce a
+        # spurious WARN (13 such warnings in 48h before the hide() fix).
+        # A genuine stuck mute is still recovered, just one cycle later.
+        # Not while the HDMI signal is lost: _on_hdmi_lost mutes on purpose
+        # (the source is asleep, there is nothing to hear) and the restore path
+        # unmutes. Forcing it here logged a "stuck" warning on every source
+        # sleep (minus, 2026-10-29/30).
+        if getattr(self.minus, '_hdmi_signal_lost', False) is True:
+            self._muted_not_blocking_seen = False
+            return
+        if self.minus.audio and self.minus.ad_blocker:
+            is_blocking = self.minus.ad_blocker.is_visible
+            is_muted = self.minus.audio.is_muted
+
+            if not is_blocking and is_muted:
+                if self._muted_not_blocking_seen:
+                    logger.warning("[HealthMonitor] Audio stuck muted while not blocking - forcing unmute")
+                    self.minus.audio.unmute()
+                    self._muted_not_blocking_seen = False
+                else:
+                    self._muted_not_blocking_seen = True
+                    logger.debug("[HealthMonitor] Muted while not blocking - "
+                                 "confirming on next check")
+            else:
+                self._muted_not_blocking_seen = False
+
     def _check_and_recover(self):
         """Check health and trigger recovery if needed."""
         # Refresh cached HDMI-TX audio link state before building status.
@@ -413,31 +447,7 @@ class HealthMonitor:
                 if self._on_video_pipeline_stall:
                     self._on_video_pipeline_stall()
 
-        # Audio unmute watchdog - ensure audio is not muted when not blocking
-        # This prevents audio from getting stuck muted due to race conditions or bugs.
-        #
-        # ad_blocker.hide() now unmutes synchronously in the same locked
-        # section that clears is_visible, so this should never fire. The two
-        # reads below are still not atomic with respect to each other, so
-        # require the condition to hold across two consecutive checks before
-        # acting — that way a sub-millisecond straddle can't produce a
-        # spurious WARN (13 such warnings in 48h before the hide() fix).
-        # A genuine stuck mute is still recovered, just one cycle later.
-        if self.minus.audio and self.minus.ad_blocker:
-            is_blocking = self.minus.ad_blocker.is_visible
-            is_muted = self.minus.audio.is_muted
-
-            if not is_blocking and is_muted:
-                if self._muted_not_blocking_seen:
-                    logger.warning("[HealthMonitor] Audio stuck muted while not blocking - forcing unmute")
-                    self.minus.audio.unmute()
-                    self._muted_not_blocking_seen = False
-                else:
-                    self._muted_not_blocking_seen = True
-                    logger.debug("[HealthMonitor] Muted while not blocking - "
-                                 "confirming on next check")
-            else:
-                self._muted_not_blocking_seen = False
+        self._check_audio_unmute()
 
         # VLM health
         if status.vlm_consecutive_timeouts >= self.vlm_timeout_threshold:
