@@ -673,7 +673,7 @@ class Fake:
         if {hang}:
             time.sleep(3600)           # a stop that never finishes
 fake = Fake()
-M._install_shutdown_handlers(fake, timeout_s=1.0)
+M._install_shutdown_handlers(fake, timeout_s={timeout})
 os.kill(os.getpid(), signal.SIGTERM)
 os.kill(os.getpid(), signal.SIGTERM)  # systemctl stop: ExecStop kill + systemd's own
 deadline = time.time() + 30
@@ -686,7 +686,10 @@ sys.exit(0)
 
 
 def _run_shutdown_child(hang):
-    code = _SHUTDOWN_CHILD.format(root=str(ROOT), src=str(ROOT / 'src'), hang=hang)
+    # A hung stop must be cut off by the watchdog (1 s); a normal one must finish
+    # before it, even on a loaded box (10 s).
+    code = _SHUTDOWN_CHILD.format(root=str(ROOT), src=str(ROOT / 'src'), hang=hang,
+                                  timeout=1.0 if hang else 10.0)
     t0 = __import__('time').monotonic()
     r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=60)
     return r, __import__('time').monotonic() - t0
