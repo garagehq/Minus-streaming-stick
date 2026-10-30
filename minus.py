@@ -1155,7 +1155,10 @@ class Minus:
                 self.health_monitor = HealthMonitor(self, check_interval=5.0)
                 self.health_monitor.on_hdmi_lost(self._on_hdmi_lost)
                 self.health_monitor.on_hdmi_restored(self._on_hdmi_restored)
-                self.health_monitor.on_ustreamer_stall(self._restart_ustreamer)
+                # even_without_display: ustreamer feeds OCR/VLM/autonomous mode,
+                # so a dead one must be restarted with the TV off too.
+                self.health_monitor.on_ustreamer_stall(
+                    lambda: self._restart_ustreamer(even_without_display=True))
                 self.health_monitor.on_video_pipeline_stall(self._on_video_pipeline_stall)
                 self.health_monitor.on_vlm_failure(self._handle_vlm_failure)
                 self.health_monitor.on_memory_critical(self._handle_memory_critical)
@@ -1543,9 +1546,14 @@ class Minus:
         """
         logger.warning(f"[Recovery] HDMI format changed to {new_format} - restarting ustreamer")
 
-        # Skip if display is disconnected (retry loop handles reconnection)
+        # No TV (never attached, or parked while it's off): ustreamer still
+        # has to follow the new format -- OCR, VLM and autonomous mode read
+        # its frames. Skipping it left them on a dead/garbled capture until a
+        # TV came back. The display retry loop builds the display pipeline
+        # against the new ustreamer when a TV is connected.
         if not self.display_connected:
-            logger.debug("[Recovery] Skipping format change recovery - display disconnected")
+            logger.info("[Recovery] No display - restarting ustreamer only for the new format")
+            self._restart_ustreamer(even_without_display=True)
             return
 
         # Show loading screen while we adapt to new format

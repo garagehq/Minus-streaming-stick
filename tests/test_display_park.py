@@ -113,6 +113,30 @@ class TestMinusPark(unittest.TestCase):
         m.ad_blocker.park.assert_not_called()
 
 
+class TestRecoveryWithoutDisplay(unittest.TestCase):
+    """OCR, VLM and autonomous mode read ustreamer, so it must be kept
+    alive and on the right format while the TV is off (parked or never on)."""
+
+    def test_format_change_restarts_ustreamer_without_display(self):
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.display_connected = False
+        m.ad_blocker = MagicMock()
+        m.audio = MagicMock()
+        m._restart_ustreamer = MagicMock()
+        m._on_format_change('NV12@1920x1080')
+        m._restart_ustreamer.assert_called_once_with(even_without_display=True)
+        m.ad_blocker.start_loading_mode.assert_not_called()
+        m.ad_blocker.start.assert_not_called()
+
+    def test_ustreamer_alive_ignores_commands_that_mention_it(self):
+        import re
+        pat = re.compile(r'^\S*ustreamer')
+        self.assertTrue(pat.search('/home/radxa/ustreamer-patched --device=/dev/video0'))
+        self.assertFalse(pat.search("/bin/bash -c journalctl | grep 'ustreamer not responding'"))
+        self.assertFalse(pat.search('ugrep -c ustreamer'))
+
+
 class TestHealthParkTimer(unittest.TestCase):
 
     def _hm(self):

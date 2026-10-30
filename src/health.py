@@ -708,7 +708,11 @@ class HealthMonitor:
         """Check if ustreamer process is running."""
         try:
             result = subprocess.run(
-                ['pgrep', '-f', 'ustreamer'],
+                # Anchored to the start of the command line: a bare
+                # 'ustreamer' also matched any shell or grep that merely
+                # mentioned it (a journal search did, 2026-10-30), which
+                # reported a stopped ustreamer as alive-but-hung.
+                ['pgrep', '-f', r'^\S*ustreamer'],
                 capture_output=True, timeout=1
             )
             return result.returncode == 0
