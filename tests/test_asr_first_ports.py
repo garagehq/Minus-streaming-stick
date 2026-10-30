@@ -62,7 +62,6 @@ def test_fire_tv_is_awake_parses_dumpsys():
 
 def test_vlm_start_fails_fast_when_worker_dies():
     import vlm_worker
-    p = object.__new__(vlm_worker.VLMProcess)
     src = Path(vlm_worker.__file__).read_text()
     body = src[src.index('Waiting for model to load'):src.index('def kill(self)')]
     assert 'self.process.is_alive()' in body and 'time.monotonic()' in body
