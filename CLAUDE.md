@@ -1756,6 +1756,26 @@ The `OCR #N: ... [BLOCKING ...]` tag was built from the OCR and VLM flags only, 
 
 **Fix (#57):** `src/gst_bus.py` `drop_unconsumed_messages(bus)` installs a bus sync handler that DROPs every message except ERROR and EOS, which the code does read. It is applied right after every `add_signal_watch()` (audio pipeline, and the video / NO SIGNAL / loading pipelines in `ad_blocker.py`). Any new pipeline must do the same. Measured after the fix: memory flat through a sleep (~480–580 MB) and back to ~490 MB after wake. Test: `tests/test_gst_bus_no_backlog.py`.
 
+### Worker memory: rknnlite buffers in reference cycles (Fixed - Oct 2026)
+
+rknnlite's `inference()` leaves its ctypes input/output buffers in reference cycles, so they stay allocated until Python's cyclic GC happens to run. The SenseVoice ASR worker (~17 MB logits per call) grew ~80-110 MB/h in soaks, and the OCR worker swung 60-580 MB with a rising floor. Both workers now `gc.collect(0)` after each reply (~2 ms, after the reply is sent). The ASR worker also `malloc_trim(0)`s every `MINUS_ASR_TRIM_EVERY` (100) calls and is spawned with `MALLOC_MMAP_THRESHOLD_=1MB` / `MALLOC_ARENA_MAX=2`, set only around its spawn (#62). The OCR worker trims every 500 requests and is replaced between requests past 1 GB (#60, #63). Tests: `tests/test_asr_worker_memory.py`, `tests/test_ocr_worker_heap.py`.
+
+### `pkill ustreamer` matched nothing (Fixed - Oct 2026)
+
+ustreamer names its main thread `main`, which is the process name on Linux, so every `pkill -9 ustreamer` was a no-op. After a format change the old instance could keep port 9090 serving stale frames while the new one failed to bind. Kill it with `ustreamer_proc.kill_ustreamer(port)` (anchored executable path + port, waits until gone), never by name (#64). Test: `tests/test_ustreamer_kill.py`.
+
+### Clean service stop (Fixed - Oct 2026)
+
+The SIGTERM/SIGINT handler only sets `_stop_requested` / `running`; `run()` calls `stop()` on the main thread. Stopping (and logging) inside the handler could re-enter the log writer. The repeated SIGTERM from `systemctl stop` is ignored, and a watchdog exits after `MINUS_SHUTDOWN_TIMEOUT_S` (20 s). The watchdog never logs while the interpreter finalizes: a daemon thread holding the stdout lock then aborts Python. `minus.service` has `KillMode=mixed` and `TimeoutStopSec=30`; with the default every child got SIGTERM at once, ustreamer's death looked like HDMI loss and recovery respawned workers. Stop now takes ~3.5 s on minus (#65).
+
+**Existing boxes:** only `install.sh` installs the unit, so add the two lines as a drop-in (keeps local unit edits such as `PYTHONPATH`):
+
+```bash
+sudo mkdir -p /etc/systemd/system/minus.service.d
+printf '[Service]\nKillMode=mixed\nTimeoutStopSec=30\n' | sudo tee /etc/systemd/system/minus.service.d/clean-stop.conf
+sudo systemctl daemon-reload
+```
+
 ### Audio Device Mismatch on Display Reconnect (Fixed - Apr 2026)
 
 **Symptom:** No audio after TV wakes up from standby. Audio pipeline starts on wrong HDMI output (e.g., `hw:0,0` instead of `hw:1,0`).
