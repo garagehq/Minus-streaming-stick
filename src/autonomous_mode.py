@@ -810,7 +810,7 @@ class AutonomousMode:
         # kicked the user out of whatever was playing. Ask the device first.
         is_awake = getattr(self._device_controller, 'is_awake', None)
         awake = is_awake() if callable(is_awake) else None
-        if awake:
+        if awake is True:   # only a definite yes; unknown still gets Home
             self._last_source_wake = now
             logger.info("[AutonomousMode] No HDMI signal, but the source reports "
                         "it is awake — not sending Home")
