@@ -2586,8 +2586,8 @@ class Minus:
                 pass
 
         # From ustreamer: capture = the HDMI input rate (set by the source,
-        # e.g. 60), stream = what Minus puts out after ustreamer's
-        # --desired-fps cap (30 by default).
+        # e.g. 60), stream = what Minus puts out (the source rate, or 30 while
+        # the thermal governor caps capture).
         fps_capture = 0
         fps_stream = 0
         try:
@@ -2603,7 +2603,10 @@ class Minus:
                 fps_stream = max(c.get('fps', 0) for c in clients.values())
             else:
                 # Nobody is streaming: report the rate the stream would run at.
-                cap = source.get('desired_fps') or STREAM_FPS
+                # The cap is the thermal one (_capture_fps_cap, 0 = source
+                # rate); ustreamer's own desired_fps is the half-frame-early
+                # cutoff (25 for 30 fps, see _desired_fps_arg), not a rate.
+                cap = getattr(self, '_capture_fps_cap', 0) or 0
                 fps_stream = min(fps_capture, cap) if cap else fps_capture
         except Exception:
             pass
