@@ -92,6 +92,19 @@ class TestSkipVerified(unittest.TestCase):
         self.assertLess(check, body.index('self._skip_release = True'))
         self.assertLess(check, body.index('self.audio.unmute()'))
         self.assertIn('last_ocr_texts_time', body)
+        # minus 05:47: the first reads after a press lag the screen. A miss
+        # needs every read across the window; one clean read releases.
+        self.assertIn('pressed_at + 6.0', body)
+        self.assertIn('gone = True', body)
+        # A block that already ended must not leave a release behind.
+        self.assertLess(body.index('if not self.ad_detected'), body.index('self._skip_release = True'))
+
+    def test_new_block_clears_a_stale_release(self):
+        m = TestSkipRelease._blocking(self)   # starts a block
+        self.assertFalse(m._skip_release)
+        src = (ROOT / 'minus.py').read_text()
+        start = src.index('AD BLOCKING STARTED ({self._display_source_label()})')
+        self.assertIn('self._skip_release = False', src[start:start + 200])
 
     def test_retry_flag_resets_when_the_block_ends(self):
         m = TestSkipRelease._blocking(self)
