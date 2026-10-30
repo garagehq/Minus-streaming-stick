@@ -2586,21 +2586,35 @@ class Minus:
             except Exception:
                 pass
 
-        # Get FPS from ustreamer (capture)
+        # From ustreamer: capture = the HDMI input rate (set by the source,
+        # e.g. 60), stream = what Minus puts out (the source rate, or 30 while
+        # the thermal governor caps capture).
         fps_capture = 0
+        fps_stream = 0
         try:
             import urllib.request
             import json
             url = "http://localhost:9090/state"
             with urllib.request.urlopen(url, timeout=1.0) as response:
-                data = json.loads(response.read().decode('utf-8'))
-                fps_capture = data.get('result', {}).get('source', {}).get('captured_fps', 0)
+                result = json.loads(response.read().decode('utf-8')).get('result', {})
+            source = result.get('source', {})
+            fps_capture = source.get('captured_fps', 0)
+            clients = (result.get('stream', {}) or {}).get('clients_stat', {}) or {}
+            if clients:
+                fps_stream = max(c.get('fps', 0) for c in clients.values())
+            else:
+                # Nobody is streaming: report the rate the stream would run at.
+                # The cap is the thermal one (_capture_fps_cap, 0 = source
+                # rate); ustreamer's own desired_fps is the half-frame-early
+                # cutoff (25 for 30 fps, see _desired_fps_arg), not a rate.
+                cap = getattr(self, '_capture_fps_cap', 0) or 0
+                fps_stream = min(fps_capture, cap) if cap else fps_capture
         except Exception:
             pass
 
-        # For backwards compatibility, fps = display fps if available, else capture
-        fps = fps_display if fps_display > 0 else fps_capture
-        fps_source = 'display' if fps_display > 0 else 'capture'
+        # fps = display fps if a TV is attached, else the stream output rate
+        fps = fps_display if fps_display > 0 else fps_stream
+        fps_source = 'display' if fps_display > 0 else 'stream'
 
         uptime = int(time.time() - self.start_time)
 
@@ -2646,6 +2660,7 @@ class Minus:
             # System status
             'fps': fps,
             'fps_capture': fps_capture,
+            'fps_stream': fps_stream,
             'fps_display': fps_display,
             'fps_source': fps_source,  # 'display' or 'capture' (for backwards compat)
             'uptime': uptime,
@@ -5673,8 +5688,10 @@ class Minus:
                 logger.info("Loading VLM model after HDMI detected (vlm_preload=False)...")
                 vlm_preloaded = self._load_vlm_model()
 
-            # Start VLM worker thread if model is loaded (check vlm.is_ready)
-            if self.vlm.is_ready:
+            # Start VLM worker thread if model is loaded (check vlm.is_ready).
+            # Re-check self.vlm: a failed preload sets it to None while we
+            # were waiting on the join above.
+            if self.vlm and self.vlm.is_ready:
                 self.vlm_thread = threading.Thread(target=self.vlm_worker, daemon=True)
                 self.vlm_thread.start()
                 logger.info("VLM worker started (process-based with hard 2s timeout)")

@@ -885,6 +885,26 @@ class FireTVController:
             logger.warning(f"[FireTV] Unknown skip method: {method}")
             return self.send_command("select")
 
+    def is_awake(self) -> Optional[bool]:
+        """Ask Android's power manager whether the device is awake.
+
+        Returns True/False, or None when it cannot be determined (not
+        connected, ADB error, unexpected output).
+        """
+        with self._lock:
+            if not self._connected or not self._device:
+                return None
+            try:
+                out = self._device.adb_shell("dumpsys power | grep -m1 mWakefulness=") or ''
+            except Exception as e:
+                logger.debug(f"[FireTV] wakefulness query failed: {e}")
+                return None
+        if 'mWakefulness=Awake' in out:
+            return True
+        if 'mWakefulness=' in out:
+            return False   # Asleep / Dozing / Dreaming
+        return None
+
     def get_current_app(self) -> Optional[str]:
         """
         Get the currently active app package name.
