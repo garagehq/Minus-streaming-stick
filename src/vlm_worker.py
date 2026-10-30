@@ -234,20 +234,31 @@ class VLMProcess:
 
         import logging
         logger = logging.getLogger('Minus.VLM')
-        start_time = time.time()
+        # Monotonic, not wall time: at boot NTP can step the clock by days,
+        # which made this report waits like "554611.9s".
+        start_time = time.monotonic()
         logger.info(f"[VLMProcess] Waiting for model to load (PID {self.process.pid})...")
 
-        # Wait for model to load (up to 60s - model + warmup can take 40s under load)
-        if self.ready_event.wait(timeout=60.0):
-            elapsed = time.time() - start_time
-            logger.info(f"[VLMProcess] Worker ready after {elapsed:.1f}s")
-            self.is_ready = True
-            return True
-        else:
-            elapsed = time.time() - start_time
-            logger.error(f"[VLMProcess] Worker failed to become ready after {elapsed:.1f}s - killing")
-            self.kill()
-            return False
+        # Wait for model to load (up to 60s - model + warmup can take 40s under load).
+        # Poll so a worker that exits early (e.g. no Axera card plugged in) fails
+        # in seconds instead of holding startup for the full 60s on every retry.
+        while time.monotonic() - start_time < 60.0:
+            if self.ready_event.wait(timeout=0.5):
+                elapsed = time.monotonic() - start_time
+                logger.info(f"[VLMProcess] Worker ready after {elapsed:.1f}s")
+                self.is_ready = True
+                return True
+            if not self.process.is_alive():
+                elapsed = time.monotonic() - start_time
+                logger.error(f"[VLMProcess] Worker exited (code {self.process.exitcode}) "
+                             f"before becoming ready after {elapsed:.1f}s")
+                self.kill()
+                return False
+
+        elapsed = time.monotonic() - start_time
+        logger.error(f"[VLMProcess] Worker failed to become ready after {elapsed:.1f}s - killing")
+        self.kill()
+        return False
 
     def kill(self):
         """Kill the VLM worker process."""
