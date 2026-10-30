@@ -328,6 +328,10 @@ class ASRProcess:
     # signal so OCR+VLM keep blocking ads through the gap. Override via
     # MINUS_ASR_RESTART_AFTER_INFERENCES (set to 0 to disable, e.g. for
     # tests or after the upstream bug is fixed).
+    #
+    # Moonshine only: SenseVoice has no such leak, and its worker memory is
+    # bounded by WORKER_MALLOC_ENV + the per-call gc/trim (#62). Restarting
+    # it anyway cost ~2 s of ASR every ~11 min (130 times a day on minus).
     RESTART_AFTER_INFERENCES = int(
         os.environ.get('MINUS_ASR_RESTART_AFTER_INFERENCES', '500'))
 
@@ -351,12 +355,21 @@ class ASRProcess:
         # Counter for the periodic-restart leak workaround — see
         # RESTART_AFTER_INFERENCES.
         self._inferences_since_restart = 0
+        # The engine the worker runs, resolved when it is spawned (None until then).
+        self._engine = None
         # RLock (not Lock): transcribe() holds this lock and, on the hard-timeout
         # escalation path, calls restart() -> stop()/start(), which re-acquire it.
         # A plain Lock self-deadlocks there (the worker freezes mid-restart under
         # sustained load — observed as inference_count stuck + no 'killed' count).
         self._call_lock = threading.RLock()
         self._recent_latencies = deque(maxlen=20)
+
+    def _periodic_restart_due(self) -> bool:
+        """Time for the moonshine leak's periodic restart (see
+        RESTART_AFTER_INFERENCES)? Never for SenseVoice."""
+        return (self.RESTART_AFTER_INFERENCES > 0
+                and getattr(self, '_engine', None) == 'moonshine'
+                and self._inferences_since_restart >= self.RESTART_AFTER_INFERENCES)
 
     # ----- lifecycle -----
 
@@ -386,6 +399,7 @@ class ASRProcess:
             self.ready_event = Event()
             self.shutdown_event = Event()
 
+            self._engine = resolve_engine()
             self.process = Process(
                 target=_asr_worker_main,
                 args=(self.request_queue, self.response_queue,
@@ -550,9 +564,7 @@ class ASRProcess:
             if status == 'ok':
                 self._recent_latencies.append(latency)
                 self._inferences_since_restart += 1
-                if (self.RESTART_AFTER_INFERENCES > 0 and
-                        self._inferences_since_restart
-                        >= self.RESTART_AFTER_INFERENCES):
+                if self._periodic_restart_due():
                     # Periodic restart to bound the upstream moonshine_voice
                     # 0.0.59 transcript leak (~3 MB/call, no exposed free).
                     # restart() is RLock-safe (the lock was upgraded to RLock

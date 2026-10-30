@@ -69,3 +69,29 @@ def test_worker_loop_collects_after_each_reply():
     src = (ROOT / 'src' / 'asr_worker.py').read_text()
     reply = src.index("response_queue.put(('ok', text, time.time() - start))")
     assert 'gc.collect(0)' in src[reply:reply + 400]
+
+
+def _proc(engine, n):
+    p = asr_worker.ASRProcess()
+    p._engine = engine
+    p._inferences_since_restart = n
+    return p
+
+
+def test_periodic_restart_is_moonshine_only():
+    n = asr_worker.ASRProcess.RESTART_AFTER_INFERENCES
+    assert _proc('moonshine', n)._periodic_restart_due()
+    assert not _proc('moonshine', n - 1)._periodic_restart_due()
+    assert not _proc('sensevoice', n)._periodic_restart_due()
+    assert not _proc('sensevoice', 10 * n)._periodic_restart_due()
+    assert not _proc(None, n)._periodic_restart_due()
+
+
+def test_start_records_the_engine(monkeypatch):
+    monkeypatch.setattr(asr_worker, 'resolve_engine', lambda: 'moonshine')
+    monkeypatch.setattr(asr_worker, 'Process', _FakeProcess)
+    monkeypatch.setattr(asr_worker.ASRProcess, 'WORKER_LOAD_TIMEOUT', 0.01)
+    p = asr_worker.ASRProcess()
+    monkeypatch.setattr(p, '_kill_process_locked', lambda: None)
+    p.start()
+    assert p._engine == 'moonshine'
