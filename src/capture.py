@@ -79,6 +79,32 @@ _BLOCKING_CHECK_INTERVAL = 1.0  # Check blocking state every 1 second (glitches 
 _http_session = None
 _session_lock = threading.Lock()
 
+# Failed snapshots come in streaks: every source sleep, restart or HDMI drop
+# times out /snapshot until ustreamer has frames again (44 ERROR lines a night
+# on minus, every one of them a sleep or a restart; the health monitor reports
+# the signal loss itself). Log a streak once when it starts and once when it
+# ends.
+_fail_lock = threading.Lock()
+_fail_streak = 0
+
+
+def _note_capture_failure(e):
+    global _fail_streak
+    with _fail_lock:
+        _fail_streak += 1
+        first = _fail_streak == 1
+    if first:
+        logger.warning(f"Snapshot capture failing: {e} (repeats are not logged until it recovers)")
+
+
+def _note_capture_success():
+    global _fail_streak
+    with _fail_lock:
+        n, _fail_streak = _fail_streak, 0
+    if n:
+        logger.info(f"Snapshot capture recovered after {n} failed attempt{'s' if n != 1 else ''}")
+
+
 def _get_http_session():
     """Get or create a persistent HTTP session with connection pooling."""
     global _http_session
@@ -226,9 +252,10 @@ class UstreamerCapture:
                     h, w = img.shape[:2]
                     if h > 540 or w > 960:
                         img = cv2.resize(img, (960, 540), interpolation=cv2.INTER_AREA)
+                    _note_capture_success()
                     return img
 
             return None
         except Exception as e:
-            logger.error(f"Snapshot capture error: {e}")
+            _note_capture_failure(e)
             return None
