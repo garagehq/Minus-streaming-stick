@@ -2847,6 +2847,28 @@ class Minus:
             return True
         return self._compare_frames(frame, self.vlm_prev_frame) > self.scene_change_threshold
 
+    VLM_CORROBORATE_CONFIDENCE = 0.95
+    VLM_CORROBORATE_MAX_AGE_S = 3.0
+
+    def _vlm_recent_confident_ad(self, now: float = None) -> bool:
+        """VLM's latest verdict is a near-certain AD from the last few seconds.
+
+        Corroboration for an OCR keyword that would otherwise wait a second
+        frame (bare 'sponsored', 'order now', ...). vlm_ad_detected alone
+        didn't count it: the sliding window still held the show's NO-AD votes,
+        so a Fanatics ad with VLM at p>=0.99 from its first frame and OCR
+        reading 'Sponsored' on alternate frames blocked ~6 s late (minus,
+        2026-10-30 19:04). Needs both signals on the same moment, so a 1-frame
+        OCR artifact still needs VLM to be wrong too, at >=0.95.
+        """
+        hist = getattr(self, 'vlm_decision_history', None)
+        if not hist:
+            return False
+        ts, is_ad, conf = hist[-1][0], hist[-1][1], (hist[-1][2] if len(hist[-1]) > 2 else 0.0)
+        now = time.time() if now is None else now
+        return (bool(is_ad) and conf >= self.VLM_CORROBORATE_CONFIDENCE
+                and now - ts <= self.VLM_CORROBORATE_MAX_AGE_S)
+
     def _add_vlm_decision(self, is_ad: bool, confidence: float = 0.75):
         """Add a VLM decision to the sliding window history with confidence."""
         now = time.time()
@@ -5276,6 +5298,7 @@ class Minus:
                         for kw in keywords_found)
                     fast_fire = (definitive_ocr
                                  or self.vlm_ad_detected
+                                 or self._vlm_recent_confident_ad()
                                  or self._asr_verdict() == 'confirm')
                     required_frames = (1 if fast_fire
                                        else self.OCR_TRANSIENCE_MIN_FRAMES)

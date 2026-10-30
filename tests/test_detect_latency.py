@@ -73,6 +73,39 @@ class TestSendToPhone(unittest.TestCase):
         self.assertTrue(hasattr(Minus, '__init__'))
 
 
+class TestVLMCorroboratesOCR(unittest.TestCase):
+    """An OCR keyword fast-fires when VLM's latest verdict is a confident AD."""
+
+    def _m(self, hist):
+        from minus import Minus
+        m = Minus.__new__(Minus)
+        m.vlm_decision_history = hist
+        return m
+
+    def test_recent_confident_ad_counts(self):
+        self.assertTrue(self._m([(100.0, False, 0.99), (101.0, True, 0.997)])
+                        ._vlm_recent_confident_ad(now=102.0))
+
+    def test_low_confidence_does_not(self):
+        self.assertFalse(self._m([(101.0, True, 0.80)])._vlm_recent_confident_ad(now=102.0))
+
+    def test_stale_verdict_does_not(self):
+        self.assertFalse(self._m([(95.0, True, 0.99)])._vlm_recent_confident_ad(now=102.0))
+
+    def test_latest_no_ad_wins(self):
+        self.assertFalse(self._m([(100.0, True, 0.99), (101.5, False, 0.99)])
+                         ._vlm_recent_confident_ad(now=102.0))
+
+    def test_no_history(self):
+        self.assertFalse(self._m([])._vlm_recent_confident_ad(now=102.0))
+
+    def test_wired_into_the_transience_guard(self):
+        src = (ROOT / 'minus.py').read_text()
+        guard = src[src.index('fast_fire = (definitive_ocr'):]
+        guard = guard[:guard.index('required_frames')]
+        self.assertIn('_vlm_recent_confident_ad()', guard)
+
+
 class TestDisplayLatencyInAvSync(unittest.TestCase):
     """Lip sync counts the display pipeline's measured latency."""
 
