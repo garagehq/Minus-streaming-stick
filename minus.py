@@ -851,6 +851,10 @@ class Minus:
             'skip ad (fuzzy)', 'skip ad (fuzzy-spad)', 'skip ad (fuzzy-foad)',
             'video will play after ad',
             'visit advertiser', 'visitadvertiser',
+            # YouTube TV ad button; ad-only (see ocr.py AD_KEYWORDS_EXACT).
+            # Being here also makes it DEFINITIVE: blocks on the first frame
+            # instead of waiting a second frame as bare 'sponsored' does.
+            'send to phone',
             'ad X of Y', 'ad countdown',
             'ad with timestamp', 'ad with timestamp (cross-element)',
             # 'sponsored' promoted to STRONG per product decision (2026-05):
@@ -3119,8 +3123,15 @@ class Minus:
         except Exception:
             pass
         display = av_sync.connected_display() or {}
+        pipeline_ms = None
+        ab = getattr(self, 'ad_blocker', None)
+        if ab is not None and hasattr(ab, 'get_display_latency_ms'):
+            try:
+                pipeline_ms = ab.get_display_latency_ms()
+            except Exception:
+                pipeline_ms = None
         return {
-            'ustreamer_ms': ms, 'source_fps': fps,
+            'ustreamer_ms': ms, 'source_fps': fps, 'display_pipeline_ms': pipeline_ms,
             'display_id': display.get('id'), 'display_name': display.get('name'),
             'display_video_ms': display.get('video_ms'), 'display_audio_ms': display.get('audio_ms'),
         }

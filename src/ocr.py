@@ -216,6 +216,10 @@ class PaddleOCR:
         'order now', 'sign up', 'subscribe now',
         'promoted',  # Twitter/social media promoted ads
         'visit advertiser', 'visitadvertiser',  # YouTube pre-roll CTA
+        # YouTube TV ad UI button. Only seen on ads: in 7 days of OCR on minus
+        # (2026-10-23..30) 19,707 frames had it and every one outside a block
+        # was an ad (other ad keyword on screen, or an ad by its text).
+        'send to phone',
         # Note: 'promo' removed - too broad, matches 'Promote' button
         # Spanish keywords
         'patrocinado', 'anuncio', 'publicidad',
