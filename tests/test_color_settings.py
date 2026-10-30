@@ -459,11 +459,13 @@ class TestRestartPenalize(unittest.TestCase):
         mock_run.assert_not_called()
 
     def test_penalized_pkills_after_three_failures(self):
-        b = self._make_restartable(failures=2)  # increments to 3 -> pkill
-        with patch('ad_blocker.time.sleep'), patch('subprocess.run') as mock_run:
+        b = self._make_restartable(failures=2)  # increments to 3 -> ustreamer reset
+        b.ustreamer_port = 9090
+        with patch('ad_blocker.time.sleep'), patch('ustreamer_proc.kill_ustreamer') as kill:
             b._restart_pipeline(penalize=True)
-        self.assertTrue(mock_run.called)
-        self.assertIn('ustreamer', mock_run.call_args[0][0])
+        # By path and port (ustreamer's process name is "main", so a name-only
+        # pkill matched nothing).
+        kill.assert_called_once_with(9090)
 
     def test_restart_thread_passes_penalize_through(self):
         b = DRMAdBlocker.__new__(DRMAdBlocker)
