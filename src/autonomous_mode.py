@@ -500,6 +500,26 @@ class AutonomousMode:
         else:
             return DEVICE_TYPE_FIRE_TV  # Default to Fire TV for backwards compatibility
 
+    def _blocking_active(self) -> bool:
+        """Is the ad-blocking overlay up right now?
+
+        set_ad_blocker() is given the Minus instance (minus.py), which has no
+        is_visible of its own: the overlay state lives on its .ad_blocker
+        (DRMAdBlocker). Every guard that read getattr(self._ad_blocker,
+        'is_visible') therefore always saw False, so the "mid ad-block"
+        guards never fired: a music-mode steer ran mid-block on minus
+        (2026-10-30 02:26). Check both, so a bare DRMAdBlocker works too.
+        """
+        b = self._ad_blocker
+        if b is None:
+            return False
+        if getattr(b, 'is_visible', False):
+            return True
+        inner = getattr(b, 'ad_blocker', None)
+        # A real DRMAdBlocker.is_visible is a bool; `is True` keeps test
+        # doubles' auto-attributes from reading as "blocking".
+        return inner is not None and getattr(inner, 'is_visible', False) is True
+
     def set_ad_blocker(self, blocker):
         """Set ad blocker reference."""
         self._ad_blocker = blocker
@@ -1107,7 +1127,7 @@ class AutonomousMode:
         try:
             # Mid-block the OCR text is the ad's, which says nothing about
             # the underlying video (mirrors the guard in _check_music_drift).
-            if getattr(self._ad_blocker, 'is_visible', False):
+            if self._blocking_active():
                 return
             combined = ' '.join(str(t) for t in texts)
             if self._looks_long_form(combined):
@@ -1190,7 +1210,7 @@ class AutonomousMode:
         try:
             if self._ad_blocker is None:
                 return False
-            if getattr(self._ad_blocker, 'is_visible', False):
+            if self._blocking_active():
                 return False  # mid ad-block: OCR text is the ad, not the video
             if force_text is not None:
                 combined = force_text.lower()
@@ -1765,7 +1785,7 @@ class AutonomousMode:
         try:
             # Don't treat as home screen if ad blocker is actively blocking
             # (we know it's an ad, not home screen).
-            if self._ad_blocker and getattr(self._ad_blocker, 'is_visible', False):
+            if self._blocking_active():
                 return False
 
             if self._ad_blocker and hasattr(self._ad_blocker, 'last_ocr_texts'):
@@ -1818,7 +1838,7 @@ class AutonomousMode:
             combined = ' '.join(str(t) for t in texts).lower()
 
             # Ad blocker actively blocking — definitely not a benign overlay.
-            if getattr(self._ad_blocker, 'is_visible', False):
+            if self._blocking_active():
                 return False
 
             # 1) at least one overlay-specific keyword
@@ -1994,7 +2014,7 @@ class AutonomousMode:
             # Skip while the blocking overlay is active — an ad is being
             # handled and a Back press could exit the underlying video.
             if self._frame_capture and not (
-                self._ad_blocker and getattr(self._ad_blocker, 'is_visible', False)
+                self._blocking_active()
             ):
                 edges1 = self._vertical_panel_edges(self._frame_capture.capture())
                 if edges1:
@@ -2099,7 +2119,7 @@ class AutonomousMode:
             # If the ad blocker is actively blocking, this is an *ad* for
             # YouTube TV — let ad handling deal with it. Pressing Back
             # mid-ad could exit the underlying video.
-            if self._ad_blocker and getattr(self._ad_blocker, 'is_visible', False):
+            if self._blocking_active():
                 return False
 
             if not self._ad_blocker or not hasattr(self._ad_blocker, 'last_ocr_texts'):
@@ -2142,7 +2162,7 @@ class AutonomousMode:
             # not the Roku home screen (observed live 2026-07-02: an ad's
             # "Watch now" CTA matched this check mid-block and relaunched
             # YouTube during a playing video).
-            if self._ad_blocker and getattr(self._ad_blocker, 'is_visible', False):
+            if self._blocking_active():
                 return False
 
             if self._ad_blocker and hasattr(self._ad_blocker, 'last_ocr_texts'):
