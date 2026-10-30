@@ -4,6 +4,7 @@ OCR Worker Process - runs OCR in separate process for hard timeout capability.
 This allows us to actually KILL stuck OCR inference instead of just timing out.
 """
 
+import gc
 import os
 import re
 import sys
@@ -19,8 +20,10 @@ except RuntimeError:
     pass  # Already set
 
 
-# Heap upkeep (minus, 2026-10-29 soak): the worker's RSS grew ~110 MB/h. Most
-# of it was freed-but-unreturned glibc heap from the RKNN inference calls:
+# Heap upkeep (minus, 2026-10-29 soak): the worker's RSS grew ~110 MB/h. The
+# loop's gc.collect(0) after each reply frees rknnlite's per-call buffers,
+# which sit in reference cycles until a collection. Before that, most of the
+# growth was freed-but-unreturned glibc heap from the RKNN inference calls:
 # malloc_trim(0) on the live worker gave back 109 MB at once. A smaller part
 # (~30 MB/h) survived the trim. So the worker trims every TRIM_EVERY requests
 # (~0.7 ms), and OCRProcess restarts it between requests once its RSS is still
@@ -144,6 +147,7 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
                             import numpy as np
                             warmup_img = np.random.randint(0, 255, (540, 960, 3), dtype=np.uint8)
                             _ = ocr.ocr(warmup_img)
+                            gc.collect(0)
                             last_inference_time = time.time()
                             logger.debug("[OCRWorker] Keepalive inference completed")
                         except:
@@ -178,6 +182,11 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
                     if served % TRIM_EVERY == 0:
                         _trim_heap()
                 response_queue.put(reply)
+                # rknnlite's inference() leaves its ctypes input/output
+                # buffers in reference cycles; without a collection they pile
+                # up until Python's cyclic GC runs (worker swung 60-580 MB
+                # over a soak, 2026-10-28). ~2 ms, after the reply.
+                gc.collect(0)
 
             except Exception as e:
                 logger.error(f"[OCRWorker] Error processing request: {e}")

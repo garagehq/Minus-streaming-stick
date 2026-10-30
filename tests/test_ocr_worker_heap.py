@@ -67,6 +67,12 @@ class TestWorkerTrims(unittest.TestCase):
         # The trim for request N runs before reply N is sent.
         self.assertEqual(replies_before_trim, [ow.TRIM_EVERY - 1, 2 * ow.TRIM_EVERY - 1])
 
+    def test_collects_cycles_after_every_reply(self):
+        with patch.object(ow.gc, 'collect') as collect:
+            self.run_worker(5)
+        self.assertGreaterEqual(collect.call_count, 5)
+        self.assertTrue(all(c.args == (0,) for c in collect.call_args_list))
+
     def test_no_trim_below_trim_every(self):
         self.assertNotIn('trim', self.run_worker(ow.TRIM_EVERY - 1))
 
