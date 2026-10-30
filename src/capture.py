@@ -86,6 +86,10 @@ _session_lock = threading.Lock()
 # ends.
 _fail_lock = threading.Lock()
 _fail_streak = 0
+# urllib3 logs each of the session's internal retries as a WARNING ("Retrying
+# (Retry(total=1, ...)) after connection broken by ReadTimeoutError"), 2 per
+# failed snapshot; the streak above already reports the outage.
+logging.getLogger('urllib3.connectionpool').setLevel(logging.ERROR)
 
 
 def _note_capture_failure(e):
