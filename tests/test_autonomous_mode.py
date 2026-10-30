@@ -2333,6 +2333,36 @@ class TestShortsTVLayout(unittest.TestCase):
             frame[:, mx0:] = block
         return frame
 
+    def test_blurred_backdrop_panel_detected(self):
+        """A real backdrop is a blur of the video, not a flat colour."""
+        import cv2
+        import numpy as np
+        mode = _make_mode()
+        try:
+            frame = self._tv_shorts_frame()
+            rng = np.random.default_rng(3)
+            x0 = int(frame.shape[1] * 0.305)
+            noise = rng.integers(20, 80, (frame.shape[0], x0, 3)).astype(np.uint8)
+            frame[:, :x0] = cv2.GaussianBlur(noise, (0, 0), 12)
+            self.assertTrue(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
+    def test_sharp_scenery_left_of_the_panel_is_not_shorts(self):
+        """minus 2026-10-30: a lit performer between dark speaker cabinets
+        matched the edge geometry and a Shorts exit backed out of a playing
+        music video. Real scenery left of the "panel" means it isn't one."""
+        import numpy as np
+        mode = _make_mode()
+        try:
+            frame = self._tv_shorts_frame()
+            rng = np.random.default_rng(5)
+            x0 = int(frame.shape[1] * 0.305)
+            frame[:, :x0] = rng.integers(10, 90, (frame.shape[0], x0, 3)).astype(np.uint8)
+            self.assertFalse(mode._is_vertical_video_frame(frame))
+        finally:
+            _cleanup_mode(mode)
+
     def test_tinted_backdrop_panel_detected(self):
         """The exact case that went undetected: non-black backdrop."""
         mode = _make_mode()
