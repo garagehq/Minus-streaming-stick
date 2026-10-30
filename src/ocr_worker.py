@@ -180,6 +180,7 @@ def _ocr_worker_main(request_queue, response_queue, ready_event, shutdown_event)
                     # Trim before replying, so OCRProcess's RSS check on
                     # this reply sees the trimmed heap.
                     if served % TRIM_EVERY == 0:
+                        gc.collect(0)   # so the trim also returns what it frees
                         _trim_heap()
                 response_queue.put(reply)
                 # rknnlite's inference() leaves its ctypes input/output
