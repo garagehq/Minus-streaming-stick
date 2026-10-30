@@ -394,22 +394,8 @@ class TestUnmuteWatchdogConfirmation(unittest.TestCase):
         hm.minus.ad_blocker.is_visible = blocking
         return hm
 
-    def _tick(self, hm):
-        """Mirror of the watchdog block in health.py::_check_health."""
-        import logging
-        logger = logging.getLogger('test')
-        if hm.minus.audio and hm.minus.ad_blocker:
-            is_blocking = hm.minus.ad_blocker.is_visible
-            is_muted = hm.minus.audio.is_muted
-            if not is_blocking and is_muted:
-                if hm._muted_not_blocking_seen:
-                    logger.warning("forcing unmute")
-                    hm.minus.audio.unmute()
-                    hm._muted_not_blocking_seen = False
-                else:
-                    hm._muted_not_blocking_seen = True
-            else:
-                hm._muted_not_blocking_seen = False
+    def _tick(self, hm, signal=True):
+        hm._audio_unmute_watchdog(MagicMock(hdmi_signal=signal))
 
     def test_single_observation_does_not_fire(self):
         hm = self._monitor(blocking=False, muted=True)
@@ -437,6 +423,88 @@ class TestUnmuteWatchdogConfirmation(unittest.TestCase):
         for _ in range(5):
             self._tick(hm)
         hm.minus.audio.unmute.assert_not_called()
+
+    def test_signal_loss_mute_is_left_alone(self):
+        """_on_hdmi_lost mutes on purpose; with no TV the NO SIGNAL screen
+        never sets is_visible, and the watchdog used to unmute 10s in."""
+        hm = self._monitor(blocking=False, muted=True)
+        for _ in range(5):
+            self._tick(hm, signal=False)
+        hm.minus.audio.unmute.assert_not_called()
+
+    def test_stuck_mute_after_restore_still_caught(self):
+        hm = self._monitor(blocking=False, muted=True)
+        self._tick(hm, signal=False)
+        self._tick(hm)
+        hm.minus.audio.unmute.assert_not_called()   # first strike only
+        self._tick(hm)
+        hm.minus.audio.unmute.assert_called_once()
+
+
+# =========================================================================
+# NO SIGNAL enforcement without an HDMI-TX display (Oct 2026)
+# =========================================================================
+
+class TestNoSignalEnforcementWithoutDisplay(unittest.TestCase):
+    """With the input lost and no TV on HDMI-TX, start_no_signal_mode() can't
+    build a pipeline, so the enforcement re-ran _on_hdmi_lost every 5s (DPMS
+    cycle, modetest probe, audio mute) for the whole signal loss."""
+
+    def _monitor(self, output_connected, no_signal_active=False):
+        from health import HealthMonitor
+        hm = HealthMonitor.__new__(HealthMonitor)
+        hm.startup_grace_period = 30
+        hm._hdmi_lost_time = 0
+        hm._last_no_signal_trigger = 0
+        hm._no_signal_retry_interval = 3.0
+        hm._on_hdmi_lost = MagicMock()
+        hm._check_hdmi_output_connected = MagicMock(return_value=output_connected)
+        hm._is_no_signal_mode_active = MagicMock(return_value=no_signal_active)
+        return hm
+
+    def _tick(self, hm, signal=False, uptime=100):
+        hm._enforce_no_signal_mode(MagicMock(hdmi_signal=signal), uptime)
+
+    def test_no_retrigger_without_display(self):
+        hm = self._monitor(output_connected=False)
+        for _ in range(5):
+            self._tick(hm)
+        hm._on_hdmi_lost.assert_not_called()
+
+    def test_lost_time_still_stamped_without_display(self):
+        """Signal absent at startup: restore must still fire later."""
+        hm = self._monitor(output_connected=False)
+        self._tick(hm)
+        self.assertGreater(hm._hdmi_lost_time, 0)
+
+    def test_retrigger_with_display_when_screen_died(self):
+        hm = self._monitor(output_connected=True)
+        self._tick(hm)
+        hm._on_hdmi_lost.assert_called_once()
+
+    def test_retrigger_rate_limited(self):
+        hm = self._monitor(output_connected=True)
+        self._tick(hm)
+        self._tick(hm)
+        hm._on_hdmi_lost.assert_called_once()
+
+    def test_tv_attached_mid_loss_brings_no_signal_up(self):
+        hm = self._monitor(output_connected=False)
+        self._tick(hm)
+        hm._check_hdmi_output_connected.return_value = True
+        self._tick(hm)
+        hm._on_hdmi_lost.assert_called_once()
+
+    def test_nothing_when_no_signal_screen_up(self):
+        hm = self._monitor(output_connected=True, no_signal_active=True)
+        self._tick(hm)
+        hm._on_hdmi_lost.assert_not_called()
+
+    def test_nothing_with_signal_or_in_grace(self):
+        hm = self._monitor(output_connected=True)
+        self._tick(hm, signal=True)
+        self._tick(hm, uptime=10)
+        hm._on_hdmi_lost.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -235,29 +235,7 @@ class HealthMonitor:
 
         self._last_hdmi_signal = status.hdmi_signal
 
-        # Continuous NO SIGNAL mode enforcement
-        # Even if we already triggered _on_hdmi_lost, the display might have failed or crashed
-        # Check if signal is lost but NO SIGNAL mode isn't active, and re-trigger if needed
-        if not status.hdmi_signal and uptime > self.startup_grace_period:
-            now = time.time()
-            no_signal_active = self._is_no_signal_mode_active()
-
-            if not no_signal_active:
-                # NO SIGNAL mode is not active but should be
-                time_since_last_trigger = now - self._last_no_signal_trigger
-                if time_since_last_trigger >= self._no_signal_retry_interval:
-                    logger.warning(f"[HealthMonitor] Signal lost but NO SIGNAL mode not active - re-triggering")
-                    self._last_no_signal_trigger = now
-                    # Also stamp lost-time so a subsequent restoration fires
-                    # _on_hdmi_restored. Without this, when the signal was
-                    # already absent at startup (no lost→present transition
-                    # ever recorded), `_hdmi_lost_time` stays 0 and the
-                    # restored callback is gated out — leaving the lost flag
-                    # set on consumers (e.g. detect loops) forever.
-                    if self._hdmi_lost_time == 0:
-                        self._hdmi_lost_time = now
-                    if self._on_hdmi_lost:
-                        self._on_hdmi_lost()
+        self._enforce_no_signal_mode(status, uptime)
 
         # HDMI-TX output monitoring (detect TV disconnect/reconnect)
         # When TV restarts, the kmssink pipeline loses its DRM connection but keeps "running"
@@ -363,31 +341,7 @@ class HealthMonitor:
                 if self._on_video_pipeline_stall:
                     self._on_video_pipeline_stall()
 
-        # Audio unmute watchdog - ensure audio is not muted when not blocking
-        # This prevents audio from getting stuck muted due to race conditions or bugs.
-        #
-        # ad_blocker.hide() now unmutes synchronously in the same locked
-        # section that clears is_visible, so this should never fire. The two
-        # reads below are still not atomic with respect to each other, so
-        # require the condition to hold across two consecutive checks before
-        # acting — that way a sub-millisecond straddle can't produce a
-        # spurious WARN (13 such warnings in 48h before the hide() fix).
-        # A genuine stuck mute is still recovered, just one cycle later.
-        if self.minus.audio and self.minus.ad_blocker:
-            is_blocking = self.minus.ad_blocker.is_visible
-            is_muted = self.minus.audio.is_muted
-
-            if not is_blocking and is_muted:
-                if self._muted_not_blocking_seen:
-                    logger.warning("[HealthMonitor] Audio stuck muted while not blocking - forcing unmute")
-                    self.minus.audio.unmute()
-                    self._muted_not_blocking_seen = False
-                else:
-                    self._muted_not_blocking_seen = True
-                    logger.debug("[HealthMonitor] Muted while not blocking - "
-                                 "confirming on next check")
-            else:
-                self._muted_not_blocking_seen = False
+        self._audio_unmute_watchdog(status)
 
         # VLM health
         if status.vlm_consecutive_timeouts >= self.vlm_timeout_threshold:
@@ -431,6 +385,75 @@ class HealthMonitor:
             f"mem={status.memory_percent:.0f}% "
             f"disk={status.disk_free_mb:.0f}MB"
         )
+
+    def _enforce_no_signal_mode(self, status, uptime):
+        """Re-show NO SIGNAL while the input is lost, if the display died.
+
+        Even after _on_hdmi_lost, the NO SIGNAL pipeline can crash or fail
+        to start; re-trigger it every _no_signal_retry_interval. Skipped
+        while no HDMI-TX output is connected: start_no_signal_mode() can't
+        build a pipeline without one, and each re-trigger re-ran the whole
+        _on_hdmi_lost (DPMS cycle + modetest probe + audio mute) every 5s for
+        the whole signal loss. The output-reconnect path below and this
+        check (on its next tick) bring NO SIGNAL up once a TV appears.
+        """
+        if status.hdmi_signal or uptime <= self.startup_grace_period:
+            return
+        if self._is_no_signal_mode_active():
+            return
+        now = time.time()
+        # Stamp lost-time so a subsequent restoration fires
+        # _on_hdmi_restored. Without this, when the signal was already
+        # absent at startup (no lost→present transition ever recorded),
+        # `_hdmi_lost_time` stays 0 and the restored callback is gated
+        # out — leaving the lost flag set on consumers (e.g. detect loops)
+        # forever.
+        if self._hdmi_lost_time == 0:
+            self._hdmi_lost_time = now
+        if not self._check_hdmi_output_connected():
+            return
+        if now - self._last_no_signal_trigger >= self._no_signal_retry_interval:
+            logger.warning("[HealthMonitor] Signal lost but NO SIGNAL mode not active - re-triggering")
+            self._last_no_signal_trigger = now
+            if self._on_hdmi_lost:
+                self._on_hdmi_lost()
+
+    def _audio_unmute_watchdog(self, status):
+        """Unmute audio left muted while nothing is blocking.
+
+        Catches audio stuck muted by race conditions or bugs.
+        ad_blocker.hide() unmutes synchronously in the same locked section
+        that clears is_visible, so this should never fire. The two reads
+        below are still not atomic with respect to each other, so the
+        condition must hold across two consecutive checks before acting —
+        a sub-millisecond straddle can't produce a spurious WARN (13 such
+        warnings in 48h before the hide() fix). A genuine stuck mute is
+        still recovered, just one cycle later.
+
+        Not while the HDMI input is lost: _on_hdmi_lost mutes on purpose
+        and _on_hdmi_restored unmutes. With a TV attached the NO SIGNAL
+        screen sets is_visible and hid that mute from this check; without
+        one, this unmuted it 10s into every signal loss.
+        """
+        if not (self.minus.audio and self.minus.ad_blocker):
+            return
+        if not status.hdmi_signal:
+            self._muted_not_blocking_seen = False
+            return
+        is_blocking = self.minus.ad_blocker.is_visible
+        is_muted = self.minus.audio.is_muted
+
+        if not is_blocking and is_muted:
+            if self._muted_not_blocking_seen:
+                logger.warning("[HealthMonitor] Audio stuck muted while not blocking - forcing unmute")
+                self.minus.audio.unmute()
+                self._muted_not_blocking_seen = False
+            else:
+                self._muted_not_blocking_seen = True
+                logger.debug("[HealthMonitor] Muted while not blocking - "
+                             "confirming on next check")
+        else:
+            self._muted_not_blocking_seen = False
 
     def _is_no_signal_mode_active(self) -> bool:
         """Check if the NO SIGNAL display mode is currently active.
