@@ -262,8 +262,44 @@ class HealthMonitor:
             else:
                 self._muted_not_blocking_seen = False
 
+    # Main-process heap upkeep. The process's RSS climbed ~80 MB/h with the
+    # display pipeline running (312 -> 537 MB in 2.5 h on minus, 2026-10-30),
+    # almost all of it in glibc's per-thread arenas: malloc_trim(0) on the
+    # live process gave back 112 MB at once. Trim periodically from this
+    # thread; it only touches free memory.
+    HEAP_TRIM_INTERVAL_S = 300.0
+
+    def _trim_process_heap(self, now=None):
+        """malloc_trim(0) every HEAP_TRIM_INTERVAL_S. Returns MB freed, or
+        None when it didn't run. Never raises."""
+        now = time.time() if now is None else now
+        if now - getattr(self, '_last_heap_trim', 0.0) < self.HEAP_TRIM_INTERVAL_S:
+            return None
+        self._last_heap_trim = now
+        try:
+            import ctypes
+
+            def rss_mb():
+                with open('/proc/self/status') as f:
+                    for line in f:
+                        if line.startswith('VmRSS:'):
+                            return int(line.split()[1]) / 1024.0
+                return 0.0
+            before, t0 = rss_mb(), time.monotonic()
+            ctypes.CDLL('libc.so.6').malloc_trim(0)
+            ms, freed = (time.monotonic() - t0) * 1000.0, before - rss_mb()
+            if freed >= 32:
+                logger.info(f"[HealthMonitor] Heap trim returned {freed:.0f} MB to the OS ({ms:.0f} ms)")
+            else:
+                logger.debug(f"[HealthMonitor] Heap trim: {freed:.0f} MB ({ms:.0f} ms)")
+            return freed
+        except Exception as e:
+            logger.debug(f"[HealthMonitor] heap trim failed: {e}")
+            return None
+
     def _check_and_recover(self):
         """Check health and trigger recovery if needed."""
+        self._trim_process_heap()
         # Refresh cached HDMI-TX audio link state before building status.
         # Runs amixer subprocesses; only done here (5s loop), never in get_status().
         self._update_hdmi_tx_audio_link_cache()
