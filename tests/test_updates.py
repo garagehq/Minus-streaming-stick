@@ -36,6 +36,12 @@ def real_clock(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_systemd_dir(monkeypatch, tmp_path):
+    """The updater's unit drop-in must never touch /etc/systemd/system here."""
+    monkeypatch.setenv('MINUS_SYSTEMD_DIR', str(tmp_path / 'systemd'))
+
+
+@pytest.fixture(autouse=True)
 def no_github(monkeypatch):
     """No GitHub calls unless a test sets releases."""
     monkeypatch.setattr(updates, 'latest_github_release', lambda slug: None)
@@ -727,3 +733,41 @@ def test_stop_runs_on_the_main_thread_not_in_the_handler(minus_importable):
 def test_service_stops_minus_py_only():
     unit = (ROOT / 'minus.service').read_text()
     assert 'KillMode=mixed' in unit and 'TimeoutStopSec=30' in unit
+
+
+# ------------------------------------------------------------ unit drop-in
+def _mu():
+    import importlib
+    sys.path.insert(0, str(ROOT / 'tools'))
+    return importlib.import_module('minus_update')
+
+
+def test_dropin_installed_once_and_reloads(tmp_path, monkeypatch):
+    mu = _mu()
+    calls = []
+    monkeypatch.setattr(mu.subprocess, 'run', lambda cmd, **kw: calls.append(cmd))
+    logs = []
+    assert mu.ensure_unit_dropin(log=logs.append) is True
+    conf = tmp_path / 'systemd' / f'{mu.SERVICE}.service.d' / 'clean-stop.conf'
+    assert 'KillMode=mixed' in conf.read_text() and 'TimeoutStopSec=30' in conf.read_text()
+    assert ['systemctl', 'daemon-reload'] in calls
+    calls.clear()
+    assert mu.ensure_unit_dropin(log=logs.append) is False   # already current
+    assert calls == []
+
+
+def test_dropin_failure_never_blocks_the_update(monkeypatch, tmp_path):
+    mu = _mu()
+    blocker = tmp_path / 'not-a-dir'
+    blocker.write_text('')
+    monkeypatch.setenv('MINUS_SYSTEMD_DIR', str(blocker))
+    logs = []
+    assert mu.ensure_unit_dropin(log=logs.append) is False
+    assert any('could not install' in l for l in logs)
+
+
+def test_dropin_matches_the_repo_unit():
+    mu = _mu()
+    unit = (ROOT / 'minus.service').read_text()
+    for line in ('KillMode=mixed', 'TimeoutStopSec=30'):
+        assert line in unit and line in mu.UNIT_DROPIN

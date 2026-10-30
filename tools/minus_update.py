@@ -89,6 +89,39 @@ def service(action):
     sh('systemctl', action, SERVICE, timeout=180)
 
 
+# Unit settings existing boxes need but only install.sh would bring (it copies
+# minus.service). A drop-in keeps local edits to the installed unit (e.g. an
+# older PYTHONPATH) and is harmless if an update is rolled back.
+UNIT_DROPIN = (
+    "# Written by tools/minus_update.py (see minus.service).\n"
+    "[Service]\n"
+    "# SIGTERM to minus.py only; it stops its children (ustreamer, OCR/ASR\n"
+    "# workers) itself, in order. With the default every child got SIGTERM at\n"
+    "# once, which looked like HDMI loss and respawned workers mid-stop.\n"
+    "KillMode=mixed\n"
+    "TimeoutStopSec=30\n"
+)
+
+
+def ensure_unit_dropin(log=print):
+    """Install the clean-stop drop-in if it is missing or stale. Returns True
+    if it changed (systemd was reloaded). Never raises: a box that can't take
+    it still updates, it just stops the old way."""
+    systemd_dir = Path(os.environ.get('MINUS_SYSTEMD_DIR', '/etc/systemd/system'))
+    path = systemd_dir / f'{SERVICE}.service.d' / 'clean-stop.conf'
+    try:
+        if path.exists() and path.read_text() == UNIT_DROPIN:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(UNIT_DROPIN)
+        subprocess.run(['systemctl', 'daemon-reload'], timeout=60, capture_output=True)
+        log(f'{SERVICE}.service: installed {path.name} (KillMode=mixed, TimeoutStopSec=30)')
+        return True
+    except Exception as e:
+        log(f'{SERVICE}.service: could not install {path} ({e}); continuing')
+        return False
+
+
 def service_failed():
     return subprocess.run(['systemctl', 'is-failed', '--quiet', SERVICE],
                           timeout=30).returncode == 0
@@ -241,6 +274,7 @@ def phase2(run):
     elif model.get('error'):
         run.log(f"VLM model: check failed ({model['error']}) — leaving it as it is")
 
+    ensure_unit_dropin(log=run.log)
     run.log(f'Restarting {SERVICE}...')
     backup = None
     try:
