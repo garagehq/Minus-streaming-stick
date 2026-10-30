@@ -3879,7 +3879,11 @@ class Minus:
             # caught up with yet (audio drops the instant playback stops).
             if self._playback_looks_paused():
                 self.ad_clock_stats['pause_override'] += 1
-                logger.info("[AdClock] playback looks paused — releasing the hold")
+                # Rate-limited like the hold message: this is asked on every
+                # tick, and logged 6x in one second on minus (2026-10-30).
+                if now - getattr(self, '_ad_clock_pause_log_last', 0.0) >= 5.0:
+                    self._ad_clock_pause_log_last = now
+                    logger.info("[AdClock] playback looks paused — releasing the hold")
                 return False
             self.ad_clock_stats['holds'] += 1
             # Rate-limited: this fires on every OCR cycle of a held block.
