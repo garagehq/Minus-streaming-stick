@@ -830,6 +830,7 @@ class Minus:
         # active. That block was judged on the paused frame, so the next
         # _update_blocking_state ends it instead of holding it on new content.
         self._static_resume_release = False
+        self._skip_release = False   # set by the skip thread; the next tick ends the block
 
         # Strong-ad-signal override for static suppression. Some video ads
         # (Michelob "Skip MI 15", graphic banner ads, etc.) have so little
@@ -4266,6 +4267,12 @@ class Minus:
                         f"[Static] Screen resumed — ending {self.blocking_source} "
                         f"block held from the static period (stale evidence)")
                     should_stop = True
+                # The ad was skipped: end the block now, whatever the detectors'
+                # windows or the ad's own countdown still say about it.
+                skip_release = getattr(self, '_skip_release', False)
+                self._skip_release = False
+                if skip_release:
+                    release_stale = should_stop = True
 
                 # The ad's own countdown outranks every detector, not just
                 # OCR. Observed live: an ad flapped through 6 blocks in 27s
@@ -4557,7 +4564,8 @@ class Minus:
                     self.skip_attempted_this_ad = False
                     self.last_skip_countdown = None
                     self.skip_countdown = None
-                    logger.warning(f"AD BLOCKING ENDED after {blocking_elapsed:.1f}s (stopped by {source_was.upper() if source_was else 'unknown'})")
+                    stopper = 'SKIP' if skip_release else (source_was.upper() if source_was else 'unknown')
+                    logger.warning(f"AD BLOCKING ENDED after {blocking_elapsed:.1f}s (stopped by {stopper})")
 
             # Update overlay (respect pause state and static screen suppression)
             # Static screen suppression: don't block still ads (paused video, landing pages)
@@ -5052,8 +5060,13 @@ class Minus:
                                 self.ocr_ad_detected = False
                                 self.vlm_ad_detected = False
                                 self.ocr_no_ad_count = self._effective_ocr_stop_threshold()
-                                self.blocking_source = None
-                                self.blocking_asr_confirmed = False
+                                # Hand the end of the block to the decision tick
+                                # (blocking_source stays set): ending it here left
+                                # the VLM vote history full of the ad's "yes"
+                                # votes, so the next decision logged "VLM detected
+                                # ad" and could re-arm, and the end was logged
+                                # "stopped by unknown" (3x in 25 min on minus).
+                                self._skip_release = True
                                 if self.ad_blocker:
                                     self.ad_blocker.hide()
                                 if self.audio:
