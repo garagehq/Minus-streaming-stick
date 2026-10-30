@@ -301,6 +301,25 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   (`MINUS_STREAM_FPS`, `MINUS_ENCODE_SCALE`); the garagehq/ustreamer
   `asr-first` branch fixes the FPS cap (it delivered 20fps for 30) and
   resizes with RGA instead of the CPU.
+- **Input held at 4K30 (2026-10-30).** The Google TV picks the highest
+  refresh the EDID offers (4K60, or 1080p60 when 4K60 is removed) and its
+  display mode can't be set over ADB (SecurityException). The board's
+  HDMI-RX now advertises only 24-30 Hz modes plus 640x480:
+  `/etc/minus/hdmirx-edid-30hz.bin`, applied at boot by
+  `minus-hdmirx-edid.service` (`v4l2-ctl --set-edid`, before
+  minus.service; the driver default is saved as
+  `hdmirx-edid-default.bin`). The source then sends 3840x2160@29.97 as
+  BGR24 instead of 4K60 NV12.
+  - *BGR24 exposed an overflow in ustreamer:* with an overlay or blocking
+    on, the CPU path converted the full 4K frame into a frame buffer sized
+    for the 2K encode, and ustreamer died on the first overlay
+    ("Connecting to Google TV" at every start). It now scales while
+    converting (RGA, CPU fallback), as NV12 did.
+  - *Headless recovery:* `_restart_ustreamer` returned early when no
+    display was attached, so a dead ustreamer stayed dead (no frames,
+    signal reported lost). It now always restarts ustreamer; only the
+    display pipeline restart needs a display
+    (`tests/test_ustreamer_recovery.py`).
 - **Roku.** `tools/roku_lebron.py` finds the Roku and deep-links YouTube
   to a list of LeBron commentary videos. Turn captions on in the YouTube
   player (or Roku Settings > Accessibility > Captions) for the OCR path.

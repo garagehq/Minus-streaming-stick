@@ -1455,12 +1455,13 @@ class Minus:
         logger.info(f"[Recovery] Format change complete - now running at {new_format}")
 
     def _restart_ustreamer(self):
-        """Restart ustreamer process."""
-        # Skip if display is disconnected (retry loop handles reconnection)
-        if not self.display_connected:
-            logger.debug("[Recovery] Skipping ustreamer restart - display disconnected")
-            return
+        """Restart ustreamer process.
 
+        ustreamer is the capture side, so it is restarted with or without a
+        display. Skipping it headless left a crashed ustreamer dead for good:
+        no frames, no OCR, signal reported lost. Only the display pipeline
+        restart below needs a display (the retry loop starts that one).
+        """
         logger.warning("[Recovery] Restarting ustreamer...")
         try:
             # Kill existing ustreamer
@@ -1525,7 +1526,7 @@ class Minus:
             if self.ustreamer_process.poll() is None:
                 logger.info("[Recovery] ustreamer restarted successfully")
                 # Also restart video pipeline to reconnect to new ustreamer
-                if self.ad_blocker:
+                if self.ad_blocker and self.display_connected:
                     logger.info("[Recovery] Also restarting video pipeline...")
                     self.ad_blocker.restart()
             else:
