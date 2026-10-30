@@ -5855,11 +5855,16 @@ def _install_shutdown_handlers(minus, timeout_s=None):
     stopping = threading.Event()
 
     def force_exit():
+        # A daemon thread: it must not be writing a log line while the main
+        # thread finishes and the interpreter finalizes ("could not acquire
+        # lock for <stdout> at interpreter shutdown" -> abort). So no log on
+        # waking (stop() logs "Stopping..." on the main thread), and none if
+        # the interpreter is already on its way out.
         stopping.wait()
-        logger.info("Shutting down...")
         time.sleep(timeout_s)
-        logger.warning(f"Shutdown still running after {timeout_s:.0f}s - exiting anyway")
-        logging.shutdown()
+        if not sys.is_finalizing():
+            logger.warning(f"Shutdown still running after {timeout_s:.0f}s - exiting anyway")
+            logging.shutdown()
         os._exit(0)
 
     threading.Thread(target=force_exit, name='shutdown-timeout', daemon=True).start()
