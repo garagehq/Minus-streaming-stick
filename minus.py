@@ -41,6 +41,10 @@ if _os.path.exists(_FALLBACK_MARKER):
         print("[EARLY INIT] Killing any stuck DRM processes...")
         for _attempt in range(5):
             _subprocess.run(['pkill', '-9', 'modetest'], capture_output=True, timeout=2)
+            # By path: ustreamer's process name is "main", not "ustreamer".
+            _subprocess.run(['pkill', '-9', '-f', '^' + _os.environ.get(
+                'MINUS_USTREAMER_PATH', '/home/radxa/ustreamer-patched') + '( |$)'],
+                capture_output=True, timeout=2)
             _subprocess.run(['pkill', '-9', 'ustreamer'], capture_output=True, timeout=2)
             _time.sleep(0.5)
 
@@ -201,6 +205,7 @@ os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 # Import extracted modules
 from drm import probe_drm_output
 from v4l2 import probe_v4l2_device
+from ustreamer_proc import kill_ustreamer
 from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR, VLM_MODEL_NAME
 from capture import UstreamerCapture
 from screenshots import ScreenshotManager
@@ -363,6 +368,7 @@ class Minus:
         self.ustreamer_process = None
         self.frame_capture = None
         self.running = False
+        self._stop_requested = False   # SIGTERM/SIGINT seen (see _install_shutdown_handlers)
         self.blocking_active = False
         self._hdmi_recovery_in_progress = False  # Prevent main loop interference during HDMI recovery
         self._hdmi_signal_lost = False  # Pause detection workers when HDMI signal is lost
@@ -1587,12 +1593,7 @@ class Minus:
                 except:
                     self.ustreamer_process.kill()
 
-            subprocess.run(['pkill', '-9', 'ustreamer'],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # Also kill anything on the port
-            subprocess.run(['fuser', '-k', f'{self.config.ustreamer_port}/tcp'],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1)
+            kill_ustreamer(self.config.ustreamer_port)
 
             # Initialize V4L2 device with proper DV timings for the new source
             # This ensures proper format negotiation when switching between devices
@@ -3586,9 +3587,8 @@ class Minus:
         This keeps the web preview and ML detection working even if
         the display output (HDMI-TX) is disconnected.
         """
-        # Kill any existing ustreamer
-        subprocess.run(['pkill', '-9', 'ustreamer'], capture_output=True)
-        time.sleep(0.5)
+        # Kill any existing ustreamer (by path and port: see ustreamer_proc)
+        kill_ustreamer(self.config.ustreamer_port)
 
         port = self.config.ustreamer_port
 
@@ -5547,7 +5547,7 @@ class Minus:
                 logger.warning("No ad_blocker available - waiting for HDMI without display")
 
             # Poll for HDMI signal every 2 seconds (even if no-signal display failed)
-            self.running = True
+            self.running = not self._stop_requested
 
             # Reconnect the remote NOW rather than after the picture appears.
             #
@@ -5618,7 +5618,7 @@ class Minus:
             self.ad_blocker.start_loading_mode()
 
         # Start ML threads flag - set early so threads can start
-        self.running = True
+        self.running = not self._stop_requested
 
         # Start display (will transition from loading to live when ready)
         self._startup_waiting_for_signal = True
@@ -5837,34 +5837,44 @@ class Minus:
 
 
 def _install_shutdown_handlers(minus, timeout_s=None):
-    """SIGTERM/SIGINT -> minus.stop() -> exit, made robust.
+    """SIGTERM/SIGINT -> run() stops on the main thread -> exit, made robust.
+
+    The handler only sets flags. run()'s loops see `running` go False within
+    a couple of seconds and call stop() on the main thread. Stopping inside
+    the handler re-entered whatever the main thread was in the middle of
+    ("reentrant call inside BufferedWriter" when it was logging).
 
     `systemctl stop` delivers SIGTERM twice (the unit's ExecStop `kill -TERM`
-    and then systemd's own), and the second one used to re-enter stop() while
-    the first was still running. On 2026-10-17 a stop during an update never
-    finished: 'Stopping...' logged twice, no 'Stopped', and systemd only got
-    the box back with SIGKILL after its 90 s stop timeout. Now a second signal
-    is ignored, and if stopping takes longer than MINUS_SHUTDOWN_TIMEOUT_S the
-    process exits anyway (SIGKILL would have come later regardless)."""
+    and then systemd's own), so a repeated signal is ignored: on 2026-10-17 a
+    second one re-entered stop() and the stop hung until systemd's SIGKILL.
+    If stopping takes longer than MINUS_SHUTDOWN_TIMEOUT_S the process exits
+    anyway; that watchdog is started here and only waits on the event, so the
+    handler never starts a thread."""
     if timeout_s is None:
         timeout_s = float(os.environ.get('MINUS_SHUTDOWN_TIMEOUT_S', '20'))
     stopping = threading.Event()
 
     def force_exit():
+        # A daemon thread: it must not be writing a log line while the main
+        # thread finishes and the interpreter finalizes ("could not acquire
+        # lock for <stdout> at interpreter shutdown" -> abort). So no log on
+        # waking (stop() logs "Stopping..." on the main thread), and none if
+        # the interpreter is already on its way out.
+        stopping.wait()
         time.sleep(timeout_s)
-        logger.warning(f"Shutdown still running after {timeout_s:.0f}s - exiting anyway")
-        logging.shutdown()
+        if not sys.is_finalizing():
+            logger.warning(f"Shutdown still running after {timeout_s:.0f}s - exiting anyway")
+            logging.shutdown()
         os._exit(0)
+
+    threading.Thread(target=force_exit, name='shutdown-timeout', daemon=True).start()
 
     def signal_handler(sig, frame):
         if stopping.is_set():
-            logger.info("Shutdown already in progress - ignoring repeated signal")
             return
+        minus._stop_requested = True
+        minus.running = False
         stopping.set()
-        logger.info("Shutting down...")
-        threading.Thread(target=force_exit, name='shutdown-timeout', daemon=True).start()
-        minus.stop()
-        sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
