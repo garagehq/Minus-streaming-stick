@@ -107,6 +107,9 @@ class HealthMonitor:
 
         # HDMI-TX output tracking (for TV disconnect/reconnect detection)
         self._last_hdmi_output_connected = None  # Track output connector status
+        # When the TV (HDMI-TX) went off; parked after DISPLAY_PARK_AFTER_S
+        self._hdmi_output_off_since = None
+        self.DISPLAY_PARK_AFTER_S = float(os.environ.get('MINUS_DISPLAY_PARK_AFTER', '60'))
         self._hdmi_output_reconnect_time = 0  # When output was last reconnected
         # Two-strike confirmation for the audio unmute watchdog (see below)
         self._muted_not_blocking_seen = False
@@ -415,7 +418,9 @@ class HealthMonitor:
                         # We have HDMI input but output reconnected - restart display pipeline
                         # with hdmi_reconnect=True to trigger DPMS cycle and DRM re-probe
                         logger.info("[HealthMonitor] Restarting display pipeline for reconnected output (with HDMI reinit)")
-                        if self.minus and self.minus.ad_blocker:
+                        if self.minus and self.minus.ad_blocker and getattr(self.minus.ad_blocker, 'parked', False):
+                            logger.info("[HealthMonitor] Display was parked - the display retry loop brings it up")
+                        elif self.minus and self.minus.ad_blocker:
                             try:
                                 self.minus.ad_blocker.restart(hdmi_reconnect=True)
                                 logger.info("[HealthMonitor] Display pipeline restart with HDMI reinit requested")
@@ -425,8 +430,11 @@ class HealthMonitor:
                 elif not output_connected and self._last_hdmi_output_connected:
                     # Output just disconnected (TV turned off)
                     logger.info("[HealthMonitor] HDMI output disconnected (TV turned off)")
+                    self._hdmi_output_off_since = time.time()
 
             self._last_hdmi_output_connected = output_connected
+
+            self._maybe_park_display(output_connected)
 
         # Format/resolution change detection (for adaptive device switching)
         # This allows seamless switching between FireTV, Roku, AppleTV, etc.
@@ -728,6 +736,32 @@ class HealthMonitor:
             return False, -1
         except Exception:
             return False, -1
+
+    def _maybe_park_display(self, output_connected: bool, now: float = None) -> bool:
+        """TV off for DISPLAY_PARK_AFTER_S: park the display pipeline.
+
+        It otherwise keeps decoding 4K for nobody, which held minus at
+        78-84 C vs ~65 C with no display (Oct 2026). The display retry loop
+        brings it back when a TV is connected. One attempt per TV-off.
+        """
+        if output_connected:
+            self._hdmi_output_off_since = None
+            return False
+        since = getattr(self, '_hdmi_output_off_since', None)
+        now = time.time() if now is None else now
+        if since is None or now - since < self.DISPLAY_PARK_AFTER_S:
+            return False
+        self._hdmi_output_off_since = None
+        if not (self.minus and hasattr(self.minus, 'park_display_for_tv_off')):
+            return False
+        try:
+            if self.minus.park_display_for_tv_off():
+                logger.info(f"[HealthMonitor] TV off for {self.DISPLAY_PARK_AFTER_S:.0f}s "
+                            f"- display pipeline parked until it is back")
+                return True
+        except Exception as e:
+            logger.warning(f"[HealthMonitor] park display failed: {e}")
+        return False
 
     def _check_video_pipeline(self) -> bool:
         """Check if video GStreamer pipeline is healthy."""

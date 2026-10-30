@@ -88,6 +88,9 @@ class DRMAdBlocker:
         self._pipeline_errors = 0
         self._last_error_time = 0
         self._pipeline_restarting = False
+        # True while the display pipeline is torn down because the TV is off
+        # (see park()). start() rebuilds it from scratch.
+        self.parked = False
         self._restart_lock = threading.Lock()
         # Serialises display-pipeline construction. See _init_pipeline.
         self._build_lock = threading.RLock()
@@ -685,8 +688,10 @@ class DRMAdBlocker:
         self._stop_loading_animation()
         self._stop_no_signal_animation()
 
-        # If we're in loading or no-signal mode, need to reinitialize the normal pipeline
-        if self.current_source in ('loading', 'no_hdmi_device'):
+        # If we're in loading or no-signal mode, or parked for a TV that was
+        # off, need to reinitialize the normal pipeline
+        if self.current_source in ('loading', 'no_hdmi_device') or getattr(self, 'parked', False):
+            self.parked = False
             logger.info(f"[DRMAdBlocker] Transitioning from {self.current_source} to normal pipeline")
             # Stop and destroy the standalone pipeline
             if self.pipeline:
@@ -757,6 +762,28 @@ class DRMAdBlocker:
         except Exception as e:
             logger.error(f"[DRMAdBlocker] Failed to start pipeline: {e}")
             return False
+
+    def park(self):
+        """Tear the display pipeline down while the TV is off.
+
+        With the TV off kmssink still takes every frame: souphttpsrc +
+        mppjpegdec keep decoding 4K for a screen nobody has (~80% of a core
+        plus the VPU), which held minus at 78-84 C all night against ~65 C
+        with no display. Blocking, OCR and VLM don't need this pipeline
+        (they read ustreamer). start() rebuilds it -- with the DPMS reinit --
+        when a TV is connected again.
+        """
+        with self._build_lock:
+            if getattr(self, 'parked', False):
+                return False
+            self._stop_watchdog_thread()
+            self._stop_loading_animation()
+            self._stop_no_signal_animation()
+            self._teardown_pipeline()
+            self.parked = True
+            self._last_buffer_time = 0
+            logger.info("[DRMAdBlocker] Display pipeline parked (TV off)")
+            return True
 
     def _update_frame_resolution(self):
         """Update frame resolution and recalculate preview dimensions."""
@@ -958,6 +985,9 @@ class DRMAdBlocker:
             with self._build_lock:
                 if self.current_source in ('loading', 'no_hdmi_device'):
                     logger.info(f"[DRMAdBlocker] Restart skipped - {self.current_source} screen is up")
+                    return
+                if getattr(self, 'parked', False):
+                    logger.info("[DRMAdBlocker] Restart skipped - display parked (TV off)")
                     return
                 if self.pipeline:
                     try:

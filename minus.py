@@ -2516,6 +2516,27 @@ class Minus:
         remaining = self.blocking_paused_until - time.time()
         return max(0, int(remaining))
 
+    def park_display_for_tv_off(self) -> bool:
+        """The TV has been off for a while: stop decoding video for it.
+
+        Called by the health monitor (DISPLAY_PARK_AFTER_S). Tears down the
+        display pipeline and arms the display retry loop, which polls sysfs
+        (free) and brings the pipeline back up -- DPMS reinit and audio
+        re-prepare included -- when a TV is connected. Ad blocking, OCR, VLM,
+        ASR and audio keep running; they don't use this pipeline.
+        """
+        ab = getattr(self, 'ad_blocker', None)
+        if ab is None or not hasattr(ab, 'park') or not self.display_connected:
+            return False
+        if self._any_hdmi_output_connected():
+            return False          # the TV came back meanwhile
+        if not ab.park():
+            return False
+        self.display_connected = False
+        self.display_error = "TV off - display pipeline paused until a TV is connected"
+        self._start_display_retry_loop()
+        return True
+
     def notify_hdmi_reconnect(self):
         """Called by the health monitor when the TV output reconnects."""
         self.hdmi_reconnect_time = time.time()

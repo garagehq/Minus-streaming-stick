@@ -1780,9 +1780,9 @@ A skip press can miss (countdown not finished, focus elsewhere). Unblocking blin
 
 With the display pipeline running the main process grew ~80 MB/h (312 -> 537 MB in 2.5 h), almost all freed-but-unreturned memory in glibc's per-thread arenas (malloc_trim(0) on the live process returned 112 MB). `HealthMonitor._trim_process_heap()` trims every `HEAP_TRIM_INTERVAL_S` (300 s) from the health loop and logs when it frees >= 32 MB.
 
-### Open: display pipeline keeps decoding with the TV off
+### Display pipeline parked while the TV is off (Fixed - Oct 2026)
 
-When the TV is switched off the health monitor only logs "HDMI output disconnected"; the display pipeline keeps decoding 4K (~80% of a core plus the VPU: mppjpegdec 60%, souphttpsrc 8%), which held minus at 78-84 C in thermal-degraded mode all night vs ~65 C with no display. Candidate fix: after the TV has been off for a while, stop the display pipeline and hand off to `_start_display_retry_loop()` (the path that brings the display up when a TV appears). Needs a hands-on TV off/on test before shipping.
+With the TV switched off the health monitor only logged "HDMI output disconnected" and the display pipeline kept decoding 4K for nobody (~80% of a core plus the VPU: mppjpegdec 60%, souphttpsrc 8%), which held minus at 78-84 C in thermal-degraded mode all night vs ~65 C with no display. Now, after the TV has been off for `DISPLAY_PARK_AFTER_S` (60 s, env `MINUS_DISPLAY_PARK_AFTER`), `HealthMonitor._maybe_park_display` calls `Minus.park_display_for_tv_off()`: `DRMAdBlocker.park()` stops the video watchdog and tears the pipeline down (`parked=True`, so `_restart_pipeline` skips), `display_connected` goes False and `_start_display_retry_loop()` takes over. That loop polls sysfs for free and, when a TV appears, `start_display_pipeline()` rebuilds through `_start_locked` (DPMS reinit first, like the loading/no-signal paths) and schedules the audio re-prepare. The health monitor's TV-reconnect branch leaves a parked display to the retry loop instead of calling `ad_blocker.restart()`. Blocking, OCR, VLM, ASR and audio keep running (they read ustreamer, not this pipeline). Tests: `tests/test_display_park.py`.
 
 ### Clean-stop drop-in on updated boxes (Oct 2026)
 
