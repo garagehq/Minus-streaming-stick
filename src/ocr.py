@@ -650,8 +650,12 @@ class PaddleOCR:
                 matched.append(('ad X of Y', text))
 
             # "Ad 10", "Ad 5", "Ad 30" - Netflix/streaming ad countdown timer
-            # Matches "Ad" followed by a number (seconds remaining)
-            if re.search(r'^ad\s*\d+$', text_lower.strip()):
+            # Matches "Ad" followed by a number (seconds remaining). Not "aD":
+            # no ad label is cased that way, but OCR misreads are (a gas
+            # station's LED price sign in a music video read "aD88" and
+            # blocked for 5 s on minus, 2026-10-29).
+            if (re.search(r'^ad\s*\d+$', text_lower.strip())
+                    and not text.strip().startswith('aD')):
                 matched.append(('ad countdown', text))
 
             # "0:30 | Ad", "Ad | 0:30", "Ad 0:30", "Ad0:30", "Ad1:20", "Ado:30" - ad with timestamp
