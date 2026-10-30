@@ -1756,6 +1756,22 @@ The `OCR #N: ... [BLOCKING ...]` tag was built from the OCR and VLM flags only, 
 
 **Fix (#57):** `src/gst_bus.py` `drop_unconsumed_messages(bus)` installs a bus sync handler that DROPs every message except ERROR and EOS, which the code does read. It is applied right after every `add_signal_watch()` (audio pipeline, and the video / NO SIGNAL / loading pipelines in `ad_blocker.py`). Any new pipeline must do the same. Measured after the fix: memory flat through a sleep (~480–580 MB) and back to ~490 MB after wake. Test: `tests/test_gst_bus_no_backlog.py`.
 
+### Autonomous mode's "mid ad-block" guards never fired (Fixed - Oct 2026)
+
+`AutonomousMode.set_ad_blocker()` is given the **Minus instance**, not the `DRMAdBlocker`, so `getattr(self._ad_blocker, 'is_visible', False)` (Minus has no `is_visible`) was always False. All seven guards that hold back during a block were dead: music-mode steering, home-screen and Roku-home detection, the overlay dismiss, the vertical-panel Back and the YouTube TV prompt. Seen live: a music-mode steer switched videos mid-ad (minus, 2026-10-30). Use `AutonomousMode._blocking_active()`, which checks the object and its `.ad_blocker`. Everything else autonomous mode reads through `_ad_blocker` (`last_ocr_texts`, `audio`, `last_ocr_ad_time`, `display_connected`) does live on Minus. Test: `tests/test_autonomous_blocking_guard.py`.
+
+### Keyboard escape walked YouTube into the Appstore after a block (Fixed - Oct 2026)
+
+The audio guard for destructive actions (`_audio_recently_flowing`) only knew about audio autonomous mode had sampled, and it doesn't sample during a block. After an 18 s block the 20 s window had lapsed, YouTube's icon rail (single OCR characters) read as a keyboard, and the 4x Back + navigate escape went to the account picker and the Amazon Appstore. The guard now asks `audio.seconds_since_audible()` first (HDMI input, before the mute, tracked continuously). Test: `tests/test_autonomous_recent_audio.py`.
+
+### Skipped ads: "stopped by unknown" (Fixed - Oct 2026)
+
+`_unblock_after_skip` cleared `blocking_source` itself, outside the decision tick: the ad's countdown clock could keep holding the block (41 s once), the VLM vote history re-flagged the ad, and the end was logged "stopped by unknown". The skip thread now hides/unmutes, clears the VLM history and sets `_skip_release`; the next `_update_blocking_state` tick ends the block like any other ("stopped by SKIP"), bypassing the ad clock. Test: `tests/test_skip_release.py`.
+
+### Clean-stop drop-in on updated boxes (Oct 2026)
+
+`tools/minus_update.py` phase 2 writes `/etc/systemd/system/minus.service.d/clean-stop.conf` (`KillMode=mixed`, `TimeoutStopSec=30`) before restarting, if missing or stale, and reloads systemd; a failure is logged and never blocks the update (`MINUS_SYSTEMD_DIR` overrides the directory; tests point it at a temp dir).
+
 ### Worker memory: rknnlite buffers in reference cycles (Fixed - Oct 2026)
 
 rknnlite's `inference()` leaves its ctypes input/output buffers in reference cycles, so they stay allocated until Python's cyclic GC happens to run. The SenseVoice ASR worker (~17 MB logits per call) grew ~80-110 MB/h in soaks, and the OCR worker swung 60-580 MB with a rising floor. Both workers now `gc.collect(0)` after each reply (~2 ms, after the reply is sent). The ASR worker also `malloc_trim(0)`s every `MINUS_ASR_TRIM_EVERY` (100) calls and is spawned with `MALLOC_MMAP_THRESHOLD_=1MB` / `MALLOC_ARENA_MAX=2`, set only around its spawn (#62). The OCR worker trims every 500 requests and is replaced between requests past 1 GB (#60, #63). Tests: `tests/test_asr_worker_memory.py`, `tests/test_ocr_worker_heap.py`.
