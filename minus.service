@@ -47,6 +47,13 @@ ExecStart=/usr/bin/python3 /home/radxa/Minus/minus.py
 
 # Graceful stop
 ExecStop=/bin/kill -TERM $MAINPID
+# SIGTERM to minus.py only; it stops its children (ustreamer, OCR/ASR
+# workers) itself, in order. With the default control-group mode every child
+# got SIGTERM at once: ustreamer died first, the health monitor took it for
+# HDMI loss and ran recovery, the OCR wrapper respawned its worker, and the
+# new child held the service up until the stop timeout killed it.
+KillMode=mixed
+TimeoutStopSec=30
 ExecStopPost=/bin/bash -c 'pkill -9 -f "^[/]home/radxa/ustreamer-patched" 2>/dev/null; pkill -9 ustreamer 2>/dev/null || true'
 ExecStopPost=/bin/bash -c 'rm -f /dev/shm/minus_frame*.jpg /dev/shm/minus_vlm_frame*.jpg 2>/dev/null || true'
 

@@ -661,22 +661,27 @@ def test_phase2_that_dies_is_rolled_back_by_phase1(repos, tmp_path, monkeypatch,
 
 # ------------------------------------------------------------ shutdown
 _SHUTDOWN_CHILD = r'''
-import os, signal, sys, time, threading
+import os, signal, sys, time, threading, traceback
 sys.path.insert(0, {root!r}); sys.path.insert(0, {src!r})
 import minus as M
 class Fake:
-    def __init__(self): self.stops = 0
+    def __init__(self): self.stops = 0; self.running = True; self._stop_requested = False
     def stop(self):
         self.stops += 1
-        print('stop', self.stops, flush=True)
+        in_handler = any(f.name == 'signal_handler' for f in traceback.extract_stack())
+        print('stop', self.stops, 'in_handler' if in_handler else 'main_thread', flush=True)
         if {hang}:
             time.sleep(3600)           # a stop that never finishes
 fake = Fake()
 M._install_shutdown_handlers(fake, timeout_s=1.0)
 os.kill(os.getpid(), signal.SIGTERM)
 os.kill(os.getpid(), signal.SIGTERM)  # systemctl stop: ExecStop kill + systemd's own
-time.sleep(30)
-print('not exited', flush=True)
+deadline = time.time() + 30
+while fake.running and time.time() < deadline:   # run()'s loop
+    time.sleep(0.05)
+print('loop exited', fake._stop_requested, flush=True)
+fake.stop()
+sys.exit(0)
 '''
 
 
@@ -699,11 +704,23 @@ def test_shutdown_ignores_a_second_sigterm_and_is_bounded(minus_importable):
     """A stop during an update hung until systemd's 90 s SIGKILL after a second
     SIGTERM re-entered stop() (minus, 2026-10-17)."""
     r, took = _run_shutdown_child(hang=True)
-    assert 'not exited' not in r.stdout
+    assert 'loop exited True' in r.stdout        # the handler only set the flags
     assert r.stdout.count('stop ') == 1          # the repeated signal didn't re-enter stop()
     assert took < 15                             # bounded by the timeout, not by a SIGKILL
 
 
 def test_normal_shutdown_still_exits_cleanly(minus_importable):
     r, took = _run_shutdown_child(hang=False)
-    assert r.returncode == 0 and r.stdout.count('stop ') == 1 and 'not exited' not in r.stdout
+    assert r.returncode == 0 and r.stdout.count('stop ') == 1
+
+
+def test_stop_runs_on_the_main_thread_not_in_the_handler(minus_importable):
+    """Stopping inside the signal handler re-entered the log writer
+    ('reentrant call inside BufferedWriter')."""
+    r, _ = _run_shutdown_child(hang=False)
+    assert 'stop 1 main_thread' in r.stdout and 'in_handler' not in r.stdout
+
+
+def test_service_stops_minus_py_only():
+    unit = (ROOT / 'minus.service').read_text()
+    assert 'KillMode=mixed' in unit and 'TimeoutStopSec=30' in unit
