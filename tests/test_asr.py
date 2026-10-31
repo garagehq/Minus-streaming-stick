@@ -953,7 +953,9 @@ class TestAudioGate(unittest.TestCase):
     def _m(self, quiet, **kw):
         m = TestDecisionEngineASRGate._make_minus(self, **kw)
         m.audio.seconds_since_audible = MagicMock(return_value=quiet)
-        m._system_settings = {}
+        # The VLM-only gate on its own; TestNoBlockingWithoutSound covers
+        # block_only_with_sound (default on), which gates OCR too.
+        m._system_settings = {'block_only_with_sound': False}
         return m
 
     def test_silent_screen_does_not_start_a_vlm_block(self):
@@ -985,7 +987,7 @@ class TestAudioGate(unittest.TestCase):
 
     def test_setting_off_disables_the_gate(self):
         m = self._m(quiet=60.0)
-        m._system_settings = {'block_requires_audio': False}
+        m._system_settings = {'block_requires_audio': False, 'block_only_with_sound': False}
         m.ocr_ad_detected = True
         m._update_blocking_state()
         self.assertTrue(m.ad_detected)
@@ -1002,7 +1004,7 @@ class TestAudioGateStop(unittest.TestCase):
             asr_verdict='unknown', source=source)
         m.ocr_ad_detected = ocr
         m.audio.seconds_since_audible = MagicMock(return_value=quiet)
-        m._system_settings = {}
+        m._system_settings = {'block_only_with_sound': False}
         return m
 
     def test_long_silence_ends_a_vlm_block(self):
@@ -1017,6 +1019,64 @@ class TestAudioGateStop(unittest.TestCase):
 
     def test_short_gap_keeps_it(self):
         m = self._blocking(quiet=4.0)
+        m._update_blocking_state()
+        self.assertTrue(m.ad_detected)
+
+
+class TestNoBlockingWithoutSound(unittest.TestCase):
+    """block_only_with_sound (default on): no sound, no block -- for every
+    source, OCR included, so browsing web pages on the stick (ads OCR reads)
+    doesn't black out the screen."""
+
+    def _start(self, quiet, settings=None):
+        m = TestDecisionEngineASRGate._make_minus(self, asr_verdict='unknown')
+        m.audio.seconds_since_audible = MagicMock(return_value=quiet)
+        m._system_settings = {} if settings is None else settings
+        m.ocr_ad_detected = True
+        m._update_blocking_state()
+        return m
+
+    def test_default_on_silent_ocr_ad_does_not_block(self):
+        self.assertFalse(self._start(quiet=60.0).ad_detected)
+
+    def test_recent_sound_blocks(self):
+        self.assertTrue(self._start(quiet=1.0).ad_detected)
+
+    def test_unknown_audio_fails_open(self):
+        self.assertTrue(self._start(quiet=None).ad_detected)
+
+    def test_off_restores_ocr_blocking_on_silence(self):
+        self.assertTrue(self._start(quiet=60.0, settings={'block_only_with_sound': False}).ad_detected)
+
+    def test_independent_of_the_vlm_only_toggle(self):
+        m = self._start(quiet=60.0, settings={'block_requires_audio': False})
+        self.assertFalse(m.ad_detected)
+
+    def _blocking(self, quiet, source='both', ocr=True, settings=None):
+        m = TestOCRTriangulationVeto._make_minus(
+            self, blocking_elapsed=20.0, vlm_no_ad_ratio=0.0,
+            asr_verdict='unknown', source=source)
+        m.ocr_ad_detected = ocr
+        m.audio.seconds_since_audible = MagicMock(return_value=quiet)
+        m._system_settings = {} if settings is None else settings
+        m._ad_clock_says_playing = lambda now: False
+        m._update_blocking_state()
+        return m
+
+    def test_long_silence_ends_an_ocr_block(self):
+        self.assertFalse(self._blocking(quiet=12.0).ad_detected)
+
+    def test_short_gap_keeps_an_ocr_block(self):
+        self.assertTrue(self._blocking(quiet=4.0).ad_detected)
+
+    def test_ad_countdown_still_holds_a_silent_block(self):
+        m = TestOCRTriangulationVeto._make_minus(
+            self, blocking_elapsed=20.0, vlm_no_ad_ratio=0.0,
+            asr_verdict='unknown', source='both')
+        m.ocr_ad_detected = True
+        m.audio.seconds_since_audible = MagicMock(return_value=30.0)
+        m._system_settings = {}
+        m._ad_clock_says_playing = lambda now: True
         m._update_blocking_state()
         self.assertTrue(m.ad_detected)
 
