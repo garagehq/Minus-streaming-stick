@@ -1355,7 +1355,7 @@
 
                 const vlmStatus = document.getElementById('vlm-status');
                 if (status.vlm_available === false) {
-                    vlmStatus.textContent = 'VLM: N/A';
+                    vlmStatus.textContent = 'VLM: Off';
                     vlmStatus.className = 'system-badge warning';
                 } else if (status.vlm_disabled) {
                     vlmStatus.textContent = 'VLM: Disabled';
@@ -2531,8 +2531,11 @@
                     const isEnabled = data.initialized && !data.disabled && data.model_loaded;
                     toggle.checked = isEnabled;
 
+                    // No VLM at all (no AX-M1 card, --no-vlm, or the startup
+                    // load gave up): off, and the toggle can't turn it on.
+                    toggle.disabled = !data.initialized;
                     if (!data.initialized) {
-                        statusText.textContent = 'Not initialized';
+                        statusText.textContent = 'Off';
                     } else if (data.disabled) {
                         statusText.textContent = 'Disabled';
                     } else if (data.model_loaded) {

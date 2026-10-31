@@ -139,7 +139,19 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
       `~/asr_dataset/audit/quarantine`; trimmed originals are copied to
       `untrimmed/` only with `apply --keep-untrimmed` (~half the dataset).
     - `label_clips.HELD_OUT` keeps every evaluation video out of
-      training.
+      training. `CLIP_FARM_EXCLUDE_FILES` (':'-separated JSON lists of
+      `{"vid"}`/`{"id"}`/strings) adds the live bench's lists
+      (`asr_eval/live/holdout_videos.json*`, `negatives.json*`).
+    - *Between test rounds (2026-10-31, minus-2):* the farm and the hourly
+      bench share the Google TV, so `minus-asr-hourly` stops the farm in
+      `ExecStartPre` and starts it in `ExecStopPost` (drop-in
+      `clipfarm-gaps.conf`); the farm's drop-in sets the bench TV
+      (`CLIP_FARM_TV_IP=192.168.1.202`) and the exclude files, and
+      `minus.service.d/asr-clips.conf` sets `MINUS_ASR_CLIPS=1`.
+    - *Play logs are per boot:* sync times are `time.monotonic()`, so a
+      play log last written before the current boot is skipped
+      (`load_syncs`); matched against today's clips it rejected nearly
+      all of them.
     - Clip sidecars carry `clip_start_mono`. The random-clip rate is set
       at runtime via `POST /api/name-mute/clips`.
     - Nicknames (2026-10-09, low priority, not muted, not searched for):
@@ -323,6 +335,13 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     a source format change restarts ustreamer with no display too, and
     the liveness check is `pgrep -f '^\S*ustreamer'` (a bare `ustreamer`
     matched any shell or grep that mentioned it).
+- **VLM off without the AX-M1 card (2026-10-31).** minus-2 has no card on
+  PCIe; the `ax_pcie_dev_host` driver loads anyway and every model load
+  failed in the axcl runtime, so each start spent ~25 s retrying with the
+  webui showing "VLM: Loading". `minus.axera_card_present()` checks for a
+  PCI address bound to that driver before creating the VLM; without one
+  the VLM is never created and the webui shows "VLM: Off" (badge and
+  Settings, toggle disabled). `tests/test_axera_absent.py`.
 - **Roku.** `tools/roku_lebron.py` finds the Roku and deep-links YouTube
   to a list of LeBron commentary videos. Turn captions on in the YouTube
   player (or Roku Settings > Accessibility > Captions) for the OCR path.

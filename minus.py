@@ -241,6 +241,24 @@ except ImportError as e:
     logger.warning(f"VLM module not available: {e}")
     HAS_VLM = False
 
+AXERA_PCI_DRIVER = '/sys/bus/pci/drivers/ax_pcie_dev_host'
+
+
+def axera_card_present(driver_dir: str = AXERA_PCI_DRIVER) -> bool:
+    """True when an AX-M1 card is bound to its PCIe driver.
+
+    The driver loads at boot whether or not the card is plugged in, so the
+    driver directory alone proves nothing; a bound card shows up in it as a
+    PCI address (e.g. 0001:11:00.0). Without one the axcl runtime fails
+    every load, and Minus spent ~25 s after each start retrying it with the
+    webui showing the VLM as loading.
+    """
+    try:
+        return any(':' in name for name in os.listdir(driver_dir))
+    except OSError:
+        return False
+
+
 # Import Audio module
 try:
     from audio import AudioPassthrough, AudioASRTap
@@ -1036,6 +1054,8 @@ class Minus:
         # Initialize VLM
         if config.no_vlm:
             logger.info("VLM disabled via --no-vlm flag")
+        elif HAS_VLM and not axera_card_present():
+            logger.info("VLM off: no AX-M1 card on PCIe")
         elif HAS_VLM:
             try:
                 self.vlm = VLMProcess()

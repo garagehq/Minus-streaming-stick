@@ -381,7 +381,7 @@ class HealthMonitor:
             f"hdmi={'OK' if status.hdmi_signal else 'LOST'} "
             f"video={'OK' if status.video_pipeline_ok else 'ERR'} "
             f"audio={'OK' if status.audio_pipeline_ok else 'ERR'} "
-            f"vlm={'OK' if status.vlm_ready else 'ERR'} "
+            f"vlm={'OK' if status.vlm_ready else 'ERR' if self.minus and self.minus.vlm else 'off'} "
             f"mem={status.memory_percent:.0f}% "
             f"disk={status.disk_free_mb:.0f}MB"
         )
