@@ -88,6 +88,32 @@ class TestASRKeywords(unittest.TestCase):
 
     # ----- show / non-ad cases that MUST NOT hit -----
 
+    def test_brand_names_hit(self):
+        """Ads with no CTA phrase at all (minus, 2026-10-31): every one was
+        vetoed as show dialog before brand names were markers."""
+        from asr_keywords import count_marker_hits
+        for t in ("you're at macy's and i'm your cousin",
+                  'house warming gift handle walmart come on in',
+                  'the new iphone eighteen pro and apple watch series twelve',
+                  'switch to verizon today it is a very big deal',
+                  'the general insurance and state farm agents'):
+            self.assertGreaterEqual(count_marker_hits(t), 1, t)
+
+    def test_political_ad_hits(self):
+        from asr_keywords import count_marker_hits
+        for t in ('vote hochul adams by november third',
+                  'i approve this message and paid for by the committee',
+                  'vote yes on proposition one'):
+            self.assertGreaterEqual(count_marker_hits(t), 1, t)
+
+    def test_brand_words_inside_words_and_lyrics_do_not_hit(self):
+        from asr_keywords import count_marker_hits
+        for t in ('kiana took the target shot at the general store',
+                  'drove my chevy to the levee but the levee was dry',
+                  'pick up my phone and call you when the night is over',
+                  'i want to vote for love tonight baby'):
+            self.assertEqual(count_marker_hits(t), 0, t)
+
     def test_show_dialog_no_hits(self):
         text = "I just don't think it's a good idea, John. Sarah said she would be home by seven."
         self.assertEqual(self.count(text), 0)

@@ -216,6 +216,46 @@ _REGEX_MARKERS_SOURCE = [
     (r'\b\d{1,2}\s+(?:months?|years?)\s+free\b', 'period-free'),
 ]
 
+# Advertisers, spoken. The list above is all call-to-action phrasing, and
+# most ads never use any: on minus (2026-10-31) Macy's, Walmart, Verizon
+# (iPhone / Apple Watch) and a political ad were all transcribed cleanly
+# during their blocks and every one came back as a VETO ("show dialog"),
+# because nothing in them was a CTA. ASR overnight confirmed 12 of 41 blocks.
+# These names are the advertisers OCR read on this box's blocked frames
+# (2026-10-23..30, by domain), keeping only names that are unambiguous when
+# spoken: no Target / Apple / Amazon / Chase / "progressive" / YouTube, which
+# show dialog and lyrics use as ordinary words. Word-bounded, so "kia" can't
+# match inside a word. ASR never blocks on its own (it labels, skips OCR's
+# second-frame wait, or withholds a veto), so a stray brand in show audio
+# costs little; a missed one vetoed real ads.
+_BRAND_NAMES = [
+    r"wal\s?mart", r"macy'?s", r"verizon", r"t[\s-]?mobile", r"mint mobile",
+    r"a\s?t\s?(?:and|&)\s?t", r"geico", r"state farm", r"liberty mutual",
+    r"progressive insurance", r"the general insurance", r"allstate",
+    r"american express", r"capital one", r"discover card",
+    r"iphone", r"ipad", r"apple watch", r"airpods", r"samsung galaxy",
+    r"upwork", r"applovin", r"st\.? jude", r"disney\s?plus", r"disney\+",
+    r"paramount\s?plus", r"hbo max", r"clinique", r"cerave", r"ulta(?: beauty)?",
+    # (no "chevy" / "lexus": common in song lyrics, and music mode plays music all night)
+    r"nissan", r"toyota", r"hyundai", r"subaru", r"chevrolet",
+    r"airbnb", r"booking\.com", r"expedia", r"shopify", r"squarespace",
+    r"fandango", r"popeyes", r"olive garden", r"taco bell", r"dunkin'?",
+    r"arby'?s", r"mcdonald'?s", r"burger king", r"wendy'?s", r"chick[\s-]?fil[\s-]?a",
+    r"doordash", r"uber eats", r"instacart", r"grubhub", r"hellofresh",
+    r"temu", r"shein", r"primark", r"five below", r"home depot", r"lowe'?s",
+    r"best buy", r"walgreens", r"cvs", r"chewy", r"etsy", r"zales", r"kay jewelers",
+    r"mucinex", r"bluechew", r"orangetheory", r"safelite", r"frigidaire",
+    r"myfitnesspal", r"eight sleep", r"huckberry", r"kraft heinz",
+]
+_REGEX_MARKERS_SOURCE.append(
+    (r"\b(?:" + "|".join(_BRAND_NAMES) + r")\b", 'brand'))
+
+# Political ads: required disclaimers and the vote call. Phrase-level --
+# "vote" alone is in lyrics and dialog.
+_REGEX_MARKERS_SOURCE.append(
+    (r"\b(?:paid for by|approve(?:d)? this message|vote (?:yes|no) on|"
+     r"early voting|on election day|vote \w+(?: \w+)? by november)\b", 'political'))
+
 # Build compiled forms once.
 _COMPILED_REGEX = [
     (re.compile(pat, re.IGNORECASE), label) for pat, label in _REGEX_MARKERS_SOURCE
