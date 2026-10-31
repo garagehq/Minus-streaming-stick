@@ -223,6 +223,42 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(lc.normalize("LeBron's 3-pointer — WOW!"), "lebron's 3 pointer wow")
 
 
+class TestPlayLogBoot(unittest.TestCase):
+    """Sync times are time.monotonic(): a play log from before this boot is
+    on another clock and must not be matched against today's clips."""
+
+    def _farm(self):
+        farm = Path(tempfile.mkdtemp())
+        (farm / 'playlog').mkdir()
+        for name, t in (('old.jsonl', 5000), ('new.jsonl', 1000)):
+            (farm / 'playlog' / name).write_text(json.dumps(
+                {'type': 'sync', 'video': name[:3], 'board_mid': t, 'device_uptime': t,
+                 'position': 0.0, 'updated': t, 'speed': 1.0}) + '\n')
+        booted = lc._boot_time()
+        os.utime(farm / 'playlog' / 'old.jsonl', (booted - 3600, booted - 3600))
+        return farm
+
+    def test_log_from_before_boot_skipped(self):
+        syncs = lc.load_syncs(self._farm())
+        self.assertEqual([v for _, v, _ in syncs], ['new'])
+
+
+class TestExcludeFiles(unittest.TestCase):
+    """CLIP_FARM_EXCLUDE_FILES: the live bench's video lists are held out."""
+
+    def test_reads_vid_id_and_plain_entries(self):
+        d = Path(tempfile.mkdtemp())
+        (d / 'holdout.json').write_text(json.dumps([{'vid': 'aaa', 't0': 5}, {'vid': 'bbb'}]))
+        (d / 'neg.json').write_text(json.dumps([{'id': 'ccc'}, 'ddd', {'title': 'no id'}]))
+        self.assertEqual(lc._ids_from_files([d / 'holdout.json', d / 'neg.json']),
+                         {'aaa', 'bbb', 'ccc', 'ddd'})
+
+    def test_missing_or_bad_files_are_skipped(self):
+        d = Path(tempfile.mkdtemp())
+        (d / 'bad.json').write_text('{not json')
+        self.assertEqual(lc._ids_from_files([d / 'bad.json', d / 'nope.json']), set())
+
+
 if __name__ == '__main__':
     unittest.main()
 

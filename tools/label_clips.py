@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -99,15 +100,54 @@ HELD_OUT = {
 } | {v for v in os.environ.get('CLIP_FARM_EXCLUDE', '').split(',') if v}
 
 
+def _ids_from_files(paths):
+    """Video ids from JSON lists (strings or dicts with 'vid'/'id'), e.g. the
+    hourly bench's holdout_videos.json and negatives.json. Missing or
+    unreadable files are skipped."""
+    ids = set()
+    for path in paths:
+        try:
+            with open(path) as fh:
+                entries = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        for e in entries:
+            v = e if isinstance(e, str) else (e.get('vid') or e.get('id')) if isinstance(e, dict) else None
+            if v:
+                ids.add(v)
+    return ids
+
+
+# CLIP_FARM_EXCLUDE_FILES (':'-separated) holds the live bench's video lists,
+# so videos added to the bench are held out without editing this file.
+HELD_OUT |= _ids_from_files(
+    p for p in os.environ.get('CLIP_FARM_EXCLUDE_FILES', '').split(':') if p)
+
+
 def vpos(s, t):
     """Video position at box-monotonic time t, extrapolated from sync s."""
     return s['position'] + (t + s['device_uptime'] - s['board_mid'] - s['updated']) * s['speed']
 
 
+def _boot_time():
+    """Wall-clock time this box booted (time.monotonic() counts from boot)."""
+    return time.time() - time.monotonic()
+
+
 def load_syncs(farm_dir: Path):
-    """All play-log syncs, sorted by box time: [(t, video_id, sync_dict)]."""
+    """This boot's play-log syncs, sorted by box time: [(t, video_id, sync_dict)].
+
+    Sync times are time.monotonic(), which restarts at every boot, so a
+    play log last written before this boot uses another clock: its times
+    land among today's and clips matched against them are rejected (seen
+    2026-10-31: 38 of 41 clips, against Oct 21-22 logs). Such files are
+    skipped.
+    """
     out = []
+    booted = _boot_time()
     for f in sorted((farm_dir / 'playlog').glob('*.jsonl')):
+        if f.stat().st_mtime < booted:
+            continue
         with open(f) as fh:
             for line in fh:
                 try:
