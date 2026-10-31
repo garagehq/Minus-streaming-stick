@@ -851,6 +851,10 @@ class Minus:
             'skip ad (fuzzy)', 'skip ad (fuzzy-spad)', 'skip ad (fuzzy-foad)',
             'video will play after ad',
             'visit advertiser', 'visitadvertiser',
+            # YouTube TV ad button; ad-only (see ocr.py AD_KEYWORDS_EXACT).
+            # Being here also makes it DEFINITIVE: blocks on the first frame
+            # instead of waiting a second frame as bare 'sponsored' does.
+            'send to phone',
             'ad X of Y', 'ad countdown',
             'ad with timestamp', 'ad with timestamp (cross-element)',
             # 'sponsored' promoted to STRONG per product decision (2026-05):
@@ -1155,7 +1159,10 @@ class Minus:
                 self.health_monitor = HealthMonitor(self, check_interval=5.0)
                 self.health_monitor.on_hdmi_lost(self._on_hdmi_lost)
                 self.health_monitor.on_hdmi_restored(self._on_hdmi_restored)
-                self.health_monitor.on_ustreamer_stall(self._restart_ustreamer)
+                # even_without_display: ustreamer feeds OCR/VLM/autonomous mode,
+                # so a dead one must be restarted with the TV off too.
+                self.health_monitor.on_ustreamer_stall(
+                    lambda: self._restart_ustreamer(even_without_display=True))
                 self.health_monitor.on_video_pipeline_stall(self._on_video_pipeline_stall)
                 self.health_monitor.on_vlm_failure(self._handle_vlm_failure)
                 self.health_monitor.on_memory_critical(self._handle_memory_critical)
@@ -1543,9 +1550,14 @@ class Minus:
         """
         logger.warning(f"[Recovery] HDMI format changed to {new_format} - restarting ustreamer")
 
-        # Skip if display is disconnected (retry loop handles reconnection)
+        # No TV (never attached, or parked while it's off): ustreamer still
+        # has to follow the new format -- OCR, VLM and autonomous mode read
+        # its frames. Skipping it left them on a dead/garbled capture until a
+        # TV came back. The display retry loop builds the display pipeline
+        # against the new ustreamer when a TV is connected.
         if not self.display_connected:
-            logger.debug("[Recovery] Skipping format change recovery - display disconnected")
+            logger.info("[Recovery] No display - restarting ustreamer only for the new format")
+            self._restart_ustreamer(even_without_display=True)
             return
 
         # Show loading screen while we adapt to new format
@@ -2516,6 +2528,27 @@ class Minus:
         remaining = self.blocking_paused_until - time.time()
         return max(0, int(remaining))
 
+    def park_display_for_tv_off(self) -> bool:
+        """The TV has been off for a while: stop decoding video for it.
+
+        Called by the health monitor (DISPLAY_PARK_AFTER_S). Tears down the
+        display pipeline and arms the display retry loop, which polls sysfs
+        (free) and brings the pipeline back up -- DPMS reinit and audio
+        re-prepare included -- when a TV is connected. Ad blocking, OCR, VLM,
+        ASR and audio keep running; they don't use this pipeline.
+        """
+        ab = getattr(self, 'ad_blocker', None)
+        if ab is None or not hasattr(ab, 'park') or not self.display_connected:
+            return False
+        if self._any_hdmi_output_connected():
+            return False          # the TV came back meanwhile
+        if not ab.park():
+            return False
+        self.display_connected = False
+        self.display_error = "TV off - display pipeline paused until a TV is connected"
+        self._start_display_retry_loop()
+        return True
+
     def notify_hdmi_reconnect(self):
         """Called by the health monitor when the TV output reconnects."""
         self.hdmi_reconnect_time = time.time()
@@ -2814,6 +2847,28 @@ class Minus:
             return True
         return self._compare_frames(frame, self.vlm_prev_frame) > self.scene_change_threshold
 
+    VLM_CORROBORATE_CONFIDENCE = 0.95
+    VLM_CORROBORATE_MAX_AGE_S = 3.0
+
+    def _vlm_recent_confident_ad(self, now: float = None) -> bool:
+        """VLM's latest verdict is a near-certain AD from the last few seconds.
+
+        Corroboration for an OCR keyword that would otherwise wait a second
+        frame (bare 'sponsored', 'order now', ...). vlm_ad_detected alone
+        didn't count it: the sliding window still held the show's NO-AD votes,
+        so a Fanatics ad with VLM at p>=0.99 from its first frame and OCR
+        reading 'Sponsored' on alternate frames blocked ~6 s late (minus,
+        2026-10-30 19:04). Needs both signals on the same moment, so a 1-frame
+        OCR artifact still needs VLM to be wrong too, at >=0.95.
+        """
+        hist = getattr(self, 'vlm_decision_history', None)
+        if not hist:
+            return False
+        ts, is_ad, conf = hist[-1][0], hist[-1][1], (hist[-1][2] if len(hist[-1]) > 2 else 0.0)
+        now = time.time() if now is None else now
+        return (bool(is_ad) and conf >= self.VLM_CORROBORATE_CONFIDENCE
+                and now - ts <= self.VLM_CORROBORATE_MAX_AGE_S)
+
     def _add_vlm_decision(self, is_ad: bool, confidence: float = 0.75):
         """Add a VLM decision to the sliding window history with confidence."""
         now = time.time()
@@ -3090,8 +3145,15 @@ class Minus:
         except Exception:
             pass
         display = av_sync.connected_display() or {}
+        pipeline_ms = None
+        ab = getattr(self, 'ad_blocker', None)
+        if ab is not None and hasattr(ab, 'get_display_latency_ms'):
+            try:
+                pipeline_ms = ab.get_display_latency_ms()
+            except Exception:
+                pipeline_ms = None
         return {
-            'ustreamer_ms': ms, 'source_fps': fps,
+            'ustreamer_ms': ms, 'source_fps': fps, 'display_pipeline_ms': pipeline_ms,
             'display_id': display.get('id'), 'display_name': display.get('name'),
             'display_video_ms': display.get('video_ms'), 'display_audio_ms': display.get('audio_ms'),
         }
@@ -5236,6 +5298,7 @@ class Minus:
                         for kw in keywords_found)
                     fast_fire = (definitive_ocr
                                  or self.vlm_ad_detected
+                                 or self._vlm_recent_confident_ad()
                                  or self._asr_verdict() == 'confirm')
                     required_frames = (1 if fast_fire
                                        else self.OCR_TRANSIENCE_MIN_FRAMES)

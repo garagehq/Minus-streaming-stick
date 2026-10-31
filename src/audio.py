@@ -1551,7 +1551,8 @@ class AudioPassthrough:
                 self.legacy_trim_ms = None
             self.sync_offsets[display] = offset
             self._sync_settings_changed()
-        box_video = av_sync.video_latency_ms(m['ustreamer_ms'], m.get('source_fps') or 60.0)
+        box_video = av_sync.video_latency_ms(m['ustreamer_ms'], m.get('source_fps') or 60.0,
+                                             m.get('display_pipeline_ms'))
         video_ms = box_video + disp_v
         aq = self._queue_level_ms('audioqueue') or 0.0
         self._cap_audioqueue()
@@ -1569,6 +1570,8 @@ class AudioPassthrough:
             'at': time.time(), 'reason': reason,
             'ustreamer_ms': round(m['ustreamer_ms'], 1), 'source_fps': m.get('source_fps'),
             'box_video_ms': round(box_video, 1),
+            'display_pipeline_ms': (None if m.get('display_pipeline_ms') is None
+                                    else round(m['display_pipeline_ms'], 1)),
             'display': self._display_name, 'display_video_ms': disp_v, 'display_audio_ms': disp_a,
             'video_latency_ms': round(video_ms, 1), 'audioqueue_ms': round(aq, 1),
             'offset_ms': offset, 'target_delay_ms': target,
@@ -1576,7 +1579,9 @@ class AudioPassthrough:
             'audioqueue_drained_to_ms': drained,
         }
         logger.info(f"[AudioPassthrough] A/V calibration ({reason}): box video {box_video:.0f}ms "
-                    f"(ustreamer {m['ustreamer_ms']:.0f}ms) + {self._display_name} {disp_v:.0f}ms"
+                    f"(ustreamer {m['ustreamer_ms']:.0f}ms, display pipeline "
+                    f"{'n/a' if m.get('display_pipeline_ms') is None else '%.0fms' % m['display_pipeline_ms']}) "
+                    f"+ {self._display_name} {disp_v:.0f}ms"
                     f" - display audio {disp_a:.0f}ms, audioqueue {aq:.0f}ms, offset {offset:+.0f}ms "
                     f"-> target {target:.0f}ms, delay {self.SYNC_BASELINE_MS:.0f}ms"
                     + ("" if value is not None else

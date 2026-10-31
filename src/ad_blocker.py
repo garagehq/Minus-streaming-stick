@@ -25,6 +25,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import json
+import statistics
 import subprocess
 from collections import deque
 from pathlib import Path
@@ -88,6 +89,11 @@ class DRMAdBlocker:
         self._pipeline_errors = 0
         self._last_error_time = 0
         self._pipeline_restarting = False
+        self._display_latency_samples = deque(maxlen=120)
+        self._display_latency_time = 0.0
+        # True while the display pipeline is torn down because the TV is off
+        # (see park()). start() rebuilds it from scratch.
+        self.parked = False
         self._restart_lock = threading.Lock()
         # Serialises display-pipeline construction. See _init_pipeline.
         self._build_lock = threading.RLock()
@@ -416,8 +422,12 @@ class DRMAdBlocker:
                 if self._pipeline_has_colorbalance else ""
             )
             pipeline_str = (
+                # do-timestamp: each frame carries the running time it arrived
+                # at, so the probe before kmssink can measure the display
+                # path's latency for lip sync (get_display_latency_ms).
+                # kmssink runs sync=false, so timestamps don't pace anything.
                 f"souphttpsrc location=http://localhost:{self.ustreamer_port}/stream "
-                f"is-live=true blocksize=524288 timeout=10 retries=-1 keep-alive=true ! "
+                f"is-live=true do-timestamp=true blocksize=524288 timeout=10 retries=-1 keep-alive=true ! "
                 f"multipartdemux ! jpegparse ! identity name=framegate ! mppjpegdec ! video/x-raw,format=NV12 ! "
                 f"{colorbalance_part}"
                 f"queue max-size-buffers=3 leaky=downstream name=videoqueue ! "
@@ -467,6 +477,19 @@ class DRMAdBlocker:
             if current_time - self._last_restart_time > self._success_reset_time:
                 self._consecutive_failures = 0
 
+        # Display-path latency: arrival at souphttpsrc -> about to be shown.
+        try:
+            pts = info.get_buffer().pts
+            pipe = self.pipeline
+            clock = pipe.get_clock() if pipe is not None else None
+            if clock is not None and pts != Gst.CLOCK_TIME_NONE:
+                lat = (clock.get_time() - pipe.get_base_time() - pts) / 1e6
+                if 0.0 <= lat < 1000.0:
+                    self._display_latency_samples.append(lat)
+                    self._display_latency_time = current_time
+        except Exception:
+            pass
+
         with self._fps_lock:
             self._frame_count += 1
             elapsed = current_time - self._fps_start_time
@@ -476,6 +499,21 @@ class DRMAdBlocker:
                 self._fps_start_time = current_time
 
         return Gst.PadProbeReturn.OK
+
+    def get_display_latency_ms(self):
+        """Median ms from a frame arriving from ustreamer to it being handed to
+        kmssink, over the last ~4 s, or None when the display isn't running.
+
+        Measured because it moves: colour correction (videobalance) on a 4K
+        frame added ~20 ms (median 30 ms vs 10.5 ms without, minus
+        2026-10-30), which a fixed constant in av_sync missed -- the sound ran
+        that much early.
+        """
+        samples = list(getattr(self, '_display_latency_samples', ()))
+        if (len(samples) < 20 or getattr(self, 'parked', False)
+                or time.time() - getattr(self, '_display_latency_time', 0.0) > 5.0):
+            return None
+        return float(statistics.median(samples))
 
     def _framegate_probe(self, pad, info, user_data):
         """Rate-limit frames ahead of the decoder while thermally degraded.
@@ -685,8 +723,10 @@ class DRMAdBlocker:
         self._stop_loading_animation()
         self._stop_no_signal_animation()
 
-        # If we're in loading or no-signal mode, need to reinitialize the normal pipeline
-        if self.current_source in ('loading', 'no_hdmi_device'):
+        # If we're in loading or no-signal mode, or parked for a TV that was
+        # off, need to reinitialize the normal pipeline
+        if self.current_source in ('loading', 'no_hdmi_device') or getattr(self, 'parked', False):
+            self.parked = False
             logger.info(f"[DRMAdBlocker] Transitioning from {self.current_source} to normal pipeline")
             # Stop and destroy the standalone pipeline
             if self.pipeline:
@@ -757,6 +797,28 @@ class DRMAdBlocker:
         except Exception as e:
             logger.error(f"[DRMAdBlocker] Failed to start pipeline: {e}")
             return False
+
+    def park(self):
+        """Tear the display pipeline down while the TV is off.
+
+        With the TV off kmssink still takes every frame: souphttpsrc +
+        mppjpegdec keep decoding 4K for a screen nobody has (~80% of a core
+        plus the VPU), which held minus at 78-84 C all night against ~65 C
+        with no display. Blocking, OCR and VLM don't need this pipeline
+        (they read ustreamer). start() rebuilds it -- with the DPMS reinit --
+        when a TV is connected again.
+        """
+        with self._build_lock:
+            if getattr(self, 'parked', False):
+                return False
+            self._stop_watchdog_thread()
+            self._stop_loading_animation()
+            self._stop_no_signal_animation()
+            self._teardown_pipeline()
+            self.parked = True
+            self._last_buffer_time = 0
+            logger.info("[DRMAdBlocker] Display pipeline parked (TV off)")
+            return True
 
     def _update_frame_resolution(self):
         """Update frame resolution and recalculate preview dimensions."""
@@ -958,6 +1020,9 @@ class DRMAdBlocker:
             with self._build_lock:
                 if self.current_source in ('loading', 'no_hdmi_device'):
                     logger.info(f"[DRMAdBlocker] Restart skipped - {self.current_source} screen is up")
+                    return
+                if getattr(self, 'parked', False):
+                    logger.info("[DRMAdBlocker] Restart skipped - display parked (TV off)")
                     return
                 if self.pipeline:
                     try:

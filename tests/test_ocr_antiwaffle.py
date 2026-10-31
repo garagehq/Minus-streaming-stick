@@ -211,8 +211,8 @@ class TestCaptureCadence(unittest.TestCase):
 
     def test_defaults(self):
         import capture
-        self.assertEqual(capture._MIN_CAPTURE_INTERVAL, 0.5)
-        self.assertEqual(capture._MIN_CAPTURE_INTERVAL_BLOCKING, 0.5)
+        self.assertEqual(capture._MIN_CAPTURE_INTERVAL, 0.2)
+        self.assertEqual(capture._MIN_CAPTURE_INTERVAL_BLOCKING, 0.2)
 
     def test_env_overridable(self):
         import importlib

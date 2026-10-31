@@ -54,7 +54,12 @@ _capture_lock = threading.Lock()
 _last_capture_time = 0.0
 # NOTE: this limiter is GLOBAL — the OCR loop and the VLM loop share it — so
 # each loop's effective cadence is roughly 2x the interval below.
-_MIN_CAPTURE_INTERVAL = float(os.environ.get('MINUS_CAPTURE_MIN_INTERVAL', '0.5'))
+# 0.5 -> 0.2 (2026-10-30): at 0.5 the two loops took turns and each waited
+# ~0.4 s per frame for the other (cap=600-900 ms in the OCR log vs ~100 ms
+# for the fetch itself), so OCR read the screen ~1x/s and ad blocks started
+# a second later than they had to. Snapshots are frames ustreamer already
+# encoded, and decode_for_detection made each one ~4x cheaper to decode.
+_MIN_CAPTURE_INTERVAL = float(os.environ.get('MINUS_CAPTURE_MIN_INTERVAL', '0.2'))
 # During a block the interval used to be RAISED to 1.0s, on the reasoning that
 # the MPP encoder is busy compositing the overlay and "glitches during blocking
 # are OK". That is true of the picture — the overlay covers it — but it also
@@ -67,7 +72,7 @@ _MIN_CAPTURE_INTERVAL = float(os.environ.get('MINUS_CAPTURE_MIN_INTERVAL', '0.5'
 # distribution); this buys the latency back from cadence instead of by
 # weakening the flap resistance.
 _MIN_CAPTURE_INTERVAL_BLOCKING = float(
-    os.environ.get('MINUS_CAPTURE_MIN_INTERVAL_BLOCKING', '0.5'))
+    os.environ.get('MINUS_CAPTURE_MIN_INTERVAL_BLOCKING', '0.2'))
 
 # Blocking state cache to avoid repeated API calls
 _blocking_state_cache = {'enabled': False, 'last_check': 0.0}
@@ -163,6 +168,57 @@ def _is_blocking_active(port=9090):
     return _blocking_state_cache['enabled']
 
 
+def jpeg_size(data: bytes):
+    """(width, height) from a JPEG's SOF marker, or None. Reads headers only."""
+    i, n = 2, len(data)
+    if n < 4 or data[0] != 0xFF or data[1] != 0xD8:
+        return None
+    while i + 9 < n:
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0xFF:          # fill byte
+            i += 1
+            continue
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        seg = (data[i + 2] << 8) | data[i + 3]
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            h = (data[i + 5] << 8) | data[i + 6]
+            w = (data[i + 7] << 8) | data[i + 8]
+            return w, h
+        i += 2 + seg
+    return None
+
+
+_REDUCED_FLAGS = {1: cv2.IMREAD_COLOR, 2: cv2.IMREAD_REDUCED_COLOR_2,
+                  4: cv2.IMREAD_REDUCED_COLOR_4, 8: cv2.IMREAD_REDUCED_COLOR_8}
+
+
+def decode_for_detection(data: bytes, img_array=None):
+    """Decode a snapshot straight to (about) 960x540 for OCR/VLM.
+
+    A 4K frame used to be decoded in full (~63 ms on minus) only to be
+    shrunk to 960x540. libjpeg can decode at 1/2, 1/4 or 1/8 scale in the DCT
+    domain: a 4K frame comes out at 960x540 directly in ~17 ms, PSNR 57.6 dB
+    against decode+INTER_AREA (mean pixel difference 0.11). The largest
+    reduction that stays >= 960x540 is used; any remainder is resized as before.
+    """
+    if img_array is None:
+        img_array = np.frombuffer(data, dtype=np.uint8)
+    size = jpeg_size(data)
+    scale = 1
+    if size:
+        w, h = size
+        while scale < 8 and w // (scale * 2) >= 960 and h // (scale * 2) >= 540:
+            scale *= 2
+    img = cv2.imdecode(img_array, _REDUCED_FLAGS[scale])
+    if img is None and scale != 1:
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    return img
+
+
 # /snapshot/raw older than this (X-Raw-Age, seconds) is not the current picture.
 RAW_STALE_S = 1.0
 RAW_STALE_RETRY_WAIT_S = 0.3
@@ -206,9 +262,8 @@ class UstreamerCapture:
     def capture(self):
         """Capture frame via HTTP snapshot and return as numpy array.
 
-        Uses dynamic rate limiting based on blocking state:
-        - During normal operation: 500ms minimum between captures
-        - During blocking: 1s minimum (MPP encoder busy with overlays)
+        Rate-limited globally (OCR and VLM share the limit) to
+        _MIN_CAPTURE_INTERVAL / _MIN_CAPTURE_INTERVAL_BLOCKING.
 
         Uses persistent HTTP session with connection pooling to avoid
         subprocess overhead from curl.
@@ -249,7 +304,7 @@ class UstreamerCapture:
             if response.status_code == 200:
                 # Decode JPEG directly from memory (no disk I/O)
                 img_array = np.frombuffer(response.content, dtype=np.uint8)
-                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                img = decode_for_detection(response.content, img_array)
                 if img is not None:
                     # Scale to 960x540 for OCR - model uses 960x960 anyway
                     # Using INTER_AREA for best quality downscaling, fast on 4K->540p

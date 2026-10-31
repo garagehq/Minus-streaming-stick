@@ -39,10 +39,14 @@ import time
 # and half a refresh until the middle of the screen is scanned out (~8).
 DISPLAY_SIDE_MS = 28.0
 
-# The audio path's own latency outside syncqueue: alsasrc latency-time
-# (10 ms) + alsasink's buffer (buffer-time 50 ms, kept nearly full).
-# audioqueue's level is measured live and added on top.
-AUDIO_PATH_MS = 55.0
+# The audio path's latency beyond syncqueue's min-threshold-time. It was
+# assumed to be +55 ms (alsasrc period + alsasink buffer), but measured from
+# the kernel's ALSA pointers (capture appl_ptr - playback hw_ptr, minus,
+# 2026-10-24) the sound reaches the DAC ~20 ms SOONER than the threshold:
+# syncqueue's level is in buffer timestamps, which run ahead of the samples
+# it really holds (level 360 ms vs 310 ms of samples in the process). With +55
+# every delay came out ~75 ms short, i.e. the sound early.
+AUDIO_PATH_MS = -20.0
 
 # audioqueue (after syncqueue) absorbs the drift between the HDMI-in and
 # HDMI-out audio clocks: it creeps up and, being leaky, drops its oldest audio
@@ -101,9 +105,22 @@ def measure_ustreamer_ms(port: int = 9090, frames: int = 10, timeout: float = 3.
     return statistics.median(lat) if lat else None
 
 
-def video_latency_ms(ustreamer_ms: float, source_fps: float = 60.0) -> float:
+# kmssink's part, which the pipeline probe can't see: SetPlane blocks until
+# the next vblank (0-16.7 ms, ~8 average) plus half a refresh until the middle
+# of the screen is scanned out (~8).
+SCANOUT_MS = 16.0
+
+
+def video_latency_ms(ustreamer_ms: float, source_fps: float = 60.0,
+                     display_pipeline_ms: float = None) -> float:
+    """Box video latency. display_pipeline_ms is the display pipeline's own
+    measured latency (DRMAdBlocker.get_display_latency_ms: arrival from
+    ustreamer -> handed to kmssink); without it the fixed DISPLAY_SIDE_MS is
+    used, which leaves out colour correction (~20 ms at 4K)."""
     fps = source_fps if source_fps and source_fps > 1 else 60.0
-    return 1000.0 / fps + ustreamer_ms + DISPLAY_SIDE_MS
+    display = (display_pipeline_ms + SCANOUT_MS if display_pipeline_ms is not None
+               else DISPLAY_SIDE_MS)
+    return 1000.0 / fps + ustreamer_ms + display
 
 
 def target_delay_ms(video_ms: float, audioqueue_ms: float = 0.0, trim_ms: float = 0.0,
