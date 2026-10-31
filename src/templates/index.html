@@ -749,13 +749,22 @@
                 <p class="help-text">After the TV reconnects, suppress ad blocking for 90 seconds so you can navigate menus without overlays jumping in.</p>
 
                 <div class="setting-item" style="margin-top: 1rem;">
-                    <span class="setting-label">Only Block When There's Sound</span>
+                    <span class="setting-label">Only Block When There's Sound (picture-only detections)</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="block-requires-audio-toggle" checked onchange="toggleOptimization('block_requires_audio', this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
                 <p class="help-text">Menus, home-screen banners and paused videos are silent. When only the picture model thinks it sees an ad and the input has been silent for 3 seconds, no block starts (and such a block ends after 10 seconds of silence). Ads whose on-screen text Minus can read are blocked either way.</p>
+
+                <div class="setting-item" style="margin-top: 1rem;">
+                    <span class="setting-label">No Blocking Without Sound (all ads)</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="block-only-with-sound-toggle" checked onchange="toggleOptimization('block_only_with_sound', this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p class="help-text">Nothing is blocked unless the input has had sound in the last 3 seconds, even ads Minus can read on screen, so browsing web pages on the streaming stick isn't blacked out by their ads. A block also ends after 10 seconds of silence. Silent ads (frozen end cards, still image ads) stay on screen while this is on.</p>
 
                 <div class="setting-item" style="margin-top: 1rem;">
                     <span class="setting-label">Greyscale Ad Preview</span>
@@ -2292,6 +2301,7 @@
                 hdmi_reconnect_grace: 'hdmi-grace-toggle',
                 greyscale_preview: 'greyscale-preview-toggle',
                 block_requires_audio: 'block-requires-audio-toggle',
+                block_only_with_sound: 'block-only-with-sound-toggle',
             };
             const toggleId = toggleIds[key];
             try {
@@ -2483,6 +2493,7 @@
                 document.getElementById('hdmi-grace-toggle').checked = !!data.hdmi_reconnect_grace;
                 document.getElementById('greyscale-preview-toggle').checked = !!data.greyscale_preview;
                 document.getElementById('block-requires-audio-toggle').checked = data.block_requires_audio !== false;
+                document.getElementById('block-only-with-sound-toggle').checked = data.block_only_with_sound !== false;
             } catch (error) {
                 console.error('Failed to load optimization settings:', error);
             }

@@ -2478,6 +2478,25 @@ class Minus:
         """
         if not (getattr(self, '_system_settings', None) or {}).get('block_requires_audio', True):
             return None
+        return self._input_quiet_seconds()
+
+    def _sound_gate_quiet_seconds(self):
+        """Like _audio_quiet_seconds, for setting `block_only_with_sound`
+        (default on): the gate for EVERY detection, OCR included.
+
+        Web pages in the streaming stick's browser carry ads OCR can read
+        ("Sponsored", "Ad"), and blocking the whole screen there made the
+        browser impossible to use. A silent screen isn't an ad playing, so
+        with this on nothing blocks without sound. The trade-off: silent ad
+        cards (frozen end cards, static image ads) aren't blocked either --
+        the reason block_requires_audio was narrowed to VLM-alone on 10-19.
+        """
+        if not (getattr(self, '_system_settings', None) or {}).get('block_only_with_sound', True):
+            return None
+        return self._input_quiet_seconds()
+
+    def _input_quiet_seconds(self):
+        """Seconds the HDMI input has been silent, or None when unknown."""
         audio = getattr(self, 'audio', None)
         if audio is None or not hasattr(audio, 'seconds_since_audible'):
             return None
@@ -3174,6 +3193,7 @@ class Minus:
             'block_falloff': True,        # Shorten min-block duration on consecutive ads
             'hdmi_reconnect_grace': True, # Disable ad blocking for 90s after HDMI reconnect
             'block_requires_audio': True, # No block while the input is silent (menus, pauses)
+            'block_only_with_sound': True, # ...for ANY detection, OCR too (browsing web pages)
             'greyscale_preview': True,    # Desaturate the ad preview window in blocking mode
             'debug_overlay': True,        # Show BLOCKING header + bottom-left stats + top-right OCR snippet
             'ir_enabled': False,          # Show REI HDMI-switch IR remote in autonomous mode
@@ -3435,7 +3455,7 @@ class Minus:
     def set_optimization_setting(self, key: str, enabled: bool) -> dict:
         """Update one of the optimization toggles and persist."""
         allowed = {'block_falloff', 'hdmi_reconnect_grace', 'greyscale_preview',
-                   'block_requires_audio'}
+                   'block_requires_audio', 'block_only_with_sound'}
         if key not in allowed:
             return {'success': False, 'error': f'unknown setting {key}'}
         self._system_settings[key] = bool(enabled)
@@ -4216,6 +4236,19 @@ class Minus:
                                 f"a pause, not an ad)")
                         should_start = False
 
+                # 'No Blocking Without Sound' (block_only_with_sound): the same
+                # gate for every source, OCR included -- browsing web pages on
+                # the stick, whose ads OCR reads, must not black out the screen.
+                if should_start:
+                    quiet = self._sound_gate_quiet_seconds()
+                    if quiet is not None and quiet >= self.AUDIO_GATE_START_QUIET_S:
+                        if now - getattr(self, '_sound_gate_logged_at', 0.0) >= 10.0:
+                            self._sound_gate_logged_at = now
+                            logger.info(
+                                f"Blocking suppressed - no audio for {quiet:.0f}s "
+                                f"({source} saw an ad; 'No Blocking Without Sound' is on)")
+                        should_start = False
+
                 if should_start and self.is_in_hdmi_reconnect_grace():
                     remaining = self.get_hdmi_reconnect_grace_remaining()
                     logger.info(
@@ -4368,9 +4401,13 @@ class Minus:
                 # Only after the minimum block time, and never while the ad's
                 # own countdown says it is still running (checked above).
                 audio_stop = False
-                if (not release_stale and blocking_elapsed >= min_duration
-                        and self.blocking_source == 'vlm' and not self.ocr_ad_detected):
-                    quiet = self._audio_quiet_seconds()
+                if not release_stale and blocking_elapsed >= min_duration:
+                    quiet = None
+                    if self.blocking_source == 'vlm' and not self.ocr_ad_detected:
+                        quiet = self._audio_quiet_seconds()
+                    sound_gate = self._sound_gate_quiet_seconds()
+                    if sound_gate is not None:
+                        quiet = sound_gate        # any source, OCR included
                     if quiet is not None and quiet >= self.AUDIO_GATE_STOP_QUIET_S:
                         logger.info(f"[Audio] Ending {self.blocking_source} block: "
                                     f"no audio for {quiet:.0f}s")

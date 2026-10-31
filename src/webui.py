@@ -3015,6 +3015,8 @@ class WebUI:
                         'greyscale_preview': self.minus.greyscale_preview_enabled,
                         'block_requires_audio': bool(self.minus._system_settings.get(
                             'block_requires_audio', True)),
+                        'block_only_with_sound': bool(self.minus._system_settings.get(
+                            'block_only_with_sound', True)),
                     })
 
                 data = request.get_json() or {}
