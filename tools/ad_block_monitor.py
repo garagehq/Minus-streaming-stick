@@ -107,6 +107,10 @@ def main():
             # the prior block's last ad frame). Reset so recovery is only
             # measured from an ad-on-screen marker seen within this block.
             last_ad_signal_t = None
+        # VLM (or ASR) joined the block: the per-frame tag says so. Such a
+        # block has independent corroboration, like a VLM-source one.
+        if cur is not None and ('[BLOCKING OCR+VLM' in ln or '+ASR]' in ln):
+            cur['corroborated'] = True
         if cur is not None and 'OCR detected ad keywords' in ln:
             for kw in re.findall(r"'([^']+)'", ln.split(':')[-1]):
                 cur['kw'].add(kw)
@@ -140,10 +144,13 @@ def main():
             # sustained throughout, OCR captured 'skip in' early then only
             # 'sponsored' once the skip prompt scrolled — that's a real
             # ad, not a weak-keyword FP.
+            # Also skip OCR blocks VLM/ASR joined: the two 2026-11-01 flags
+            # were a Capital One ad (VLM 0.99, ASR heard "capital one") and
+            # a political ad with its countdown, both 'sponsored'-only.
             if (kws and kws.issubset({'sponsored'}) and dur > 20
-                    and cur['src'] == 'OCR'):
+                    and cur['src'] == 'OCR' and not cur.get('corroborated')):
                 cur['flags'].append('WEAK_FP(sponsored-only)')
-            if not kws and cur['src'] == 'OCR' and dur > 20:
+            if not kws and cur['src'] == 'OCR' and dur > 20 and not cur.get('corroborated'):
                 cur['flags'].append('NO_KW')
             if '[SAFEGUARD]' in ' '.join(b['start_s'] for b in []):
                 pass
@@ -178,6 +185,25 @@ def main():
             f"  dur={b['dur']}s src={b['src']} kw={sorted(b['kw'])} "
             f"stopped_by={b.get('stopped_by','?')} "
             f"recover={rec} flags={b['flags']}")
+    # Flagged blocks older than the last 12 used to be counted in the verdict
+    # but never shown, so an overnight run said "2 suspected false positives"
+    # with no way to find them.
+    shown = set(id(b) for b in blocks[-12:])
+    older_flagged = [b for b in blocks if b['flags'] and id(b) not in shown]
+    if older_flagged:
+        lines.append("  flagged earlier:")
+        for b in older_flagged:
+            st = b['start']
+            if hasattr(st, 'strftime'):
+                start = st.strftime('%H:%M:%S')
+            elif isinstance(st, (int, float)):
+                st = int(st) % 86400          # seconds since midnight
+                start = f"{st // 3600:02d}:{st % 3600 // 60:02d}:{st % 60:02d}"
+            else:
+                start = st
+            lines.append(
+                f"    {start} dur={b['dur']}s src={b['src']} kw={sorted(b['kw'])} "
+                f"stopped_by={b.get('stopped_by','?')} flags={b['flags']}")
     verdict = 'OK'
     if query_errs:
         verdict = 'ATTENTION: query_image errors'

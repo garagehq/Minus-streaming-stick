@@ -1474,7 +1474,12 @@ class Minus:
             # True, which prevented the display retry loop from ever firing
             # — the pipeline then stayed dead until the next service restart.
             pipeline_ok = False
-            if self.ad_blocker:
+            # No TV attached (free sysfs read, fails open): don't try. The
+            # attempt could only fail, and logged an [E] "Failed to start
+            # pipeline" on every source wake with the TV off -- nightly in
+            # autonomous mode (minus, 2026-11-01 04:00).
+            tv_attached = self._any_hdmi_output_connected()
+            if self.ad_blocker and tv_attached:
                 logger.info("[Recovery] Starting video pipeline...")
                 pipeline_ok = bool(self.ad_blocker.start())
 
@@ -1496,10 +1501,14 @@ class Minus:
                 # still disconnected. Mark display as down and hand off to
                 # the retry loop, which will keep trying every 7s and pick up
                 # the moment HDMI-OUT comes back.
-                logger.warning(
-                    "[Recovery] Display pipeline start failed (HDMI-OUT likely "
-                    "disconnected) — marking display down and arming retry loop"
-                )
+                if tv_attached:
+                    logger.warning(
+                        "[Recovery] Display pipeline start failed (HDMI-OUT likely "
+                        "disconnected) — marking display down and arming retry loop"
+                    )
+                else:
+                    logger.info("[Recovery] No TV attached — the display retry loop "
+                                "starts the display when one is connected")
                 self.display_connected = False
                 self.display_error = (
                     "Display output not available. Check HDMI-TX connection to TV/monitor."
