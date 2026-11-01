@@ -222,6 +222,38 @@ class TestCaptureResumesWithoutATV(unittest.TestCase):
         mm.audio.resume_watchdog.assert_called_once()
         mm.audio.unmute.assert_not_called()
 
+    def _restore(self, tv):
+        import minus as m
+        from unittest.mock import patch
+        mm = object.__new__(m.Minus)
+        mm._startup_waiting_for_signal = False
+        mm._hdmi_signal_lost = True
+        mm.ad_blocker = MagicMock()
+        mm.ad_blocker.start.return_value = tv
+        mm.audio = MagicMock()
+        mm._set_led_state = MagicMock()
+        mm._restart_ustreamer = MagicMock()
+        mm._start_display_retry_loop = MagicMock()
+        mm._schedule_audio_reprepare = MagicMock()
+        mm._any_hdmi_output_connected = MagicMock(return_value=tv)
+        with patch('minus.time.sleep'):
+            mm._on_hdmi_restored()
+        return mm
+
+    def test_no_tv_does_not_attempt_the_display(self):
+        """It could only fail, and logged an [E] on every source wake with
+        the TV off (minus 2026-11-01 04:00)."""
+        mm = self._restore(tv=False)
+        mm.ad_blocker.start.assert_not_called()
+        mm._start_display_retry_loop.assert_called_once()
+        mm.audio.resume_watchdog.assert_called_once()
+
+    def test_tv_attached_still_starts_the_display(self):
+        mm = self._restore(tv=True)
+        mm.ad_blocker.start.assert_called_once()
+        mm._start_display_retry_loop.assert_not_called()
+
+
 class TestCpuPercent(unittest.TestCase):
 
     def _hm(self):
