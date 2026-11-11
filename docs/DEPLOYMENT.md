@@ -98,6 +98,12 @@ muted from the first syllable, docs/ASR_BENCHMARKS.md).
   start while Minus still logged "Worker ready" (fixed: the worker now
   reports a failed load, and `sensevoice_npu.is_available` checks the
   imports). Check the boot log for `[ASRWorker] Fatal`.
+- **ustreamer needs `librga-dev` at build time.** Its Makefile enables RGA
+  (hardware BGR24->NV12 for the Google TV's 4K signal) only when the
+  library is installed; without it ustreamer converts on the CPU at
+  ~280% CPU and captures 20-30 fps instead of 30. The installer now
+  installs it, rebuilds from clean and prints whether RGA is on. Check:
+  `ldd ~/ustreamer-patched | grep rga`.
 - **Training clips are off by default.** `MINUS_ASR_CLIPS=1` turns the
   collector on (it budgets 8 GB of recordings); customer units leave it off.
 - **No desktop on HDMI-out.** Minus takes over the display, so the

@@ -111,7 +111,9 @@ APT_PACKAGES=(
     gstreamer1.0-plugins-bad gstreamer1.0-alsa gstreamer1.0-rockchip1
     gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 python3-gi python3-gst-1.0
     # ustreamer build (MPP JPEG encoder, FreeType overlays)
-    build-essential git pkg-config librockchip-mpp-dev libfreetype-dev
+    # librga-dev: RGA does the 4K BGR24->NV12 conversion in hardware; without
+    # it ustreamer converts on the CPU (~280% CPU, 20-30 fps instead of 30)
+    build-essential git pkg-config librockchip-mpp-dev librga-dev libfreetype-dev
     libjpeg-dev libevent-dev libbsd-dev
     # Python packages taken from Debian
     python3-pip python3-numpy python3-pil python3-yaml python3-psutil
@@ -164,7 +166,15 @@ else
     as_user git -C "${USTREAMER_SRC}" checkout -q "${USTREAMER_BRANCH}"
     as_user git -C "${USTREAMER_SRC}" merge -q --ff-only "origin/${USTREAMER_BRANCH}" || true
 fi
+# Build from clean: the Makefile picks up RGA only when librga-dev is
+# present, and make would otherwise keep objects built without it.
+as_user make -s -C "${USTREAMER_SRC}" clean >/dev/null
 as_user make -s -C "${USTREAMER_SRC}" WITH_MPP=1 -j"$(nproc)"
+if ldd "${USTREAMER_SRC}/ustreamer" | grep -q librga; then
+    echo "    RGA hardware colour conversion: on"
+else
+    echo "    WARNING: ustreamer built without RGA (is librga-dev installed?)"
+fi
 install -o "${RUN_USER}" -g "${RUN_USER}" -m 755 "${USTREAMER_SRC}/ustreamer" "${USTREAMER_BIN}"
 echo "    ${USTREAMER_BIN} ($(${USTREAMER_BIN} --version 2>/dev/null || echo '?'))"
 
