@@ -114,6 +114,12 @@ else
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     # One package missing from a mirror shouldn't stop the rest.
+    # Radxa images ship android-libcutils from bookworm-backports, and the
+    # bookworm adb pins an older one ("held broken packages"): take adb from
+    # backports too. Done first, so the bulk install below finds it present.
+    if ! dpkg -s adb >/dev/null 2>&1 && ! apt-get install -s adb >/dev/null 2>&1; then
+        apt-get install -y -qq -t bookworm-backports adb || echo "    WARNING: could not install adb"
+    fi
     if ! apt-get install -y -qq "${APT_PACKAGES[@]}"; then
         echo "    Bulk install failed; retrying one by one..."
         for p in "${APT_PACKAGES[@]}"; do
