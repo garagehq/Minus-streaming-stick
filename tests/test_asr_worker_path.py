@@ -62,3 +62,41 @@ def test_malloc_trimmer_is_glibc_trim():
 def test_malloc_trimmer_disabled_with_zero(monkeypatch):
     monkeypatch.setattr(asr_worker, 'TRIM_EVERY', 0)
     assert asr_worker._malloc_trimmer() is None
+
+
+class _LoadingProcess:
+    """Fake worker that 'loads' synchronously in start(): sets ready (and
+    failed, when fail=True) and stays alive, like a real worker that has
+    hit its finally block but not exited yet."""
+    fail = False
+
+    def __init__(self, target=None, args=(), **kw):
+        self.args = args
+        self.pid = 1
+
+    def start(self):
+        ready, failed = self.args[2], self.args[7]
+        if _LoadingProcess.fail:
+            failed.set()
+        ready.set()
+
+    def is_alive(self):
+        return True
+
+
+def _start_loading(monkeypatch, fail):
+    _LoadingProcess.fail = fail
+    monkeypatch.setattr(asr_worker, 'Process', _LoadingProcess)
+    p = asr_worker.ASRProcess()
+    monkeypatch.setattr(p, '_kill_process_locked', lambda: None)
+    return p.start(), p
+
+
+def test_failed_load_is_not_reported_ready(monkeypatch):
+    ok, p = _start_loading(monkeypatch, fail=True)
+    assert ok is False and not p.is_ready
+
+
+def test_successful_load_is_ready(monkeypatch):
+    ok, p = _start_loading(monkeypatch, fail=False)
+    assert ok is True and p.is_ready

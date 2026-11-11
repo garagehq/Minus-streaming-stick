@@ -18,3 +18,5 @@ rknn-toolkit-lite2==2.3.2
 kaldi-native-fbank==1.22.3
 sentencepiece==0.2.2
 soundfile==0.14.0
+# sensevoice_rknn.py (in the model dir) imports onnxruntime at load time
+onnxruntime==1.26.0

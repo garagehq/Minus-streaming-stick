@@ -92,6 +92,12 @@ muted from the first syllable, docs/ASR_BENCHMARKS.md).
   fine; its in-memory cached copy was not (dropping the page cache gave the
   right hash). Treat anything served from a box with suspect RAM as
   untrusted and check `SHA256SUMS` on the receiving side.
+- **The SenseVoice model needs `onnxruntime`.** Its `sensevoice_rknn.py`
+  imports it at load time; minus-2 happened to have it, so it was missing
+  from `requirements.txt`, and the first fresh unit's ASR worker died on
+  start while Minus still logged "Worker ready" (fixed: the worker now
+  reports a failed load, and `sensevoice_npu.is_available` checks the
+  imports). Check the boot log for `[ASRWorker] Fatal`.
 - **Training clips are off by default.** `MINUS_ASR_CLIPS=1` turns the
   collector on (it budgets 8 GB of recordings); customer units leave it off.
 - **No desktop on HDMI-out.** Minus takes over the display, so the

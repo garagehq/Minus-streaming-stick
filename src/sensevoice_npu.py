@@ -33,6 +33,11 @@ def is_available(model_dir: str = SENSEVOICE_DIR) -> bool:
     try:
         import rknnlite  # noqa: F401
         import kaldi_native_fbank  # noqa: F401
+        # The model dir's sensevoice_rknn.py imports these at load time.
+        import onnxruntime  # noqa: F401
+        import sentencepiece  # noqa: F401
+        import soundfile  # noqa: F401
+        import yaml  # noqa: F401
         return True
     except ImportError:
         return False

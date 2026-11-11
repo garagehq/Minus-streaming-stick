@@ -152,7 +152,7 @@ fi
 step 3 "Installing Python packages for ${RUN_USER}..."
 # Pinned to the versions on the reference box (minus-2).
 as_user pip3 install --user --break-system-packages --no-warn-script-location -q -r "${SCRIPT_DIR}/requirements.txt"
-as_user python3 -c "import cv2, numpy, flask, androidtv, pyclipper, shapely, rknnlite, kaldi_native_fbank, sentencepiece, soundfile" \
+as_user python3 -c "import cv2, numpy, flask, androidtv, pyclipper, shapely, rknnlite, kaldi_native_fbank, sentencepiece, soundfile, onnxruntime, yaml" \
     && echo "    Python imports OK"
 
 # ---------------------------------------------------------------------------

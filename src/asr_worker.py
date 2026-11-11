@@ -95,7 +95,7 @@ def resolve_engine() -> str:
 
 
 def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
-                     model_name, cpu_threads, npu_core=None):
+                     model_name, cpu_threads, npu_core=None, failed_event=None):
     """Worker process entrypoint.
 
     Args:
@@ -330,6 +330,14 @@ def _asr_worker_main(request_queue, response_queue, ready_event, shutdown_event,
         log.info("[ASRWorker] Shutdown signaled, exiting cleanly")
     except Exception as e:
         log.error(f"[ASRWorker] Fatal during startup/loop: {e}", exc_info=True)
+        # Set before ready_event (below): the parent sees ready_event while
+        # this process is still alive, so is_alive() alone took a failed
+        # load for success ("Worker ready" logged, ASR silently deaf).
+        if failed_event is not None:
+            try:
+                failed_event.set()
+            except Exception:
+                pass
     finally:
         # Best-effort signal so the parent's start() wait returns even
         # on load failure (so it can retry/give up rather than block 60s).
@@ -450,12 +458,14 @@ class ASRProcess:
             self.response_queue = Queue()
             self.ready_event = Event()
             self.shutdown_event = Event()
+            self.failed_event = Event()
 
             self.process = Process(
                 target=_asr_worker_main,
                 args=(self.request_queue, self.response_queue,
                       self.ready_event, self.shutdown_event,
-                      self.model_name, self.cpu_threads, self.npu_core),
+                      self.model_name, self.cpu_threads, self.npu_core,
+                      self.failed_event),
                 daemon=True,
                 name=f'ASRWorker-{self.model_name}'
             )
@@ -478,7 +488,7 @@ class ASRProcess:
                     f"(PID {self.process.pid}, model={self.model_name})...")
 
         ok = self.ready_event.wait(timeout=self.WORKER_LOAD_TIMEOUT)
-        if ok and self.process.is_alive():
+        if ok and not self.failed_event.is_set() and self.process.is_alive():
             elapsed = time.time() - start
             self.is_ready = True
             logger.info(f"[ASRProcess] Worker ready in {elapsed:.1f}s")
@@ -486,8 +496,12 @@ class ASRProcess:
 
         # Either timeout or worker died during load. Tear it down so
         # the next start() attempt gets a clean slate.
-        logger.error(f"[ASRProcess] Worker failed to become ready "
-                     f"after {self.WORKER_LOAD_TIMEOUT}s — killing")
+        if ok:
+            logger.error("[ASRProcess] Worker failed to load the model "
+                         "(see the [ASRWorker] error above)")
+        else:
+            logger.error(f"[ASRProcess] Worker failed to become ready "
+                         f"after {self.WORKER_LOAD_TIMEOUT}s — killing")
         self._kill_process_locked()
         return False
 
