@@ -29,6 +29,7 @@ class FakeTap:
 
 
 def make(level=3000, **env):
+    env.setdefault('MINUS_ASR_CLIPS', 1)   # off by default; these tests need it on
     d = tempfile.mkdtemp()
     old = {k: os.environ.get(k) for k in env}
     os.environ.update({k: str(v) for k, v in env.items()})
@@ -179,6 +180,16 @@ class TestASRClipCollector(unittest.TestCase):
         c.on_detection({'source': 'asr', 'label': 'x', 'capture_start': now - 10})
         c._tick(now)
         self.assertEqual(entries(d), [])
+
+    def test_off_by_default(self):
+        old = os.environ.pop('MINUS_ASR_CLIPS', None)
+        try:
+            c = ASRClipCollector(FakeTap(), tempfile.mkdtemp(), engine='test',
+                                 delay_fn=lambda: 1.2)
+            self.assertFalse(c.enabled)
+        finally:
+            if old is not None:
+                os.environ['MINUS_ASR_CLIPS'] = old
 
     def test_budget_evicts_oldest(self):
         c, d = make(MINUS_ASR_CLIPS_BUDGET_MB=0.7)   # ~2 clips of 320 KB

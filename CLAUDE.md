@@ -90,7 +90,8 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
     - Live, captions off, 1.2s: 18/33 fully muted vs 6/32 before.
     - Simulated with `tests/asr_window_dump.py` +
       `tests/partial_name_sim.py`. Parakeet gains nothing from it.
-  - *Training clips* (`src/asr_clips.py`, `MINUS_ASR_CLIPS`): 10s WAV +
+  - *Training clips* (`src/asr_clips.py`, off unless `MINUS_ASR_CLIPS=1`
+    since 2026-11-10, so customer units don't fill the SD card): 10s WAV +
     JSON (ASR windows, OCR lines) around every detection, `caption_only`
     for names the ASR missed, plus random speech every 5 min. Saved to
     `screenshots/asr_clips`, 8 GB budget (a staging area: once
