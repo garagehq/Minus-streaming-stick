@@ -52,6 +52,12 @@ def test_offers_1080p60_and_4k30_not_4k60():
     assert not VIC_4K60 & set(vics)
 
 
+def test_offers_50hz_and_sd_modes():
+    vics = set(_vics(_edid()[128:]))
+    # 720p50, 576p 4:3/16:9, 480p 4:3/16:9, 1080p50, 640x480
+    assert {19, 17, 18, 2, 3, 31, 1} <= vics
+
+
 def test_no_detailed_timing_above_4k30():
     e = _edid()
     clks = _dtd_pixclk_khz(e[:128])

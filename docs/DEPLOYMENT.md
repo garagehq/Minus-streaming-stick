@@ -121,7 +121,8 @@ muted from the first syllable, docs/ASR_BENCHMARKS.md).
   (`/root/.minus_status_leds.json`).
 - **The input EDID caps at 4K30 / 1080p60, not 24-30 Hz only.** A 60 Hz
   source sent no picture at all under the old 30 Hz EDID (TV: No Signal).
-  `hdmirx-edid-4k30-1080p60.bin` offers 4K 24-30 and 1080p 24-60, never
+  `hdmirx-edid-4k30-1080p60.bin` offers 4K 24-30, 1080p 24-60, 720p50/60,
+  576p and 480p, never
   4K60, and the stream runs at the source rate (`MINUS_STREAM_FPS=0`).
 
 ### Manual install

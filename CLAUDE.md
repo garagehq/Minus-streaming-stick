@@ -375,7 +375,8 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   tmds_clk_ratio:0`, 5 V present), for 3.5 min after boot, while the
   driver default EDID locked it at 4K60 in 10 s.
   `hdmirx/hdmirx-edid-4k30-1080p60.bin` (now what `minus-hdmirx-edid.service`
-  loads) offers 4K 24/25/30 and 1080p 24/25/30/50/60, 720p60, 640x480; no
+  loads) offers 4K 24/25/30, 1080p 24/25/30/50/60, 720p50/60, 576p, 480p
+  and 640x480 (50 Hz + SD modes for European devices, DVD players, cameras); no
   4K60 (range limits max 61 Hz / 300 MHz, no GTF; `tests/test_hdmirx_edid.py`).
   That source now comes up at 1080p59.94 in ~9 s. `install.sh` also sets
   `MINUS_STREAM_FPS=0` (drop-in `minus.service.d/stream-fps.conf`) so the
