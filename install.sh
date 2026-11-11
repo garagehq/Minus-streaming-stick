@@ -198,15 +198,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step 6 "Installing the HDMI-RX EDID (24-30 Hz modes)..."
-# Sources pick the highest refresh the EDID offers; 4K60 arrives as NV12 the
-# pipeline can't keep up with. Applied at boot, before minus.service.
+step 6 "Installing the HDMI-RX EDID (max 4K30 / 1080p60)..."
+# Sources pick the highest refresh the EDID offers. 4K60 runs the SoC at
+# 80-85 C, so the EDID offers 4K 24/25/30 and 1080p 24-60 but no 4K60: a
+# source that needs 60 Hz gets 1080p60, the Google TV 1080p60 or 4K30. The
+# old 24-30 Hz-only EDID (hdmirx-edid-30hz.bin) left a 60 Hz-only source
+# sending nothing at all (TV: No Signal). Applied at boot, before minus.
 install -d /etc/minus
+install -m 644 "${SCRIPT_DIR}/hdmirx/hdmirx-edid-4k30-1080p60.bin" /etc/minus/
 install -m 644 "${SCRIPT_DIR}/hdmirx/hdmirx-edid-30hz.bin" /etc/minus/
 install -m 644 "${SCRIPT_DIR}/hdmirx/hdmirx-edid-default.bin" /etc/minus/
 install -m 644 "${SCRIPT_DIR}/minus-hdmirx-edid.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable -q minus-hdmirx-edid.service
+# With the input capped by the EDID, pass the source's own frame rate
+# through (1080p60 stays 60 fps, 4K30 stays 30) instead of ustreamer's
+# default 30 fps cap.
+install -d /etc/systemd/system/minus.service.d
+cat > /etc/systemd/system/minus.service.d/stream-fps.conf <<'CONF'
+[Service]
+Environment=MINUS_STREAM_FPS=0
+CONF
 
 # ---------------------------------------------------------------------------
 step 7 "Adding ${RUN_USER} to hardware groups..."
