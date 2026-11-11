@@ -1,194 +1,264 @@
 #!/bin/bash
-# Minus Installation Script
-# Sets up systemd service for auto-start on boot
-# Configures hostname and mDNS for easy network access
+# Kingblocker 9000 (Minus) installer for a ROCK 5B / 5B+ on Radxa Debian 12
+# (kernel 6.1, rk2410 images). Takes a fresh image to a running service:
+#
+#   git clone -b <branch> https://github.com/garagehq/Minus-streaming-stick.git ~/Minus
+#   cd ~/Minus && sudo ./install.sh
+#
+# Idempotent: re-running only does what is missing. Steps:
+#   1  device-tree overlays (status LED SPI, IR PWM)
+#   2  apt packages (GStreamer + Rockchip plugins, build deps, fonts, tools)
+#   3  Python packages (pip --user for the radxa user; the root service
+#      reads them through PYTHONPATH in minus.service)
+#   4  ustreamer (garagehq fork, MPP JPEG encoder) -> /home/radxa/ustreamer-patched
+#   5  SenseVoice ASR model (stock from Hugging Face if no model is installed)
+#   6  HDMI-RX EDID (24-30 Hz only, so sources send 4K30)
+#   7  groups (gpio/spi/video/audio) for the radxa user
+#   8  hostname + mDNS (only when MINUS_HOSTNAME is set)
+#   9  disable the desktop (it holds DRM/HDMI-out); auto-login on tty1
+#   10 systemd service
+#   11 screenshot dirs, login shell, unattended-upgrades
+#
+# Environment:
+#   MINUS_HOSTNAME=name      set the hostname (default: keep the current one)
+#   MINUS_USTREAMER_BRANCH   ustreamer branch to build (default asr-first)
+#   MINUS_SKIP_APT=1         skip apt (offline re-run)
+#   MINUS_START=1            start the service at the end
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="minus"
 SERVICE_FILE="${SCRIPT_DIR}/minus.service"
-HOSTNAME="minus"
+RUN_USER="radxa"
+RUN_HOME="$(getent passwd "${RUN_USER}" | cut -d: -f6)"
+USTREAMER_REPO="https://github.com/garagehq/ustreamer.git"
+USTREAMER_BRANCH="${MINUS_USTREAMER_BRANCH:-asr-first}"
+USTREAMER_SRC="${RUN_HOME}/ustreamer-garagehq"
+USTREAMER_BIN="${RUN_HOME}/ustreamer-patched"
+ASR_MODELS="${RUN_HOME}/asr_models"
+SENSEVOICE_HF="https://huggingface.co/happyme531/SenseVoiceSmall-RKNN2/resolve/main"
+TOTAL=11
 
-echo "=== Minus Installation ==="
-echo ""
+step() { echo; echo "[$1/${TOTAL}] $2"; }
+as_user() { sudo -u "${RUN_USER}" -H "$@"; }
 
-# Check root
+echo "=== Kingblocker 9000 installation ==="
+
 if [ "$EUID" -ne 0 ]; then
     echo "Please run as root: sudo $0"
     exit 1
 fi
-
-# Check if service file exists
+if [ -z "${RUN_HOME}" ] || [ ! -d "${RUN_HOME}" ]; then
+    echo "ERROR: user ${RUN_USER} not found"
+    exit 1
+fi
 if [ ! -f "$SERVICE_FILE" ]; then
     echo "ERROR: Service file not found: $SERVICE_FILE"
     exit 1
 fi
 
-# Enable hardware device-tree overlays needed by the IR transmitter (PWM3 on
-# pin 38) and the WS2812B status LED strip (SPI0_MOSI_M2 on pin 19). Both
-# overlays ship in /boot/dtbo with a .disabled suffix; we move them in place
-# and re-run u-boot-update so /boot/extlinux/extlinux.conf includes them on
-# the next boot.
 REBOOT_NEEDED=0
 
-echo "[1/12] Enabling hardware device-tree overlays..."
+# ---------------------------------------------------------------------------
+step 1 "Enabling hardware device-tree overlays..."
+# IR transmitter (PWM3 on pin 38) and the WS2812B status strip (SPI0_MOSI_M2
+# on pin 19). Both ship in /boot/dtbo with a .disabled suffix. The red mute
+# LED on pin 40 is plain GPIO and needs no overlay.
 NEED_UBOOT_UPDATE=0
-
-SPI_OVERLAY="/boot/dtbo/rk3588-spi0-m2-cs0-spidev.dtbo"
-if [ -f "${SPI_OVERLAY}.disabled" ] && [ ! -f "${SPI_OVERLAY}" ]; then
-    echo "    Enabling rk3588-spi0-m2-cs0-spidev (status LED strip)..."
-    mv "${SPI_OVERLAY}.disabled" "${SPI_OVERLAY}"
-    NEED_UBOOT_UPDATE=1
-elif [ -f "${SPI_OVERLAY}" ]; then
-    echo "    rk3588-spi0-m2-cs0-spidev already enabled"
-else
-    echo "    WARNING: rk3588-spi0-m2-cs0-spidev not found in /boot/dtbo (status LEDs unavailable)"
-fi
-
-PWM_OVERLAY="/boot/dtbo/rk3588-pwm3-m1.dtbo"
-if [ -f "${PWM_OVERLAY}.disabled" ] && [ ! -f "${PWM_OVERLAY}" ]; then
-    echo "    Enabling rk3588-pwm3-m1 (IR transmitter)..."
-    mv "${PWM_OVERLAY}.disabled" "${PWM_OVERLAY}"
-    NEED_UBOOT_UPDATE=1
-elif [ -f "${PWM_OVERLAY}" ]; then
-    echo "    rk3588-pwm3-m1 already enabled"
-else
-    echo "    WARNING: rk3588-pwm3-m1 not found in /boot/dtbo (IR transmitter unavailable)"
-fi
-
+enable_overlay() {
+    local f="/boot/dtbo/$1.dtbo"
+    if [ -f "${f}.disabled" ] && [ ! -f "${f}" ]; then
+        echo "    Enabling $1 ($2)"
+        mv "${f}.disabled" "${f}"
+        NEED_UBOOT_UPDATE=1
+    elif [ -f "${f}" ]; then
+        echo "    $1 already enabled"
+    else
+        echo "    WARNING: $1 not found in /boot/dtbo ($2 unavailable)"
+    fi
+}
+enable_overlay rk3588-spi0-m2-cs0-spidev "status LED strip"
+enable_overlay rk3588-pwm3-m1 "IR transmitter"
 if [ "${NEED_UBOOT_UPDATE}" -eq 1 ]; then
     echo "    Regenerating /boot/extlinux/extlinux.conf..."
     /usr/sbin/u-boot-update
     REBOOT_NEEDED=1
 fi
 
-# Python bindings for SPI (status LEDs). The status_leds module imports
-# `spidev` at runtime; without this the LED toggle in the web UI 503s.
-echo "[2/12] Installing python3-spidev..."
-if ! dpkg -l 2>/dev/null | grep -q "^ii\s\+python3-spidev"; then
-    apt-get install -y -qq python3-spidev || \
-        echo "    WARNING: python3-spidev install failed; status LEDs will be unavailable"
+# ---------------------------------------------------------------------------
+step 2 "Installing apt packages..."
+APT_PACKAGES=(
+    # GStreamer video/audio pipelines (+ Rockchip MPP decoder, kmssink)
+    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+    gstreamer1.0-plugins-bad gstreamer1.0-alsa gstreamer1.0-rockchip1
+    gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 python3-gi python3-gst-1.0
+    # ustreamer build (MPP JPEG encoder, FreeType overlays)
+    build-essential git pkg-config librockchip-mpp-dev libfreetype-dev
+    libjpeg-dev libevent-dev libbsd-dev
+    # Python packages taken from Debian
+    python3-pip python3-numpy python3-pil python3-yaml python3-psutil
+    python3-spidev python3-requests libsndfile1
+    # Tools the service shells out to
+    v4l-utils ffmpeg curl imagemagick libdrm-tests alsa-utils adb
+    network-manager iw psmisc
+    # Overlay fonts
+    fonts-dejavu-core fonts-ibm-plex
+    # mDNS + unattended security updates
+    avahi-daemon unattended-upgrades
+)
+if [ "${MINUS_SKIP_APT:-0}" = "1" ]; then
+    echo "    skipped (MINUS_SKIP_APT=1)"
 else
-    echo "    python3-spidev already installed"
-fi
-
-# Add radxa to the spi group so interactive scripts (test_status_leds.py)
-# can open /dev/spidev0.0 without sudo. Service-mode runs as root anyway.
-# The group is created by udev on overlay probe, so on a fresh install
-# this can fail silently the first time — it'll be a no-op next run.
-echo "[3/12] Adding radxa to spi group..."
-if getent group spi >/dev/null; then
-    if id -nG radxa 2>/dev/null | tr ' ' '\n' | grep -q '^spi$'; then
-        echo "    radxa already in spi group"
-    else
-        usermod -aG spi radxa && echo "    Added radxa to spi group (log out/in to take effect)"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    # One package missing from a mirror shouldn't stop the rest.
+    if ! apt-get install -y -qq "${APT_PACKAGES[@]}"; then
+        echo "    Bulk install failed; retrying one by one..."
+        for p in "${APT_PACKAGES[@]}"; do
+            apt-get install -y -qq "$p" >/dev/null 2>&1 || echo "    WARNING: could not install $p"
+        done
     fi
+fi
+if [ ! -e /usr/lib/librknnrt.so ]; then
+    echo "    WARNING: /usr/lib/librknnrt.so missing (rknpu2 runtime); OCR/ASR on the NPU will not load."
+    echo "             Install Radxa's rknpu2 package: sudo apt-get install rknpu2-rk3588"
+fi
+
+# ---------------------------------------------------------------------------
+step 3 "Installing Python packages for ${RUN_USER}..."
+# Pinned to the versions on the reference box (minus-2).
+as_user pip3 install --user --break-system-packages --no-warn-script-location -q -r "${SCRIPT_DIR}/requirements.txt"
+as_user python3 -c "import cv2, numpy, flask, androidtv, pyclipper, shapely, rknnlite, kaldi_native_fbank, sentencepiece, soundfile" \
+    && echo "    Python imports OK"
+
+# ---------------------------------------------------------------------------
+step 4 "Building ustreamer (${USTREAMER_BRANCH})..."
+if [ ! -d "${USTREAMER_SRC}/.git" ]; then
+    as_user git clone -q -b "${USTREAMER_BRANCH}" "${USTREAMER_REPO}" "${USTREAMER_SRC}"
 else
-    echo "    spi group not present yet — will appear after reboot when overlay loads"
+    as_user git -C "${USTREAMER_SRC}" fetch -q origin "${USTREAMER_BRANCH}"
+    as_user git -C "${USTREAMER_SRC}" checkout -q "${USTREAMER_BRANCH}"
+    as_user git -C "${USTREAMER_SRC}" merge -q --ff-only "origin/${USTREAMER_BRANCH}" || true
+fi
+as_user make -s -C "${USTREAMER_SRC}" WITH_MPP=1 -j"$(nproc)"
+install -o "${RUN_USER}" -g "${RUN_USER}" -m 755 "${USTREAMER_SRC}/ustreamer" "${USTREAMER_BIN}"
+echo "    ${USTREAMER_BIN} ($(${USTREAMER_BIN} --version 2>/dev/null || echo '?'))"
+
+# ---------------------------------------------------------------------------
+step 5 "Checking the SenseVoice ASR model..."
+# The fine-tuned model (sensevoice-rknn-minus-ft) is not public; copy it from
+# another box into ${ASR_MODELS}. Without it the stock model is used.
+if [ -f "${ASR_MODELS}/sensevoice-rknn-minus-ft/sense-voice-encoder.rknn" ]; then
+    echo "    fine-tuned model present"
+elif [ -f "${ASR_MODELS}/sensevoice-rknn/sense-voice-encoder.rknn" ]; then
+    echo "    stock model present (fine-tuned model not installed)"
+else
+    echo "    Downloading stock SenseVoiceSmall-RKNN2 (~480 MB)..."
+    as_user mkdir -p "${ASR_MODELS}/sensevoice-rknn"
+    for f in am.mvn chn_jpn_yue_eng_ko_spectok.bpe.model embedding.npy \
+             fsmn-am.mvn fsmn-config.yaml fsmnvad-offline.onnx \
+             sensevoice_rknn.py sense-voice-encoder.rknn; do
+        as_user curl -fsSL --retry 3 -o "${ASR_MODELS}/sensevoice-rknn/${f}" "${SENSEVOICE_HF}/${f}"
+    done
+    echo "    stock model installed"
 fi
 
-# Setup hostname and mDNS
-echo "[4/12] Setting up hostname and mDNS..."
-hostnamectl set-hostname ${HOSTNAME}
-sed -i "s/127.0.1.1.*/127.0.1.1\t${HOSTNAME}/" /etc/hosts 2>/dev/null || echo "127.0.1.1	${HOSTNAME}" >> /etc/hosts
-
-# Install and enable avahi for mDNS (.local resolution)
-if ! dpkg -l | grep -q avahi-daemon; then
-    echo "    Installing avahi-daemon for mDNS..."
-    apt-get update -qq && apt-get install -y -qq avahi-daemon
-fi
-systemctl enable avahi-daemon 2>/dev/null || true
-systemctl restart avahi-daemon 2>/dev/null || true
-echo "    Hostname set to: ${HOSTNAME}"
-echo "    Access via: http://${HOSTNAME}.local:80"
-
-# Stop existing service if running
-echo "[5/12] Stopping existing service..."
-systemctl stop ${SERVICE_NAME} 2>/dev/null || true
-systemctl disable ${SERVICE_NAME} 2>/dev/null || true
-
-# Stop X11 to free up display
-echo "[6/12] Stopping X11 (gdm3)..."
-systemctl stop gdm3 2>/dev/null || true
-systemctl disable gdm3 2>/dev/null || true
-
-# Copy service file
-echo "[7/12] Installing systemd service..."
-cp "$SERVICE_FILE" /etc/systemd/system/${SERVICE_NAME}.service
-chmod 644 /etc/systemd/system/${SERVICE_NAME}.service
-
-# Reload systemd
-echo "[8/12] Reloading systemd..."
+# ---------------------------------------------------------------------------
+step 6 "Installing the HDMI-RX EDID (24-30 Hz modes)..."
+# Sources pick the highest refresh the EDID offers; 4K60 arrives as NV12 the
+# pipeline can't keep up with. Applied at boot, before minus.service.
+install -d /etc/minus
+install -m 644 "${SCRIPT_DIR}/hdmirx/hdmirx-edid-30hz.bin" /etc/minus/
+install -m 644 "${SCRIPT_DIR}/hdmirx/hdmirx-edid-default.bin" /etc/minus/
+install -m 644 "${SCRIPT_DIR}/minus-hdmirx-edid.service" /etc/systemd/system/
 systemctl daemon-reload
+systemctl enable -q minus-hdmirx-edid.service
 
-# Enable and start service
-echo "[9/12] Enabling service..."
-systemctl enable ${SERVICE_NAME}
+# ---------------------------------------------------------------------------
+step 7 "Adding ${RUN_USER} to hardware groups..."
+for g in gpio spi spidev video audio render; do
+    if getent group "$g" >/dev/null; then
+        id -nG "${RUN_USER}" | tr ' ' '\n' | grep -qx "$g" || usermod -aG "$g" "${RUN_USER}"
+    fi
+done
+echo "    $(id -nG "${RUN_USER}")"
 
-# Create screenshot directories
-echo "[10/12] Creating screenshot directories..."
-mkdir -p "${SCRIPT_DIR}/screenshots/ads"
-mkdir -p "${SCRIPT_DIR}/screenshots/non_ads"
-mkdir -p "${SCRIPT_DIR}/screenshots/vlm_spastic"
-mkdir -p "${SCRIPT_DIR}/screenshots/static"
-chown -R radxa:radxa "${SCRIPT_DIR}/screenshots" 2>/dev/null || true
-
-# Ensure login shells (tmux, ssh) source ~/.bashrc so $HOME/.local/bin is on PATH.
-# Without this, a fresh tmux window picks up /usr/local/bin/claude (older) instead
-# of ~/.local/bin/claude (newer), forcing a manual `source ~/.bashrc` each time.
-echo "[11/12] Ensuring login shells source ~/.bashrc for radxa..."
-RADXA_HOME="$(getent passwd radxa | cut -d: -f6)"
-if [ -n "$RADXA_HOME" ] && [ -d "$RADXA_HOME" ]; then
-    BASH_PROFILE="${RADXA_HOME}/.bash_profile"
-    if [ ! -f "$BASH_PROFILE" ] || ! grep -q "\.bashrc" "$BASH_PROFILE"; then
-        cat >> "$BASH_PROFILE" <<'EOF'
-if [ -f ~/.bashrc ]; then
-    . ~/.bashrc
-fi
-EOF
-        chown radxa:radxa "$BASH_PROFILE"
-        echo "    Wrote ${BASH_PROFILE}"
+# ---------------------------------------------------------------------------
+step 8 "Hostname and mDNS..."
+if [ -n "${MINUS_HOSTNAME:-}" ]; then
+    hostnamectl set-hostname "${MINUS_HOSTNAME}"
+    if grep -q "^127.0.1.1" /etc/hosts; then
+        sed -i "s/^127.0.1.1.*/127.0.1.1\t${MINUS_HOSTNAME}/" /etc/hosts
     else
-        echo "    ${BASH_PROFILE} already sources .bashrc, skipping"
+        echo -e "127.0.1.1\t${MINUS_HOSTNAME}" >> /etc/hosts
     fi
 fi
+systemctl enable -q avahi-daemon 2>/dev/null || true
+systemctl restart avahi-daemon 2>/dev/null || true
+echo "    Hostname: $(hostname)  ->  http://$(hostname).local"
 
-# Unattended security upgrades. Minus boxes run headless for weeks; Debian
-# security patches should apply themselves. The policy (never auto-reboot,
-# kernel/u-boot/Rockchip/GStreamer/Mesa/RKNN/Tailscale blacklisted) is
-# written by the service at startup from src/unattended_upgrades.py and can
-# be toggled from the web UI: Settings -> System Updates.
-echo "[12/12] Installing unattended-upgrades..."
-if ! dpkg -l 2>/dev/null | grep -q "^ii\s\+unattended-upgrades"; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades || \
-        echo "    WARNING: unattended-upgrades install failed; later: sudo apt-get install unattended-upgrades"
-else
-    echo "    unattended-upgrades already installed"
+# ---------------------------------------------------------------------------
+step 9 "Disabling the desktop (it holds DRM / HDMI-out); console auto-login..."
+for dm in sddm gdm3 gdm lightdm; do
+    if systemctl list-unit-files "${dm}.service" >/dev/null 2>&1 && \
+       systemctl list-unit-files "${dm}.service" | grep -q "${dm}.service"; then
+        systemctl disable -q "${dm}" 2>/dev/null || true
+        echo "    disabled ${dm}"
+    fi
+done
+systemctl set-default multi-user.target >/dev/null
+# No desktop, so auto-login the console instead: a keyboard plugged in gets a
+# shell on tty1 without a password prompt (the service still starts at boot
+# on its own; it does not need a login).
+install -d /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF2
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin ${RUN_USER} --noclear %I \$TERM
+EOF2
+systemctl daemon-reload
+echo "    console auto-login on tty1 as ${RUN_USER}"
+
+# ---------------------------------------------------------------------------
+step 10 "Installing the systemd service..."
+systemctl stop ${SERVICE_NAME} 2>/dev/null || true
+install -m 644 "$SERVICE_FILE" /etc/systemd/system/${SERVICE_NAME}.service
+systemctl daemon-reload
+systemctl enable -q ${SERVICE_NAME}
+
+# ---------------------------------------------------------------------------
+step 11 "Screenshot dirs, login shell, unattended-upgrades..."
+for d in ads non_ads vlm_spastic static; do
+    mkdir -p "${SCRIPT_DIR}/screenshots/${d}"
+done
+chown -R "${RUN_USER}:${RUN_USER}" "${SCRIPT_DIR}/screenshots" 2>/dev/null || true
+
+# Login shells (tmux, ssh) source ~/.bashrc so ~/.local/bin is on PATH.
+BASH_PROFILE="${RUN_HOME}/.bash_profile"
+if [ ! -f "$BASH_PROFILE" ] || ! grep -q "\.bashrc" "$BASH_PROFILE"; then
+    printf 'if [ -f ~/.bashrc ]; then\n    . ~/.bashrc\nfi\n' >> "$BASH_PROFILE"
+    chown "${RUN_USER}:${RUN_USER}" "$BASH_PROFILE"
+fi
+# The unattended-upgrades policy (no auto-reboot; kernel, u-boot, Rockchip,
+# GStreamer, Mesa, RKNN held back) is written by the service at startup from
+# src/unattended_upgrades.py; toggle in the web UI under System Updates.
+
+if [ "${MINUS_START:-0}" = "1" ]; then
+    systemctl start minus-hdmirx-edid.service 2>/dev/null || true
+    systemctl start ${SERVICE_NAME}
 fi
 
-echo ""
-echo "=== Installation Complete ==="
-echo ""
-echo "Access:"
-echo "  Web UI:  http://${HOSTNAME}.local:80"
-echo "  Stream:  http://${HOSTNAME}.local:9090/stream"
-echo ""
-echo "Commands:"
+echo
+echo "=== Installation complete ==="
+echo
+echo "  Web UI:  http://$(hostname).local   (or http://<ip>)"
+echo "  Stream:  http://$(hostname).local:9090/stream"
 echo "  Start:   sudo systemctl start ${SERVICE_NAME}"
-echo "  Stop:    sudo systemctl stop ${SERVICE_NAME}"
-echo "  Status:  sudo systemctl status ${SERVICE_NAME}"
 echo "  Logs:    sudo journalctl -u ${SERVICE_NAME} -f"
-echo "  Disable: sudo systemctl disable ${SERVICE_NAME}"
-echo ""
-echo "The service will auto-start on boot."
-echo "To start now: sudo systemctl start ${SERVICE_NAME}"
-
+echo
+echo "Wiring: red mute LED  pin 40 -> 1k -> LED(+), LED(-) -> pin 39 (GND)"
 if [ "${REBOOT_NEEDED}" -eq 1 ]; then
-    echo ""
-    echo "*** REBOOT REQUIRED ***"
-    echo "Hardware overlays were enabled (SPI / PWM3). They take effect on the"
-    echo "next boot. Reboot when convenient, then status LEDs and the IR"
-    echo "transmitter will be available. Until reboot, the web-UI toggles for"
-    echo "those features will report 'hardware not available'."
+    echo
+    echo "*** REBOOT REQUIRED: device-tree overlays were enabled (status LEDs, IR). ***"
 fi

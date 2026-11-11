@@ -1,0 +1,13 @@
+[Unit]
+Description=Advertise only 24-30 Hz modes on HDMI-RX so the source sends 4K30
+Before=minus.service
+After=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sh -c 'for i in $(seq 30); do [ -e /dev/video0 ] && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/bin/v4l2-ctl -d /dev/video0 --set-edid=file=/etc/minus/hdmirx-edid-30hz.bin,format=raw
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
