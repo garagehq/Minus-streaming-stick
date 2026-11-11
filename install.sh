@@ -15,7 +15,7 @@
 #   6  HDMI-RX EDID (24-30 Hz only, so sources send 4K30)
 #   7  groups (gpio/spi/video/audio) for the radxa user
 #   8  hostname + mDNS (only when MINUS_HOSTNAME is set)
-#   9  auto-login (console + desktop), never sleep/lock, desktop off
+#   9  silent boot, auto-login (tty2 + desktop), never sleep/lock, desktop off
 #   10 systemd service
 #   11 screenshot dirs, login shell, unattended-upgrades
 #
@@ -25,6 +25,7 @@
 #   MINUS_SKIP_APT=1         skip apt (offline re-run)
 #   MINUS_START=1            start the service at the end
 #   MINUS_KEEP_DESKTOP=1     leave the display manager enabled
+#   MINUS_VERBOSE_BOOT=1     keep kernel/boot text and the tty1 login on screen
 #   MINUS_STATUS_LEDS=1      enable the WS2812B status strip (SPI0 overlay)
 #   MINUS_IR=1               enable the IR transmitter (PWM3 overlay)
 # Kingblocker units only have the red mute LED (pins 40/39, plain GPIO, no
@@ -238,13 +239,45 @@ HandleLidSwitchExternalPower=ignore
 KillUserProcesses=no
 EOF2
 
-# Console: auto-login on tty1 (no password prompt with a keyboard attached).
-install -d /etc/systemd/system/getty@tty1.service.d
-cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF2
+# Silent boot: the HDMI screen stays black from the bootloader until Minus
+# draws. Kernel and systemd messages go to the serial debug port only
+# (ttyFIQ0 stays in the cmdline), no cursor, no Tux logo. MINUS_VERBOSE_BOOT=1
+# leaves the boot text on screen.
+if [ "${MINUS_VERBOSE_BOOT:-0}" != "1" ] && [ -f /etc/kernel/cmdline ]; then
+    CMDLINE="$(cat /etc/kernel/cmdline)"
+    NEW="$(echo "${CMDLINE}" | sed -E 's/(^| )console=tty[0-9]+( |$)/ /g; s/(^| )loglevel=[0-9]+( |$)/ /g; s/  +/ /g; s/^ //; s/ $//')"
+    for opt in quiet loglevel=0 vt.global_cursor_default=0 logo.nologo \
+               systemd.show_status=false rd.systemd.show_status=false \
+               udev.log_level=3 rd.udev.log_level=3; do
+        case " ${NEW} " in *" ${opt} "*) ;; *) NEW="${NEW} ${opt}" ;; esac
+    done
+    if [ "${NEW}" != "${CMDLINE}" ]; then
+        cp /etc/kernel/cmdline /etc/kernel/cmdline.bak-minus
+        echo "${NEW}" > /etc/kernel/cmdline
+        /usr/sbin/u-boot-update >/dev/null
+        REBOOT_NEEDED=1
+        echo "    quiet boot: kernel/systemd text off the screen (backup: /etc/kernel/cmdline.bak-minus)"
+    fi
+    # No login prompt or shell on tty1 (the screen Minus takes over). A
+    # keyboard user gets an auto-logged-in shell on tty2 (Ctrl+Alt+F2).
+    rm -rf /etc/systemd/system/getty@tty1.service.d
+    systemctl mask -q getty@tty1.service autovt@tty1.service
+    CONSOLE_TTY=tty2
+else
+    systemctl unmask -q getty@tty1.service autovt@tty1.service 2>/dev/null || true
+    CONSOLE_TTY=tty1
+fi
+# Console auto-login (no password prompt with a keyboard attached).
+install -d /etc/systemd/system/getty@${CONSOLE_TTY}.service.d
+cat > /etc/systemd/system/getty@${CONSOLE_TTY}.service.d/autologin.conf <<EOF2
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin ${RUN_USER} --noclear %I \$TERM
 EOF2
+systemctl enable -q getty@${CONSOLE_TTY}.service
+# Empty the login banner (kernel version, Debian disclaimer).
+: > /etc/motd
+chmod -x /etc/update-motd.d/* 2>/dev/null || true
 
 # Desktop login managers: auto-login, so the desktop (if used) never asks.
 if [ -f /etc/gdm3/daemon.conf ]; then
@@ -303,7 +336,7 @@ else
     systemctl set-default -q multi-user.target
 fi
 systemctl daemon-reload
-echo "    console auto-login on tty1 as ${RUN_USER}; sleep/suspend masked"
+echo "    console auto-login on ${CONSOLE_TTY} as ${RUN_USER}; sleep/suspend masked"
 
 # ---------------------------------------------------------------------------
 step 10 "Installing the systemd service..."
