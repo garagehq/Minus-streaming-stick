@@ -119,6 +119,10 @@ muted from the first syllable, docs/ASR_BENCHMARKS.md).
   39, plain GPIO). The WS2812B strip and IR transmitter overlays are
   opt-in, and the strip is saved as disabled
   (`/root/.minus_status_leds.json`).
+- **The input EDID caps at 4K30 / 1080p60, not 24-30 Hz only.** A 60 Hz
+  source sent no picture at all under the old 30 Hz EDID (TV: No Signal).
+  `hdmirx-edid-4k30-1080p60.bin` offers 4K 24-30 and 1080p 24-60, never
+  4K60, and the stream runs at the source rate (`MINUS_STREAM_FPS=0`).
 
 ### Manual install
 
@@ -366,6 +370,15 @@ curl http://localhost:80/api/metrics
 ---
 
 ## Troubleshooting
+
+### TV shows No Signal with a source plugged in
+`v4l2-ctl -d /dev/video0 --query-dv-timings` fails and `sudo dmesg | grep
+hdmirx` repeats `signal not lock, tmds_clk_ratio:0`: the source is
+connected (5 V) but sends no video. Check the EDID it was offered
+(`v4l2-ctl -d /dev/video0 --get-edid=format=raw,file=/tmp/e.bin`, compare
+with `/etc/minus/hdmirx-edid-4k30-1080p60.bin`) and that the source can
+output 1080p60 or 4K30. Every EDID write is a hotplug, and some sources
+take 1-2 minutes to send a picture again afterwards, or need a restart.
 
 ### Box drops off the network during a long job
 Check `journalctl -b -1 | tail` for `Reached target sleep.target`: it
