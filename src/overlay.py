@@ -676,5 +676,5 @@ class SystemNotification(NotificationOverlay):
 
     def show_system_ready(self):
         """Show system ready notification (auto-hides)."""
-        text = "[ MINUS READY ]\n\nBLOCKING ACTIVE"
+        text = "[ KINGBLOCKER 9000 READY ]\n\nBLOCKING ACTIVE"
         self.show(text, duration=5.0)

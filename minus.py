@@ -206,6 +206,7 @@ os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
 from drm import probe_drm_output
 from v4l2 import probe_v4l2_device
 from name_mute import NameMatcher, NameMuteScheduler, NameMuteController
+from mute_led import MuteLED
 import adaptive_delay
 import loading_overlay
 from asr_clips import ASRClipCollector
@@ -1110,6 +1111,7 @@ class Minus:
 
         # Name muter: ASR words + caption OCR -> brief scheduled mutes.
         self.name_mute = None
+        self.mute_led = None
         if self.audio is not None:
             try:
                 scheduler = NameMuteScheduler(self.audio, self.audio.playback_delay_s)
@@ -1119,9 +1121,18 @@ class Minus:
                         self._system_settings.get('name_mute_surname', False))),
                     partial_names=getattr(self.asr, 'engine', '') == 'sensevoice')
                 self.name_mute.enabled = bool(self._system_settings.get('name_mute', True))
-                if self.ad_blocker is not None:
-                    # BLOCKED badge on screen while the name mute is on.
-                    scheduler.on_mute_change = loading_overlay.for_video(self.ad_blocker).set_blocked
+                # Red LED on header pin 40 flashes while a name is muted.
+                self.mute_led = MuteLED()
+                self.mute_led.start()
+                badge = (loading_overlay.for_video(self.ad_blocker).set_blocked
+                         if self.ad_blocker is not None else None)
+
+                def _on_mute_change(muted, _badge=badge, _led=self.mute_led):
+                    _led.set_muted(muted)
+                    if _badge is not None:
+                        # BLOCKED badge on screen while the name mute is on.
+                        _badge(muted)
+                scheduler.on_mute_change = _on_mute_change
                 scheduler.start()
                 if self.asr is not None:
                     self.name_mute.window_s = self.asr.WINDOW_SECONDS
@@ -5090,7 +5101,7 @@ class Minus:
                         try:
                             overlay = SystemNotification(ustreamer_port=self.config.ustreamer_port)
                             overlay.show(
-                                "Connect to WiFi: Minus\nPassword: minussetup\nOpen browser to configure",
+                                "Connect to WiFi: Kingblocker 9000\nPassword: minus123\nOpen browser to configure",
                                 duration=0,  # Persistent until AP stops
                                 position='center'
                             )
@@ -5380,6 +5391,12 @@ class Minus:
             except Exception:
                 pass
             self.ir_transmitter = None
+
+        if getattr(self, 'mute_led', None) is not None:
+            try:
+                self.mute_led.stop()
+            except Exception:
+                pass
 
         # Stop status-LED animation thread and blank the strip
         if self.status_leds:

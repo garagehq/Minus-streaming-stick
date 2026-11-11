@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>MINUS</title>
+    <title>KINGBLOCKER 9000</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="container">
         <!-- Header -->
         <header>
-            <h1>MINUS<span class="cursor">_</span></h1>
+            <h1>KINGBLOCKER 9000<span class="cursor">_</span></h1>
             <div class="header-controls">
                 <button id="theme-toggle" class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
                     <span id="theme-icon">&#9790;</span>
@@ -926,7 +926,7 @@
                     <button onclick="scanWifi()" class="scan-btn">Scan for Networks</button>
                     <div id="wifi-scan-results"></div>
                 </div>
-                <p class="help-text">AP Mode creates a "Minus" hotspot for WiFi configuration via captive portal.</p>
+                <p class="help-text">AP Mode creates a "Kingblocker 9000" hotspot for WiFi configuration via captive portal.</p>
             </section>
 
             <!-- Network Info -->
@@ -986,7 +986,7 @@
 
     <!-- System Footer -->
     <footer class="system-footer">
-        <span class="footer-item" id="footer-version">MINUS v1.0</span>
+        <span class="footer-item" id="footer-version">KINGBLOCKER 9000 v1.0</span>
         <span class="footer-separator">|</span>
         <span class="footer-item" id="footer-host">--</span>
         <span class="footer-separator">|</span>
@@ -1272,7 +1272,7 @@
 
                     // Send notification
                     if (notificationsEnabled && Notification.permission === 'granted') {
-                        new Notification('Minus - Ad Detected', { body: `Blocking via ${source}` });
+                        new Notification('Kingblocker 9000 - Ad Detected', { body: `Blocking via ${source}` });
                     }
                 } else {
                     statusEl.className = 'blocking-status normal';
@@ -2771,7 +2771,7 @@
         async function restartService() {
             const btn = document.getElementById('restart-btn');
 
-            if (!confirm('Restart the entire Minus service? This will cause ~15 seconds of downtime.')) {
+            if (!confirm('Restart the entire Kingblocker 9000 service? This will cause ~15 seconds of downtime.')) {
                 return;
             }
 
@@ -3135,7 +3135,7 @@
         }
 
         async function connectSavedWifi(name) {
-            if (!confirm(`Connect to "${name}"?\n\nIf the Minus hotspot is active it will be stopped, and this page may disconnect briefly.`)) return;
+            if (!confirm(`Connect to "${name}"?\n\nIf the Kingblocker 9000 hotspot is active it will be stopped, and this page may disconnect briefly.`)) return;
             try {
                 const response = await fetch('/api/wifi/connect-saved', {
                     method: 'POST',
@@ -3306,7 +3306,7 @@
                     statusText.textContent = 'AP Mode Active';
                     statusText.className = 'wifi-status-value warning';
                     ssidRow.style.display = 'flex';
-                    document.getElementById('wifi-ssid-text').textContent = 'Minus (hotspot)';
+                    document.getElementById('wifi-ssid-text').textContent = 'Kingblocker 9000 (hotspot)';
                     ipRow.style.display = 'flex';
                     document.getElementById('wifi-ip-text').textContent = '10.42.0.1';
                     apRow.style.display = 'flex';
@@ -3341,7 +3341,7 @@
         }
 
         async function disconnectWifi() {
-            if (!confirm('Disconnect from current WiFi network?\n\nThe Minus hotspot will start automatically so you can still reach this page.')) return;
+            if (!confirm('Disconnect from current WiFi network?\n\nThe Kingblocker 9000 hotspot will start automatically so you can still reach this page.')) return;
 
             try {
                 const response = await fetch('/api/wifi/disconnect', {
@@ -3350,7 +3350,7 @@
                 const data = await response.json().catch(() => ({}));
                 if (response.ok && data.success) {
                     if (data.ap_started) {
-                        alert(`Disconnected. The Minus hotspot is now active.\n\nSSID: ${data.ap_ssid}\nPassword: ${data.ap_password}\nIP: ${data.ap_ip}`);
+                        alert(`Disconnected. The Kingblocker 9000 hotspot is now active.\n\nSSID: ${data.ap_ssid}\nPassword: ${data.ap_password}\nIP: ${data.ap_ip}`);
                     } else if (data.ap_error) {
                         alert(`Disconnected, but starting AP failed: ${data.ap_error}`);
                     } else {
@@ -3502,7 +3502,7 @@
         // =========================================================================
 
         async function restartService() {
-            if (!confirm('Restart the Minus service? Video will briefly stop.')) return;
+            if (!confirm('Restart the Kingblocker 9000 service? Video will briefly stop.')) return;
 
             try {
                 const response = await fetch('/api/service/restart', { method: 'POST' });

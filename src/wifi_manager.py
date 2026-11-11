@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 WIFI_CONFIG_FILE = Path.home() / '.minus_wifi_config.json'
 
 # AP Configuration
-AP_SSID = 'Minus'
+AP_SSID = 'Kingblocker 9000'
 AP_IP = '10.42.0.1'
 AP_INTERFACE = 'wlP2p33s0'  # Will be auto-detected if this fails
 

@@ -110,7 +110,7 @@ class WebhookManager:
                     data=json_data,
                     headers={
                         'Content-Type': 'application/json',
-                        'User-Agent': 'Minus/1.0'
+                        'User-Agent': 'Kingblocker9000/1.0'
                     },
                     method='POST'
                 )

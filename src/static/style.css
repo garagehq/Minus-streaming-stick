@@ -2409,7 +2409,7 @@ input:checked + .toggle-slider:before {
     }
 
     header h1 {
-        font-size: 2rem;
+        font-size: 1.6rem;
     }
 
     .status-details {
