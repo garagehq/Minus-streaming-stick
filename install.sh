@@ -378,5 +378,5 @@ echo
 echo "Wiring: red mute LED  pin 40 -> 1k -> LED(+), LED(-) -> pin 39 (GND)"
 if [ "${REBOOT_NEEDED}" -eq 1 ]; then
     echo
-    echo "*** REBOOT REQUIRED: device-tree overlays were enabled (status LEDs, IR). ***"
+    echo "*** REBOOT REQUIRED: boot settings changed (overlays or kernel command line). ***"
 fi
