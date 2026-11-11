@@ -5,7 +5,7 @@ Handles WiFi connectivity and captive portal AP mode:
 - Detect WiFi connection status
 - Scan for available networks
 - Connect to networks via NetworkManager
-- Create "Minus" hotspot AP when no WiFi is connected
+- Create the "KingBlocker9000" hotspot AP when no WiFi is connected
 - Auto-restart AP if WiFi drops for 30+ seconds
 - Auto-recover from monitor-started AP mode back to a saved network when it
   reappears (a router reboot must not strand the box on its own hotspot)
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 WIFI_CONFIG_FILE = Path.home() / '.minus_wifi_config.json'
 
 # AP Configuration
-AP_SSID = 'Kingblocker 9000'
+AP_SSID = 'KingBlocker9000'
 AP_IP = '10.42.0.1'
 AP_INTERFACE = 'wlP2p33s0'  # Will be auto-detected if this fails
 
@@ -569,7 +569,7 @@ class WiFiManager:
                 'con-name', self._ap_connection_name,
                 'ssid', AP_SSID,
                 'band', 'bg',
-                'password', 'minus123'  # Simple 8-char password for setup
+                'password', 'kingblocker9000'  # setup password, shown on the TV and the portal
             ], timeout=30)
 
             if success:
@@ -588,7 +588,7 @@ class WiFiManager:
                 return {
                     'success': True,
                     'ssid': AP_SSID,
-                    'password': 'minus123',
+                    'password': 'kingblocker9000',
                     'ip': ap_ip or AP_IP
                 }
             else:
@@ -649,7 +649,7 @@ class WiFiManager:
         return {
             'active': self._ap_mode_active,
             'ssid': AP_SSID if self._ap_mode_active else None,
-            'password': 'minus123' if self._ap_mode_active else None,
+            'password': 'kingblocker9000' if self._ap_mode_active else None,
             'ip': self._get_ip_address() if self._ap_mode_active else None,
             'clients': self._count_ap_clients() if self._ap_mode_active else 0
         }

@@ -25,6 +25,93 @@ Full bill of materials with part links and sizing notes: [HARDWARE.md](HARDWARE.
 
 ## Installation
 
+### Quick path: `install.sh` on a fresh image (KingBlocker9000 units)
+
+On a freshly flashed Radxa Debian 12 image this is the whole install. It
+was first run end to end on the second unit (`kingblocker9000`, ROCK 5B+,
+KDE image) on 2026-11-10.
+
+```bash
+# On the new board's own keyboard/screen, once, so it can be reached over SSH:
+sudo apt install -y openssh-server && sudo systemctl enable --now ssh
+hostname -I
+
+# Then (over SSH is fine; the script survives a dropped session):
+git clone -b feature/kingblocker-9000 https://github.com/garagehq/Minus-streaming-stick.git ~/Minus
+cd ~/Minus
+sudo env MINUS_HOSTNAME=kingblocker9000 nohup ./install.sh > ~/install.log 2>&1 &
+tail -f ~/install.log          # ends with "=== Installation complete ==="
+sudo reboot                    # overlays / kernel command line take effect
+```
+
+It is idempotent: re-run it after a failure and it only does what is
+missing (`MINUS_SKIP_APT=1` skips the package step on a re-run). Steps:
+apt packages, Python packages (`requirements.txt`, pip `--user` for
+radxa), ustreamer built from garagehq/ustreamer `asr-first`, the stock
+SenseVoice model from Hugging Face if no model is installed, the 24-30 Hz
+HDMI-RX EDID, groups, hostname + mDNS, silent boot / auto-login / no
+sleep, and the systemd service (enabled, started at the next boot).
+
+Options (environment variables): `MINUS_HOSTNAME`, `MINUS_START=1` (start
+now), `MINUS_KEEP_DESKTOP=1`, `MINUS_VERBOSE_BOOT=1`, `MINUS_STATUS_LEDS=1`
+(WS2812B strip overlay), `MINUS_IR=1` (IR transmitter overlay),
+`MINUS_USTREAMER_BRANCH`, `MINUS_SKIP_APT=1`.
+
+**The fine-tuned speech model is not public.** Copy
+`~/asr_models/sensevoice-rknn-minus-ft/` from a box that has it and check
+it with `sha256sum -c SHA256SUMS` (skip the `.onnx` line, which is not
+copied). Without it the stock model is used (82.5% vs 94.6% of names
+muted from the first syllable, docs/ASR_BENCHMARKS.md).
+
+#### What the first fresh unit taught us
+
+- **The KDE image suspends itself when idle.** A box left alone during the
+  install went to sleep (`PM: suspend entry (deep)` in the journal), which
+  looks like the network dropping or the user being logged out. The
+  installer masks `sleep/suspend/hibernate.target` and turns off logind's
+  idle action; on a box that has not been through the installer yet, run
+  `sudo systemctl mask sleep.target suspend.target hibernate.target
+  hybrid-sleep.target` before any long job.
+- **`adb` fails with "held broken packages".** Radxa images ship
+  `android-libcutils` from bookworm-backports, and bookworm's `adb` wants
+  the older one. The installer takes `adb` from backports
+  (`apt-get install -t bookworm-backports adb`). One failing package used
+  to send the installer into a slow one-by-one retry of everything.
+- **An interrupted apt run leaves dpkg half-configured.** Run
+  `sudo dpkg --configure -a` before re-running the installer.
+- **ASR was silently off without faster-whisper.** The ASR gate used to
+  require the `faster_whisper` package whatever the engine; a unit with
+  SenseVoice but no faster-whisper logged "ASR module loaded but
+  faster-whisper not available" and never muted from speech. It now
+  checks the selected engine (`src/asr.py:is_asr_available`). After an
+  install, check `curl -s localhost/api/status` -> `asr.engine` is
+  `sensevoice`.
+- **Verify every model copy against its checksums.** Copies from minus-2
+  arrived corrupted twice (SSH "message authentication code incorrect",
+  then a bad hash over plain HTTP). The file on minus-2's SD card was
+  fine; its in-memory cached copy was not (dropping the page cache gave the
+  right hash). Treat anything served from a box with suspect RAM as
+  untrusted and check `SHA256SUMS` on the receiving side.
+- **Training clips are off by default.** `MINUS_ASR_CLIPS=1` turns the
+  collector on (it budgets 8 GB of recordings); customer units leave it off.
+- **No desktop on HDMI-out.** Minus takes over the display, so the
+  installer disables the display manager, boots to `multi-user.target`
+  and keeps the screen black: kernel and systemd text go to the serial
+  port only (`console=tty1` removed, `quiet loglevel=0
+  vt.global_cursor_default=0 logo.nologo systemd.show_status=false`), no
+  getty on tty1, and an auto-logged-in shell on tty2 (Ctrl+Alt+F2) for a
+  keyboard. The original command line is saved to
+  `/etc/kernel/cmdline.bak-minus`; restore it, `sudo u-boot-update`,
+  reboot. The bootloader's own logo/text before Linux starts is unchanged.
+- **KingBlocker units have only the red mute LED** (pin 40, ground on pin
+  39, plain GPIO). The WS2812B strip and IR transmitter overlays are
+  opt-in, and the strip is saved as disabled
+  (`/root/.minus_status_leds.json`).
+
+### Manual install
+
+The steps below do the same by hand.
+
 ### 1. Clone Repository
 
 ```bash
@@ -267,6 +354,16 @@ curl http://localhost:80/api/metrics
 ---
 
 ## Troubleshooting
+
+### Box drops off the network during a long job
+Check `journalctl -b -1 | tail` for `Reached target sleep.target`: it
+suspended. Mask the sleep targets (see *What the first fresh unit taught
+us* above) or run `install.sh`, which does it.
+
+### No name muting from speech
+`curl -s localhost/api/status` -> `asr` should show `engine: sensevoice`
+and `enabled: true`. If the log says "no ASR engine is available", the
+SenseVoice model dir or `rknnlite`/`kaldi_native_fbank` is missing.
 
 ### Service Won't Start
 

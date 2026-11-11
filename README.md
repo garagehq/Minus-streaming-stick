@@ -114,23 +114,17 @@ Roughly **$350-$450** in parts. Full bill of materials, part links, and sizing n
 ```bash
 git clone https://github.com/garagehq/Minus-streaming-stick.git /home/radxa/Minus
 cd /home/radxa/Minus
-
-# Install system + Python dependencies (GStreamer, fonts, rknnlite, axengine, ...)
-# then build the patched ustreamer:
-git clone https://github.com/garagehq/ustreamer.git /home/radxa/ustreamer-garagehq
-cd /home/radxa/ustreamer-garagehq && make WITH_MPP=1
-cp ustreamer /home/radxa/ustreamer-patched
-
-# Download the vision model (the OCR models already ship in this repo)
-# → https://huggingface.co/TheGarageDev/Minus-v0.1
-#   into /home/radxa/axera_models/minus-v0.1/
-
-# Run directly:
-cd /home/radxa/Minus && sudo python3 minus.py
-
-# ...or install as a service that starts on boot:
-sudo ./install.sh
+sudo ./install.sh     # packages, Python deps, ustreamer, speech model, service
+sudo reboot
 ```
+
+`install.sh` takes a fresh Radxa Debian 12 image to a running service and is
+safe to re-run. Its options, and what setting up a new unit taught us, are in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The vision model for ad blocking
+is a separate download
+(https://huggingface.co/TheGarageDev/Minus-v0.1 into
+`/home/radxa/axera_models/minus-v0.1/`). To run without the service:
+`sudo python3 minus.py`.
 
 ### Automatic security updates
 

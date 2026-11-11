@@ -1998,7 +1998,7 @@ class WebUI:
                 if not manager.urls:
                     return jsonify({'success': False, 'error': 'No webhook URLs configured'}), 400
 
-                manager.notify('test', {'message': 'Test notification from Minus'})
+                manager.notify('test', {'message': 'Test notification from KingBlocker9000'})
                 return jsonify({
                     'success': True,
                     'message': f'Test notification sent to {len(manager.urls)} URL(s)'

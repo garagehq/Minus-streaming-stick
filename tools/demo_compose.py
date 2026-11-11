@@ -4,7 +4,7 @@
 What a viewer of Minus saw and heard: the picture is the captured HDMI input
 and the sound is Minus's recorded output audio (MINUS_RECORD_OUTPUT_DIR),
 shown in sync with each other, so mutes land on the words they really cut.
-Overlays: a title bar, a MUTED badge (output audio is exact digital silence)
+Overlays: a title bar, a BLOCKED badge (output audio is exact digital silence)
 and a mute timeline.
 
 Both streams are lined up against the original video (SOURCE, e.g. from
@@ -196,11 +196,11 @@ def main():
         hx = sx0 + (k / nframes) * (sx1 - sx0)
         d.rectangle([hx - 2, sy - 4, hx + 2, sy + 18], fill='white')
         d.text((sx0, sy - 22), 'audio muted (red) over this clip', font=f_small, fill=(200, 200, 200))
-        # MUTED badge.
+        # BLOCKED badge (same text as the TV badge, src/loading_overlay.py).
         if muted[k]:
             bx = W - 300
             d.rounded_rectangle([bx, 90, bx + 280, 160], 12, fill=(210, 30, 30, 235))
-            d.text((bx + 38, 99), 'MUTED', font=f_mute, fill='white')
+            d.text((bx + 38, 99), 'BLOCKED', font=f_mute, fill='white')
         ff.stdin.write(img.tobytes())
     ff.stdin.close()
     ff.wait()

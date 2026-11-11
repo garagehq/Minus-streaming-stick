@@ -1,5 +1,5 @@
 #!/bin/bash
-# Kingblocker 9000 (Minus) installer for a ROCK 5B / 5B+ on Radxa Debian 12
+# KingBlocker9000 (Minus) installer for a ROCK 5B / 5B+ on Radxa Debian 12
 # (kernel 6.1, rk2410 images). Takes a fresh image to a running service:
 #
 #   git clone -b <branch> https://github.com/garagehq/Minus-streaming-stick.git ~/Minus
@@ -49,7 +49,7 @@ TOTAL=11
 step() { echo; echo "[$1/${TOTAL}] $2"; }
 as_user() { sudo -u "${RUN_USER}" -H "$@"; }
 
-echo "=== Kingblocker 9000 installation ==="
+echo "=== KingBlocker9000 installation ==="
 
 if [ "$EUID" -ne 0 ]; then
     echo "Please run as root: sudo $0"

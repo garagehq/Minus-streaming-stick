@@ -347,10 +347,36 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   to a list of LeBron commentary videos. Turn captions on in the YouTube
   player (or Roku Settings > Accessibility > Captions) for the OCR path.
 
+## Branch `feature/kingblocker-9000`: the client unit
+
+Built on `asr-first` (the name muter). Second board: `kingblocker9000`,
+ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
+2026-11-10 (see docs/DEPLOYMENT.md, *What the first fresh unit taught us*).
+
+- **Branding.** Everything a user sees says `KingBlocker9000`, written as
+  one token on purpose: the name muter matches the word "king", and "King
+  Blocker" on screen would mute the TV (`tests/test_branding.py`). Web UI,
+  Wi-Fi setup page, READY banner, hotspot SSID `KingBlocker9000` (password
+  `kingblocker9000`), webhook User-Agent. Code, logs, paths and the service
+  name stay "minus".
+- **BLOCKED badge** on the TV while a name is muted (`src/loading_overlay.py`);
+  `tools/demo_compose.py` now draws the same word.
+- **Mute LED** (`src/mute_led.py`): red LED on pin 40, ground pin 39, blinks
+  at least three times per mute. The WS2812B strip and IR transmitter are
+  not fitted: `install.sh` enables their overlays only with
+  `MINUS_STATUS_LEDS=1` / `MINUS_IR=1`.
+- **ASR gate** follows the selected engine (`asr.is_asr_available`); it
+  used to require faster-whisper, so a SenseVoice-only unit ran deaf.
+- **Training clips off by default** (`MINUS_ASR_CLIPS=1` to collect).
+- **Appliance boot:** no desktop, no sleep, silent boot on HDMI (kernel and
+  systemd text to the serial port), nothing on tty1, auto-login shell on
+  tty2. `MINUS_VERBOSE_BOOT=1` / `MINUS_KEEP_DESKTOP=1` for development.
+
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Fresh-unit install with `install.sh`, its options, lessons from the second unit |
 | [docs/FEATURES.md](docs/FEATURES.md) | Complete feature list and capabilities |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and data flow |
 | [docs/AESTHETICS.md](docs/AESTHETICS.md) | Visual design guide for UI/overlays |
@@ -1443,7 +1469,7 @@ VLM preload loads the model at startup before HDMI signal arrives (configurable 
 Minus includes a WiFi captive portal system for easy network configuration when no WiFi is connected.
 
 **How it works:**
-1. If WiFi disconnects for 30+ seconds, Minus creates a "Minus" hotspot AP
+1. If WiFi disconnects for 30+ seconds, Minus creates a "KingBlocker9000" hotspot AP
 2. Users connect to the hotspot and get redirected to a setup page
 3. Setup page shows available networks with signal strength
 4. User selects network and enters password
@@ -1451,8 +1477,8 @@ Minus includes a WiFi captive portal system for easy network configuration when 
 6. **Auto-recovery:** while a *monitor-started* AP is up, every 2 min (env `MINUS_WIFI_AP_RECONNECT_INTERVAL`, exponential backoff to 15 min on failed attempts) the monitor bounce-scans and, if a saved network is visible, reconnects to it — so a transient router outage can't strand the box on its own hotspot. Skipped while any client is on the portal or when the AP was started manually via the web UI. See *AP mode was a terminal state* under Known Issues.
 
 **Hotspot Configuration:**
-- **SSID:** `Minus`
-- **Password:** `minus123`
+- **SSID:** `KingBlocker9000` (was `Minus` before the kingblocker-9000 branch)
+- **Password:** `kingblocker9000`
 - **IP:** `10.42.0.1`
 - **Band:** 2.4GHz (802.11 b/g)
 

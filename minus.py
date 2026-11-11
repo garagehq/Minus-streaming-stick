@@ -5101,7 +5101,7 @@ class Minus:
                         try:
                             overlay = SystemNotification(ustreamer_port=self.config.ustreamer_port)
                             overlay.show(
-                                "Connect to WiFi: Kingblocker 9000\nPassword: minus123\nOpen browser to configure",
+                                "Connect to WiFi: KingBlocker9000\nPassword: kingblocker9000\nOpen browser to configure",
                                 duration=0,  # Persistent until AP stops
                                 position='center'
                             )
