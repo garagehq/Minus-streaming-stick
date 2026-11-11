@@ -1121,6 +1121,9 @@ class Minus:
                         self._system_settings.get('name_mute_surname', False))),
                     partial_names=getattr(self.asr, 'engine', '') == 'sensevoice')
                 self.name_mute.enabled = bool(self._system_settings.get('name_mute', True))
+                if self.asr_tap is not None:
+                    # Caption hits over silence are title cards: not muted.
+                    self.name_mute.audio_level_fn = self.asr_tap.level_dbfs
                 # Red LED on header pin 40 flashes while a name is muted.
                 self.mute_led = MuteLED()
                 self.mute_led.start()

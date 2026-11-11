@@ -384,6 +384,17 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   *Gotcha:* this source takes 1-2.5 min (sometimes until power-cycled) to
   send a picture again after any HPD pulse, and every `v4l2-ctl --set-edid`
   is one. Don't re-run the EDID service on a live unit to "test" it.
+- **Silent captions are title cards (2026-11-11, client rule).** Highlight
+  videos open on title cards ("LeBron James' Top 40 Career") that OCR read
+  as captions, muting the TV with nobody speaking. A caption hit now mutes
+  (and shows BLOCKED) only if the input audio in the 2 s before that frame
+  is above -50 dBFS (`AudioASRTap.level_dbfs`, measured on the ASR tap with
+  the frame's own monotonic clock; programme speech is -26..-12 dBFS).
+  ASR hits are unaffected; unknown level = mute as before.
+  `MINUS_NAME_MUTE_CAPTION_QUIET_DBFS` tunes it (empty = off); skips are
+  counted in `/api/name-mute` -> `caption_silent_skips` and logged.
+  A title card over music or commentary still mutes.
+  `tests/test_caption_silence.py`.
 - **Appliance boot:** no desktop, no sleep, silent boot on HDMI (kernel and
   systemd text to the serial port), nothing on tty1, auto-login shell on
   tty2. `MINUS_VERBOSE_BOOT=1` / `MINUS_KEEP_DESKTOP=1` for development.

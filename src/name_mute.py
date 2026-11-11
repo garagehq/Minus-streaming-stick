@@ -447,6 +447,15 @@ class NameMuteController:
     # off until CAPTION_H_MIN_SAMPLES heights have been seen.
     CAPTION_MIN_REL_H = 0.65
     CAPTION_H_MIN_SAMPLES = 10
+    # A name in a caption is there because someone said it, so a caption
+    # hit with no sound under it is a title card or graphic ("LeBron James'
+    # Top 40 Career" as a highlight video starts): no mute, no BLOCKED badge.
+    # Measured over the CAPTION_AUDIO_S before the frame (captions trail the
+    # word by 0.3-1 s). Programme audio is -26..-12 dBFS; the adaptive delay
+    # calls < -60 quiet. MINUS_NAME_MUTE_CAPTION_QUIET_DBFS tunes it, and
+    # an empty value turns the check off.
+    CAPTION_AUDIO_S = 2.0
+    CAPTION_QUIET_DBFS = -50.0
 
     # Partial names: a "le…"/"lebr…" fragment that is the last word of an
     # ASR window and starts within PARTIAL_EDGE_S of its end mutes
@@ -491,6 +500,18 @@ class NameMuteController:
         self.caption_hits = 0
         self.caption_late_skips = 0
         self.caption_small_skips = 0
+        self.caption_silent_skips = 0
+        # fn(t0, t1) -> dBFS of the input audio between two capture times
+        # (AudioASRTap.level_dbfs), or None when unknown. Set by the owner.
+        self.audio_level_fn = None
+        env = os.environ.get('MINUS_NAME_MUTE_CAPTION_QUIET_DBFS')
+        if env is not None:
+            try:
+                self.caption_quiet_dbfs = float(env) if env.strip() else None
+            except ValueError:
+                self.caption_quiet_dbfs = self.CAPTION_QUIET_DBFS
+        else:
+            self.caption_quiet_dbfs = self.CAPTION_QUIET_DBFS
         self._caption_h = collections.deque(maxlen=50)   # heights of name lines
         self.caption_lag = CaptionLag()
         self.last_asr_text = ''
@@ -697,6 +718,11 @@ class NameMuteController:
                         # cover: their mute would land on the wrong words.
                         self.caption_late_skips += 1
                         continue
+                    if self._caption_is_silent(capture_time):
+                        self.caption_silent_skips += 1
+                        logger.info(f"[NameMute] caption with no audio under it "
+                                    f"(title card?), not muting: {line.strip()[:60]!r}")
+                        continue
                     pad_after = self.CAPTION_AFTER_S
                     if (hit.end() >= len(norm.rstrip())
                             and 'james' not in hit.group(0)):
@@ -714,6 +740,16 @@ class NameMuteController:
                                             line.strip()[:80], meta,
                                             pad_before=self.CAPTION_BEFORE_S,
                                             pad_after=pad_after)
+
+    def _caption_is_silent(self, capture_time: float) -> bool:
+        if self.audio_level_fn is None or self.caption_quiet_dbfs is None:
+            return False
+        try:
+            level = self.audio_level_fn(capture_time - self.CAPTION_AUDIO_S, capture_time)
+        except Exception as e:
+            logger.debug(f"[NameMute] audio level check failed: {e}")
+            return False
+        return level is not None and level < self.caption_quiet_dbfs
 
     def _seen_caption(self, key: str, ctx: str, after: str, now: float,
                       y: float = None, h: float = None, tail: str = None) -> bool:
@@ -773,6 +809,7 @@ class NameMuteController:
             'caption_mid_cancels': self.caption_mid_cancels,
             'caption_late_skips': self.caption_late_skips,
             'caption_small_skips': self.caption_small_skips,
+            'caption_silent_skips': self.caption_silent_skips,
             'captions_late': self.caption_lag.late(time.monotonic()),
             'last_asr_text': self.last_asr_text[:200],
             'last_caption_text': self.last_caption_text[:200],

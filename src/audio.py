@@ -34,6 +34,7 @@ Architecture:
 import gc
 import logging
 import os
+import math
 import re
 import subprocess
 import threading
@@ -1706,6 +1707,28 @@ class AudioASRTap:
                     self._ring[:n_samples - first_part],
                 ])
         return data, end
+
+    def level_dbfs(self, t0: float, t1: float):
+        """RMS level (dBFS) of the audio captured between monotonic times
+        t0 and t1, or None if that stretch is not (or no longer) in the ring."""
+        np = self._np
+        with self._lock:
+            end = self._last_write_mono
+            written = self._samples_written
+            if not written or t1 <= t0:
+                return None
+            # Sample offsets back from the newest one.
+            back1 = max(0, int((end - t1) * self.SAMPLE_RATE))
+            back0 = int((end - t0) * self.SAMPLE_RATE)
+            back0 = min(back0, written, self._buffer_samples)
+            n = back0 - back1
+            if n <= 0:
+                return None
+            start = (self._write_pos - back0) % self._buffer_samples
+            idx = (start + np.arange(n)) % self._buffer_samples
+            data = self._ring[idx].astype(np.float32)
+        rms = float(np.sqrt(np.mean(data * data))) / 32768.0
+        return 20.0 * math.log10(rms) if rms > 0 else -150.0
 
     def snapshot_window(self, seconds: float, path: str):
         """Like snapshot_to_wav, but to `path`, returning the capture time
