@@ -15,7 +15,7 @@
 #   6  HDMI-RX EDID (24-30 Hz only, so sources send 4K30)
 #   7  groups (gpio/spi/video/audio) for the radxa user
 #   8  hostname + mDNS (only when MINUS_HOSTNAME is set)
-#   9  disable the desktop (it holds DRM/HDMI-out); auto-login on tty1
+#   9  auto-login (console + desktop), never sleep/lock, desktop off
 #   10 systemd service
 #   11 screenshot dirs, login shell, unattended-upgrades
 #
@@ -24,6 +24,7 @@
 #   MINUS_USTREAMER_BRANCH   ustreamer branch to build (default asr-first)
 #   MINUS_SKIP_APT=1         skip apt (offline re-run)
 #   MINUS_START=1            start the service at the end
+#   MINUS_KEEP_DESKTOP=1     leave the display manager enabled
 
 set -e
 
@@ -199,26 +200,88 @@ systemctl restart avahi-daemon 2>/dev/null || true
 echo "    Hostname: $(hostname)  ->  http://$(hostname).local"
 
 # ---------------------------------------------------------------------------
-step 9 "Disabling the desktop (it holds DRM / HDMI-out); console auto-login..."
-for dm in sddm gdm3 gdm lightdm; do
-    if systemctl list-unit-files "${dm}.service" >/dev/null 2>&1 && \
-       systemctl list-unit-files "${dm}.service" | grep -q "${dm}.service"; then
-        systemctl disable -q "${dm}" 2>/dev/null || true
-        echo "    disabled ${dm}"
-    fi
-done
-systemctl set-default multi-user.target >/dev/null
-# No desktop, so auto-login the console instead: a keyboard plugged in gets a
-# shell on tty1 without a password prompt (the service still starts at boot
-# on its own; it does not need a login).
+step 9 "Auto-login, no sleep / screen lock, desktop off..."
+# The box runs unattended: it must never suspend, lock or sit at a login
+# prompt. Everything here is applied whether or not the desktop is kept.
+
+# Never suspend/hibernate; logind never idles out or kills the session.
+systemctl mask -q sleep.target suspend.target hibernate.target hybrid-sleep.target
+install -d /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/kingblocker.conf <<'EOF2'
+[Login]
+IdleAction=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+KillUserProcesses=no
+EOF2
+
+# Console: auto-login on tty1 (no password prompt with a keyboard attached).
 install -d /etc/systemd/system/getty@tty1.service.d
 cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF2
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin ${RUN_USER} --noclear %I \$TERM
 EOF2
+
+# Desktop login managers: auto-login, so the desktop (if used) never asks.
+if [ -f /etc/gdm3/daemon.conf ]; then
+    sed -i '/^AutomaticLoginEnable\s*=/d; /^AutomaticLogin\s*=/d' /etc/gdm3/daemon.conf
+    sed -i "/^\[daemon\]/a AutomaticLoginEnable=true\nAutomaticLogin=${RUN_USER}" /etc/gdm3/daemon.conf
+    echo "    gdm3 auto-login as ${RUN_USER}"
+fi
+if [ -d /usr/share/xsessions ] && [ -e /usr/share/xsessions/plasma.desktop ] && command -v sddm >/dev/null; then
+    install -d /etc/sddm.conf.d
+    printf '[Autologin]\nUser=%s\nSession=plasma\n' "${RUN_USER}" > /etc/sddm.conf.d/autologin.conf
+    echo "    sddm auto-login as ${RUN_USER}"
+fi
+
+# KDE: no screen lock, no screen-off/suspend on idle.
+if command -v kwriteconfig5 >/dev/null; then
+    KW() { as_user kwriteconfig5 "$@"; }
+    KW --file kscreenlockerrc --group Daemon --key Autolock false
+    KW --file kscreenlockerrc --group Daemon --key LockOnResume false
+    KW --file kscreenlockerrc --group Daemon --key Timeout 0
+    for prof in AC Battery LowBattery; do
+        KW --file powermanagementprofilesrc --group "${prof}" --group DPMSControl --key idleTime --delete
+        KW --file powermanagementprofilesrc --group "${prof}" --group DPMSControl --delete
+        KW --file powermanagementprofilesrc --group "${prof}" --group SuspendSession --delete
+        KW --file powermanagementprofilesrc --group "${prof}" --group DimDisplay --delete
+    done
+    echo "    KDE screen lock and idle power actions off"
+fi
+# GNOME (older images): same, through gsettings defaults.
+if [ -d /etc/dconf/db ] && command -v dconf >/dev/null; then
+    install -d /etc/dconf/db/local.d
+    cat > /etc/dconf/db/local.d/00-kingblocker <<'EOF2'
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+EOF2
+    dconf update 2>/dev/null || true
+fi
+
+# The service takes over HDMI-out (it stops the display manager when it
+# starts), so by default boot straight to the console. MINUS_KEEP_DESKTOP=1
+# keeps the desktop for development.
+if [ "${MINUS_KEEP_DESKTOP:-0}" = "1" ]; then
+    echo "    keeping the desktop (MINUS_KEEP_DESKTOP=1)"
+else
+    for dm in sddm gdm3 gdm lightdm; do
+        if systemctl list-unit-files "${dm}.service" 2>/dev/null | grep -q "^${dm}.service"; then
+            systemctl disable -q "${dm}" 2>/dev/null || true
+            echo "    disabled ${dm}"
+        fi
+    done
+    systemctl set-default -q multi-user.target
+fi
 systemctl daemon-reload
-echo "    console auto-login on tty1 as ${RUN_USER}"
+echo "    console auto-login on tty1 as ${RUN_USER}; sleep/suspend masked"
 
 # ---------------------------------------------------------------------------
 step 10 "Installing the systemd service..."
