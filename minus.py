@@ -1090,7 +1090,7 @@ class Minus:
                 self.asr_tap = None
                 self.asr = None
         elif HAS_ASR:
-            logger.info("ASR module loaded but faster-whisper not "
+            logger.info("ASR module loaded but no ASR engine is "
                         "available — running without ASR")
 
         # Initialize Audio passthrough

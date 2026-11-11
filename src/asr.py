@@ -75,11 +75,24 @@ ASR_MODEL = os.environ.get('MINUS_ASR_MODEL', DEFAULT_ASR_MODEL)
 
 
 def is_asr_available() -> bool:
-    """Whether the ASR backend is importable. Installs without
-    faster-whisper installed will skip the tap branch entirely,
-    keeping the audio pipeline byte-identical to pre-ASR shape."""
+    """Whether the selected ASR engine (resolve_engine) can load. Installs
+    without one skip the tap branch entirely, keeping the audio pipeline
+    byte-identical to pre-ASR shape. SenseVoice's model and runtime are
+    checked by resolve_engine itself (it falls back to moonshine); the
+    other engines need their Python package. This used to require
+    faster_whisper for every engine, so a box with SenseVoice but no
+    faster-whisper ran without ASR."""
+    import importlib
     try:
-        import faster_whisper  # noqa: F401
+        engine = resolve_engine()
+    except Exception:
+        return False
+    if engine == 'sensevoice':
+        return True
+    module = {'parakeet': 'sherpa_onnx',
+              'moonshine': 'moonshine_voice'}.get(engine, 'faster_whisper')
+    try:
+        importlib.import_module(module)
         return True
     except ImportError:
         return False

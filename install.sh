@@ -6,7 +6,7 @@
 #   cd ~/Minus && sudo ./install.sh
 #
 # Idempotent: re-running only does what is missing. Steps:
-#   1  device-tree overlays (status LED SPI, IR PWM)
+#   1  device-tree overlays (status LED SPI, IR PWM; only when asked for)
 #   2  apt packages (GStreamer + Rockchip plugins, build deps, fonts, tools)
 #   3  Python packages (pip --user for the radxa user; the root service
 #      reads them through PYTHONPATH in minus.service)
@@ -25,6 +25,10 @@
 #   MINUS_SKIP_APT=1         skip apt (offline re-run)
 #   MINUS_START=1            start the service at the end
 #   MINUS_KEEP_DESKTOP=1     leave the display manager enabled
+#   MINUS_STATUS_LEDS=1      enable the WS2812B status strip (SPI0 overlay)
+#   MINUS_IR=1               enable the IR transmitter (PWM3 overlay)
+# Kingblocker units only have the red mute LED (pins 40/39, plain GPIO, no
+# overlay), so the strip and IR are off unless asked for.
 
 set -e
 
@@ -79,8 +83,19 @@ enable_overlay() {
         echo "    WARNING: $1 not found in /boot/dtbo ($2 unavailable)"
     fi
 }
-enable_overlay rk3588-spi0-m2-cs0-spidev "status LED strip"
-enable_overlay rk3588-pwm3-m1 "IR transmitter"
+if [ "${MINUS_STATUS_LEDS:-0}" = "1" ]; then
+    enable_overlay rk3588-spi0-m2-cs0-spidev "status LED strip"
+else
+    # The strip controller defaults to on; save it as off (the service runs
+    # as root, so its settings live in /root).
+    [ -f /root/.minus_status_leds.json ] || echo '{"enabled": false}' > /root/.minus_status_leds.json
+    echo "    status LED strip: skipped (MINUS_STATUS_LEDS=1 to enable)"
+fi
+if [ "${MINUS_IR:-0}" = "1" ]; then
+    enable_overlay rk3588-pwm3-m1 "IR transmitter"
+else
+    echo "    IR transmitter: skipped (MINUS_IR=1 to enable)"
+fi
 if [ "${NEED_UBOOT_UPDATE}" -eq 1 ]; then
     echo "    Regenerating /boot/extlinux/extlinux.conf..."
     /usr/sbin/u-boot-update
