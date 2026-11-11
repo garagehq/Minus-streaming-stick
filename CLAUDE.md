@@ -318,7 +318,8 @@ whenever "LeBron James", "LeBron" or "King" is spoken or captioned
   refresh the EDID offers (4K60, or 1080p60 when 4K60 is removed) and its
   display mode can't be set over ADB (SecurityException). The board's
   HDMI-RX now advertises only 24-30 Hz modes plus 640x480:
-  `/etc/minus/hdmirx-edid-30hz.bin`, applied at boot by
+  `/etc/minus/hdmirx-edid-30hz.bin` (superseded on feature/kingblocker-9000
+  by the 4K30/1080p60 EDID, see below), applied at boot by
   `minus-hdmirx-edid.service` (`v4l2-ctl --set-edid`, before
   minus.service; the driver default is saved as
   `hdmirx-edid-default.bin`). The source then sends 3840x2160@29.97 as
@@ -368,6 +369,20 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
 - **ASR gate** follows the selected engine (`asr.is_asr_available`); it
   used to require faster-whisper, so a SenseVoice-only unit ran deaf.
 - **Training clips off by default** (`MINUS_ASR_CLIPS=1` to collect).
+- **Input capped at 4K30 / 1080p60 (2026-11-11).** A non-HDCP source
+  showed No Signal on this unit: under the 24-30 Hz-only EDID it sent no
+  TMDS at all (`hdmirx_wait_lock_and_get_timing signal not lock,
+  tmds_clk_ratio:0`, 5 V present), for 3.5 min after boot, while the
+  driver default EDID locked it at 4K60 in 10 s.
+  `hdmirx/hdmirx-edid-4k30-1080p60.bin` (now what `minus-hdmirx-edid.service`
+  loads) offers 4K 24/25/30 and 1080p 24/25/30/50/60, 720p60, 640x480; no
+  4K60 (range limits max 61 Hz / 300 MHz, no GTF; `tests/test_hdmirx_edid.py`).
+  That source now comes up at 1080p59.94 in ~9 s. `install.sh` also sets
+  `MINUS_STREAM_FPS=0` (drop-in `minus.service.d/stream-fps.conf`) so the
+  stream runs at the source rate: 60 fps at 1080p60, 30 at 4K30.
+  *Gotcha:* this source takes 1-2.5 min (sometimes until power-cycled) to
+  send a picture again after any HPD pulse, and every `v4l2-ctl --set-edid`
+  is one. Don't re-run the EDID service on a live unit to "test" it.
 - **Appliance boot:** no desktop, no sleep, silent boot on HDMI (kernel and
   systemd text to the serial port), nothing on tty1, auto-login shell on
   tty2. `MINUS_VERBOSE_BOOT=1` / `MINUS_KEEP_DESKTOP=1` for development.
