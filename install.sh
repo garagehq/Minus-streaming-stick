@@ -249,11 +249,12 @@ if command -v kwriteconfig5 >/dev/null; then
     KW --file kscreenlockerrc --group Daemon --key Autolock false
     KW --file kscreenlockerrc --group Daemon --key LockOnResume false
     KW --file kscreenlockerrc --group Daemon --key Timeout 0
+    # Idle suspend can't happen anyway (sleep.target is masked above); turn
+    # off idle dim/screen-off. (kwriteconfig5 can't delete whole groups.)
     for prof in AC Battery LowBattery; do
         KW --file powermanagementprofilesrc --group "${prof}" --group DPMSControl --key idleTime --delete
-        KW --file powermanagementprofilesrc --group "${prof}" --group DPMSControl --delete
-        KW --file powermanagementprofilesrc --group "${prof}" --group SuspendSession --delete
-        KW --file powermanagementprofilesrc --group "${prof}" --group DimDisplay --delete
+        KW --file powermanagementprofilesrc --group "${prof}" --group DimDisplay --key idleTime --delete
+        KW --file powermanagementprofilesrc --group "${prof}" --group SuspendSession --key idleTime --delete
     done
     echo "    KDE screen lock and idle power actions off"
 fi
