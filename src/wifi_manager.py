@@ -379,6 +379,35 @@ class WiFiManager:
 
         return networks
 
+    def ensure_retry_forever(self) -> int:
+        """Set connection.autoconnect-retries=0 (retry forever) on every saved
+        Wi-Fi profile. NetworkManager's default is 4 attempts, after which it
+        stops auto-connecting the profile for ~5 min: a unit that booted while
+        its hotspot was off then ignored the hotspot for minutes after it came
+        back (2026-11-18). NetworkManager 1.42 does not accept this as a global
+        default in conf.d, so it is set per profile, whichever way the profile
+        was made (setup page, provisioning, by hand). Returns how many changed."""
+        ok, out = self._run_nmcli(['-t', '-f', 'UUID,TYPE,NAME', 'connection', 'show'])
+        if not ok:
+            return 0
+        changed = 0
+        for line in out.splitlines():
+            parts = line.split(':', 2)
+            if len(parts) < 3 or parts[1] != '802-11-wireless':
+                continue
+            if parts[2] == self._ap_connection_name:
+                continue
+            ok, val = self._run_nmcli(['-g', 'connection.autoconnect-retries',
+                                       'connection', 'show', parts[0]])
+            if ok and val.strip() == '0':
+                continue
+            if self._run_nmcli(['connection', 'modify', parts[0],
+                                'connection.autoconnect-retries', '0'])[0]:
+                changed += 1
+        if changed:
+            logger.info(f"[WiFi] {changed} saved network(s) set to retry forever")
+        return changed
+
     def connect_to_network(self, ssid: str, password: str = '') -> Dict[str, Any]:
         """Connect to a WiFi network."""
         self._connecting = True
@@ -425,6 +454,7 @@ class WiFiManager:
                 if self.is_wifi_connected():
                     self._last_wifi_connected_time = time.time()
                     logger.info(f"[WiFi] Connected to {ssid}")
+                    self.ensure_retry_forever()   # a new profile may have been made
                     return {'success': True, 'ssid': ssid}
                 else:
                     self._last_connection_error = 'Connection established but verification failed'
@@ -686,6 +716,10 @@ class WiFiManager:
     def _monitor_loop(self):
         """Background thread that monitors WiFi and auto-starts AP if needed."""
         disconnect_time = None
+        try:
+            self.ensure_retry_forever()
+        except Exception as e:
+            logger.warning(f"[WiFi] Could not set saved networks to retry forever: {e}")
 
         while self._monitor_running:
             try:

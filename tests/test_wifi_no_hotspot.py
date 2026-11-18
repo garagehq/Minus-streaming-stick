@@ -98,6 +98,37 @@ class TestNoHotspot(unittest.TestCase):
         mgr.start_ap_mode.assert_called_once_with(auto=True)
 
 
+class TestRetryForever(unittest.TestCase):
+
+    def test_sets_retries_on_wifi_profiles_only(self):
+        mgr = make_manager()
+        mgr._ap_connection_name = 'KingBlocker9000'
+        retries = {'u-home': '-1', 'u-test': '0', 'u-ap': '-1'}
+        calls = []
+
+        def nmcli(args, timeout=30):
+            calls.append(args)
+            if args[:3] == ['-t', '-f', 'UUID,TYPE,NAME']:
+                return True, ('u-home:802-11-wireless:The Garden\n'
+                              'u-test:802-11-wireless:TestNetwork1337\n'
+                              'u-ap:802-11-wireless:KingBlocker9000\n'
+                              'u-ts:tun:tailscale0\n')
+            if args[:2] == ['-g', 'connection.autoconnect-retries']:
+                return True, retries[args[-1]]
+            return True, ''
+        mgr._run_nmcli = nmcli
+        self.assertEqual(mgr.ensure_retry_forever(), 1)
+        modified = [a[2] for a in calls if a[:2] == ['connection', 'modify']]
+        self.assertEqual(modified, ['u-home'])   # not the AP, not already-0, not tun
+
+    def test_runs_when_monitor_starts(self):
+        mgr = make_manager()
+        mgr.ensure_retry_forever = MagicMock(return_value=0)
+        mgr.is_wifi_connected = MagicMock(return_value=True)
+        run_monitor(mgr, iterations=1)
+        mgr.ensure_retry_forever.assert_called_once()
+
+
 class TestInterfaceDetection(unittest.TestCase):
 
     def test_p2p_device_is_not_the_radio(self):

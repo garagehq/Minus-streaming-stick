@@ -450,9 +450,11 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   / `exit_report`); it used to go to /dev/null.
   Same incident: the unit took >4 min to rejoin the hotspot once it was
   back, because NetworkManager stops auto-connecting a profile after 4
-  failed attempts for ~5 min. `networkmanager/90-kingblocker-autoconnect.conf`
-  (`autoconnect-retries=0`, retry forever) is installed by
-  `tools/add_wifi_networks.sh`. Also: Wi-Fi interface detection matched the
+  failed attempts for ~5 min. Every saved Wi-Fi profile now has
+  `connection.autoconnect-retries=0` (retry forever): set by
+  `tools/add_wifi_networks.sh` and re-applied by Minus at startup and after
+  each connect (`WiFiManager.ensure_retry_forever`). A conf.d default was
+  tried first; NetworkManager 1.42 rejects it ("unknown key"). Also: Wi-Fi interface detection matched the
   `wifi-p2p` device by substring; it now needs the exact `wifi` type.
 - **Factory Wi-Fi network.** `tools/add_wifi_networks.sh` (install.sh step
   12) saves `TestNetwork1337` (WPA-PSK, autoconnect priority -10, below a

@@ -27,14 +27,9 @@ if ! command -v nmcli >/dev/null; then
     exit 0
 fi
 
-# Retry saved networks forever instead of NetworkManager's default 4 tries.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NM_CONF="${SCRIPT_DIR}/../networkmanager/90-kingblocker-autoconnect.conf"
-if [ -f "$NM_CONF" ]; then
-    install -m 644 "$NM_CONF" /etc/NetworkManager/conf.d/
-    nmcli general reload conf 2>/dev/null || true
-    echo "    NetworkManager: retry saved networks forever"
-fi
+# A conf.d drop-in for this was tried and is rejected by NetworkManager 1.42
+# ("unknown key"); remove it if an earlier version installed it.
+rm -f /etc/NetworkManager/conf.d/90-kingblocker-autoconnect.conf
 
 for entry in "${NETWORKS[@]}"; do
     IFS='|' read -r ssid psk prio <<< "$entry"
@@ -47,3 +42,10 @@ for entry in "${NETWORKS[@]}"; do
         connection.autoconnect yes connection.autoconnect-priority "$prio" >/dev/null
     echo "    Wi-Fi network saved (not connected): $ssid"
 done
+
+# Retry every saved Wi-Fi network forever (NetworkManager's default is 4
+# attempts, then ~5 min without auto-connecting). Minus re-applies this to
+# networks added later (WiFiManager.ensure_retry_forever).
+nmcli -t -f UUID,TYPE connection show | awk -F: '$2=="802-11-wireless"{print $1}' |
+    while read -r u; do nmcli connection modify "$u" connection.autoconnect-retries 0; done
+echo "    Saved Wi-Fi networks retry forever"
