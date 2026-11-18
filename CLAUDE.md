@@ -421,6 +421,14 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   called at init. The Playwright UI tests for those panels
   (`test_review_ui.py`, `test_ir_ui.py`, `test_status_leds_ui.py`) do not
   apply to this branch.
+- **No setup hotspot (2026-11-18, client request).** With no Wi-Fi the unit
+  stays off the air: `wifi_manager.AP_ENABLED` (env `MINUS_WIFI_AP`,
+  default 0) makes `start_ap_mode()` refuse, the monitor never raises the
+  "KingBlocker9000" hotspot (NetworkManager keeps retrying saved networks
+  itself) and stops one left over from before. The Settings page lost
+  "Start AP Mode", the hotspot help text and Disconnect (which would strand
+  a hotspot-less unit). `MINUS_WIFI_AP=1` restores the old behaviour.
+  `tests/test_wifi_no_hotspot.py`.
 - **Factory Wi-Fi network.** `tools/add_wifi_networks.sh` (install.sh step
   12) saves `TestNetwork1337` (WPA-PSK, autoconnect priority -10, below a
   user's own network) if missing; it never connects. The passphrase is in

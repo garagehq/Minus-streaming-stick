@@ -32,6 +32,14 @@ AP_SSID = 'KingBlocker9000'
 AP_IP = '10.42.0.1'
 AP_INTERFACE = 'wlP2p33s0'  # Will be auto-detected if this fails
 
+# Setup hotspot. Off on the KingBlocker9000 branch (client request,
+# 2026-11-18): with no Wi-Fi the unit stays off the air instead of raising a
+# "KingBlocker9000" hotspot. MINUS_WIFI_AP=1 brings the old behaviour back:
+# the hotspot after WIFI_DISCONNECT_THRESHOLD without Wi-Fi, the captive
+# portal, and the web UI / API starting it. NetworkManager still rejoins
+# saved networks on its own.
+AP_ENABLED = os.environ.get('MINUS_WIFI_AP', '0') == '1'
+
 # Timing
 WIFI_CHECK_INTERVAL = 5  # seconds
 WIFI_DISCONNECT_THRESHOLD = 30  # seconds before starting AP
@@ -548,6 +556,9 @@ class WiFiManager:
         """
         if self._ap_mode_active:
             return {'success': True, 'message': 'AP already active'}
+        if not AP_ENABLED:
+            logger.info("[WiFi] Hotspot disabled (MINUS_WIFI_AP=0); not starting AP")
+            return {'success': False, 'error': 'The Wi-Fi hotspot is disabled on this unit'}
 
         logger.info("[WiFi] Starting AP mode...")
 
@@ -693,6 +704,17 @@ class WiFiManager:
                     if self._ap_mode_active:
                         logger.info("[WiFi] WiFi connected, stopping AP")
                         self.stop_ap_mode()
+                elif self._ap_mode_active and not AP_ENABLED:
+                    # A hotspot left up from before the hotspot was disabled.
+                    logger.info("[WiFi] Hotspot disabled; stopping the active AP")
+                    self.stop_ap_mode()
+                elif not AP_ENABLED:
+                    # No Wi-Fi and no hotspot: NetworkManager keeps trying
+                    # the saved networks on its own.
+                    if disconnect_time is None:
+                        disconnect_time = time.time()
+                        logger.info("[WiFi] WiFi disconnected (hotspot disabled; "
+                                    "waiting for a saved network)")
                 else:
                     # Not connected
                     if not self._ap_mode_active:

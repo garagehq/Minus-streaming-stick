@@ -611,8 +611,6 @@
 
                 <!-- AP Mode Controls -->
                 <div class="wifi-ap-controls">
-                    <button onclick="disconnectWifi()" class="action-btn" id="wifi-disconnect-btn" style="display:none;">Disconnect</button>
-                    <button onclick="startApMode()" class="action-btn" id="wifi-start-ap-btn" style="display:none;">Start AP Mode</button>
                     <button onclick="stopApMode()" class="warning-btn" id="wifi-stop-ap-btn" style="display:none;">Stop AP Mode</button>
                 </div>
 
@@ -627,7 +625,6 @@
                     <button onclick="scanWifi()" class="scan-btn">Scan for Networks</button>
                     <div id="wifi-scan-results"></div>
                 </div>
-                <p class="help-text">AP Mode creates a "KingBlocker9000" hotspot for WiFi configuration via captive portal.</p>
             </section>
 
             <!-- Network Info -->
@@ -2989,8 +2986,8 @@
                     document.getElementById('wifi-ip-text').textContent = '10.42.0.1';
                     apRow.style.display = 'flex';
                     document.getElementById('wifi-ap-clients').textContent = data.ap_clients || 0;
-                    disconnectBtn.style.display = 'none';
-                    startApBtn.style.display = 'none';
+                    if (disconnectBtn) disconnectBtn.style.display = 'none';
+                    if (startApBtn) startApBtn.style.display = 'none';
                     stopApBtn.style.display = 'inline-block';
                 } else if (data.connected) {
                     statusText.textContent = 'Connected';
@@ -3000,8 +2997,8 @@
                     ipRow.style.display = 'flex';
                     document.getElementById('wifi-ip-text').textContent = data.ip_address || 'N/A';
                     apRow.style.display = 'none';
-                    disconnectBtn.style.display = 'inline-block';
-                    startApBtn.style.display = 'none';
+                    if (disconnectBtn) disconnectBtn.style.display = 'inline-block';
+                    if (startApBtn) startApBtn.style.display = 'none';
                     stopApBtn.style.display = 'none';
                 } else {
                     statusText.textContent = 'Disconnected';
@@ -3009,8 +3006,8 @@
                     ssidRow.style.display = 'none';
                     ipRow.style.display = 'none';
                     apRow.style.display = 'none';
-                    disconnectBtn.style.display = 'none';
-                    startApBtn.style.display = 'inline-block';
+                    if (disconnectBtn) disconnectBtn.style.display = 'none';
+                    if (startApBtn) startApBtn.style.display = 'inline-block';
                     stopApBtn.style.display = 'none';
                 }
             } catch (error) {

@@ -17,7 +17,11 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import src.wifi_manager as wifi_manager
 from src.wifi_manager import WiFiManager, WiFiNetwork
+
+# These tests cover the hotspot, which is off by default on this branch.
+wifi_manager.AP_ENABLED = True
 
 
 def make_manager():
