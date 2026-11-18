@@ -2887,6 +2887,8 @@ class Minus:
             # Also mute a bare "James" -- every James, whoever it is (client
             # decision 2026-11-18, false positives accepted).
             'name_mute_surname': True,
+            # Bumped when a saved value must be migrated (see below).
+            'settings_version': 2,
         }
         try:
             if SYSTEM_SETTINGS_FILE.exists():
@@ -2898,6 +2900,21 @@ class Minus:
                 # sound went out of sync again (minus, 2026-10-18).
                 if isinstance(saved, dict):
                     defaults.update(saved)
+                    if saved.get('settings_version', 1) < 2:
+                        # Every bare "James" is muted now. Units that saved
+                        # settings while that default was off stored an
+                        # explicit False (any save writes the whole dict),
+                        # which would win over the new default; turn it on
+                        # once. A later deliberate "off" is kept.
+                        defaults['name_mute_surname'] = True
+                        defaults.pop('name_mute_james_context', None)
+                        defaults['settings_version'] = 2
+                        try:
+                            with open(SYSTEM_SETTINGS_FILE, 'w') as f:
+                                json.dump(defaults, f, indent=2)
+                            logger.info("Settings migrated to v2: name_mute_surname on")
+                        except OSError as e:
+                            logger.warning(f"Could not save migrated settings: {e}")
                     logger.info(
                         f"Loaded system settings: vlm_preload={defaults['vlm_preload']}, "
                         f"block_falloff={defaults['block_falloff']}, "
