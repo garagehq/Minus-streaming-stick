@@ -468,24 +468,10 @@
             <!-- Display Settings -->
             <section class="settings-section">
                 <h2>Display Settings</h2>
-                <div class="setting-item">
-                    <span class="setting-label">Ad Preview Window</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="preview-toggle" checked onchange="togglePreview(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
                 <div class="setting-item" title="Header, bottom-left stats dashboard, and top-right OCR snippet on the blocking overlay">
                     <span class="setting-label">Debug</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="debug-toggle" checked onchange="toggleDebugOverlay(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="setting-item">
-                    <span class="setting-label">Browser Notifications</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="notifications-toggle" onchange="toggleNotifications(this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
@@ -3372,8 +3358,12 @@
         // Initialization
         // =========================================================================
 
-        notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true';
-        document.getElementById('notifications-toggle').checked = notificationsEnabled;
+        // Browser notifications only while their Settings toggle exists
+        // (removed on this branch), so a stored "on" can't stay on unseen.
+        const notificationsToggle = document.getElementById('notifications-toggle');
+        notificationsEnabled = !!notificationsToggle
+            && localStorage.getItem('notificationsEnabled') === 'true';
+        if (notificationsToggle) notificationsToggle.checked = notificationsEnabled;
 
         // Initialize footer hostname
         fetch('/api/network').then(r => r.json()).then(data => {
@@ -3391,7 +3381,6 @@
         updateStatus();
         updateStats();
         updateDetections();
-        fetchPreviewState();
         fetchDebugOverlayState();
         fetchColorSettings();
         updateFireTVStatus();

@@ -419,7 +419,9 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   VLM preload, ASR toggle -- ASR is still switchable from the Home "ASR
   Live" panel), Blocking Optimizations (incl. low-bandwidth preview),
   Autonomous Mode (incl. IR remote and status-LED toggles), Fire TV
-  Settings and ADB Keys (Fire TV). Their JS loaders/pollers are no longer
+  Settings and ADB Keys (Fire TV), and the Ad Preview Window and Browser
+  Notifications toggles (a stored "notifications on" is ignored without
+  its toggle). Their JS loaders/pollers are no longer
   called at init. The Playwright UI tests for those panels
   (`test_review_ui.py`, `test_ir_ui.py`, `test_status_leds_ui.py`) do not
   apply to this branch.
