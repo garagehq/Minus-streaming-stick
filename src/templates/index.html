@@ -3163,8 +3163,14 @@
 
                 let html = `<div class="network-item"><span class="net-label">Hostname:</span><span class="net-value">${data.hostname}</span></div>`;
 
-                if (data.interfaces && data.interfaces.length > 0) {
-                    data.interfaces.forEach(iface => {
+                // Tailscale is the maintainers' remote access, not something a
+                // user sets up: leave its interface (tailscale0, or any
+                // 100.64.0.0/10 address) off this page.
+                const isTailscale = iface => /^tailscale/i.test(iface.interface || '')
+                    || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(iface.ip || '');
+                const shown = (data.interfaces || []).filter(iface => !isTailscale(iface));
+                if (shown.length > 0) {
+                    shown.forEach(iface => {
                         html += `<div class="network-item"><span class="net-label">${iface.interface}:</span><span class="net-value">${iface.ip}</span></div>`;
                     });
                 }
