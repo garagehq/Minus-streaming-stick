@@ -27,6 +27,15 @@ if ! command -v nmcli >/dev/null; then
     exit 0
 fi
 
+# Retry saved networks forever instead of NetworkManager's default 4 tries.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NM_CONF="${SCRIPT_DIR}/../networkmanager/90-kingblocker-autoconnect.conf"
+if [ -f "$NM_CONF" ]; then
+    install -m 644 "$NM_CONF" /etc/NetworkManager/conf.d/
+    nmcli general reload conf 2>/dev/null || true
+    echo "    NetworkManager: retry saved networks forever"
+fi
+
 for entry in "${NETWORKS[@]}"; do
     IFS='|' read -r ssid psk prio <<< "$entry"
     if nmcli -t -f NAME connection show | grep -qxF "$ssid"; then

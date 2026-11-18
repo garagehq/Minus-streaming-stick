@@ -107,7 +107,8 @@ class WiFiManager:
                 capture_output=True, text=True, timeout=5
             )
             for line in result.stdout.strip().split('\n'):
-                if ':wifi' in line:
+                # Exact type: "wifi-p2p" (p2p-dev-wlP2p33s0) is not the radio.
+                if line.rsplit(':', 1)[-1] == 'wifi':
                     interface = line.split(':')[0]
                     logger.info(f"[WiFi] Detected interface: {interface}")
                     return interface

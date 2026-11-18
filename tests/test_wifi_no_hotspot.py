@@ -98,5 +98,17 @@ class TestNoHotspot(unittest.TestCase):
         mgr.start_ap_mode.assert_called_once_with(auto=True)
 
 
+class TestInterfaceDetection(unittest.TestCase):
+
+    def test_p2p_device_is_not_the_radio(self):
+        # With the radio off, nmcli lists the P2P device first; it used to be
+        # picked because ':wifi' is a substring of ':wifi-p2p'.
+        out = 'p2p-dev-wlP2p33s0:wifi-p2p\nwlP2p33s0:wifi\nlo:loopback\n'
+        with patch('src.wifi_manager.subprocess.run',
+                   return_value=MagicMock(stdout=out, returncode=0)):
+            mgr = WiFiManager()
+        self.assertEqual(mgr._interface, 'wlP2p33s0')
+
+
 if __name__ == '__main__':
     unittest.main()

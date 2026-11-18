@@ -433,6 +433,27 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   "Start AP Mode", the hotspot help text and Disconnect (which would strand
   a hotspot-less unit). `MINUS_WIFI_AP=1` restores the old behaviour.
   `tests/test_wifi_no_hotspot.py`.
+- **No picture when booted without Wi-Fi (fixed 2026-11-18).** ustreamer
+  exited at every start with `getaddrinfo: address family for nodename not
+  supported` / `Can't bind HTTP on [0.0.0.0]:9090`, so the TV stayed on NO
+  SIGNAL. libevent's `evhttp_bind_socket()` resolves with `AI_ADDRCONFIG`,
+  and glibc refuses even `0.0.0.0` on a host that has an IPv6 address
+  (link-local, Tailscale) but no IPv4 one -- a unit booted away from its
+  network. Proven in namespaces: IPv6-only fails, IPv4-only and loopback-only
+  bind. Fixed in the ustreamer fork (`asr-first` dce76bb): resolve without
+  `AI_ADDRCONFIG`, bind ourselves, `evhttp_accept_socket()`. Simulating with
+  the radio off or no reachable network did NOT reproduce it (Tailscale's
+  IPv4 stayed up, or there was no IPv6), so test bind changes with
+  `unshare -n` + a dummy interface holding only an IPv6 address.
+  ustreamer output now goes to `/tmp/ustreamer.log`, and a failed start
+  logs its exit code and last lines in the journal (`ustreamer_proc.spawn`
+  / `exit_report`); it used to go to /dev/null.
+  Same incident: the unit took >4 min to rejoin the hotspot once it was
+  back, because NetworkManager stops auto-connecting a profile after 4
+  failed attempts for ~5 min. `networkmanager/90-kingblocker-autoconnect.conf`
+  (`autoconnect-retries=0`, retry forever) is installed by
+  `tools/add_wifi_networks.sh`. Also: Wi-Fi interface detection matched the
+  `wifi-p2p` device by substring; it now needs the exact `wifi` type.
 - **Factory Wi-Fi network.** `tools/add_wifi_networks.sh` (install.sh step
   12) saves `TestNetwork1337` (WPA-PSK, autoconnect priority -10, below a
   user's own network) if missing; it never connects. The passphrase is in
