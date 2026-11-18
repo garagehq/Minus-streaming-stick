@@ -392,11 +392,11 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   It now folds accents (ö -> o, "LeBrón" -> "lebron") and keeps a digit or
   non-ASCII letter between two letters inside the word; spaces, dots and
   hyphens still split ("LeBron-James" matches).
-- **Context "James" (2026-11-18, client idea, off by default).** A bare
+- **Context "James" (2026-11-18, client idea, on by default).** A bare
   "James" is not muted (every other James), but right after a LeBron /
   King / King James mention it is nearly always him. With
-  `name_mute_james_context` on (`POST /api/name-mute/settings
-  {"james_context": true}`), any such mention opens a window of
+  `name_mute_james_context` on (the default; `POST /api/name-mute/settings
+  {"james_context": false}` turns it off), any such mention opens a window of
   `MINUS_NAME_MUTE_JAMES_CONTEXT_S` (180 s, capture time) in which a bare
   "James" mutes too, from ASR and captions; each new mention restarts it,
   a "James" does not. A window that hears LeBron counts for the whole

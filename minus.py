@@ -1120,7 +1120,7 @@ class Minus:
                     NameMatcher(include_surname=bool(
                         self._system_settings.get('name_mute_surname', False))),
                     partial_names=getattr(self.asr, 'engine', '') == 'sensevoice',
-                    james_context=bool(self._system_settings.get('name_mute_james_context', False)))
+                    james_context=bool(self._system_settings.get('name_mute_james_context', True)))
                 self.name_mute.enabled = bool(self._system_settings.get('name_mute', True))
                 if self.asr_tap is not None:
                     # Caption hits over silence are title cards: not muted.
@@ -2896,7 +2896,7 @@ class Minus:
             'name_mute_surname': False,   # also match a bare "James"
             # A bare "James" within MINUS_NAME_MUTE_JAMES_CONTEXT_S (180 s) of a
             # LeBron / King mention is muted too.
-            'name_mute_james_context': False,
+            'name_mute_james_context': True,
         }
         try:
             if SYSTEM_SETTINGS_FILE.exists():
