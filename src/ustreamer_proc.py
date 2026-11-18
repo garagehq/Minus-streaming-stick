@@ -28,6 +28,46 @@ def _pattern() -> str:
     return '^' + USTREAMER_PATH.replace('.', r'\.') + '( |$)'
 
 
+# ustreamer's own output. It used to go to /dev/null, so a ustreamer that
+# exited at startup left only "ustreamer failed to start" in the log.
+USTREAMER_LOG = '/tmp/ustreamer.log'
+USTREAMER_LOG_MAX = 2 * 1024 * 1024
+
+
+def spawn(cmd) -> subprocess.Popen:
+    """Start ustreamer with stdout+stderr appended to USTREAMER_LOG."""
+    try:
+        import os
+        if os.path.getsize(USTREAMER_LOG) > USTREAMER_LOG_MAX:
+            os.replace(USTREAMER_LOG, USTREAMER_LOG + '.1')
+    except OSError:
+        pass
+    try:
+        out = open(USTREAMER_LOG, 'ab')
+        out.write(f"==== {time.strftime('%F %T')} {' '.join(cmd)}\n".encode())
+        out.flush()
+    except OSError:
+        out = subprocess.DEVNULL
+    try:
+        return subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT)
+    finally:
+        if out is not subprocess.DEVNULL:
+            out.close()   # the child keeps its own copy of the descriptor
+
+
+def exit_report(proc, lines: int = 8) -> str:
+    """Exit code and the last lines ustreamer wrote, for the error log."""
+    code = proc.poll()
+    try:
+        with open(USTREAMER_LOG, 'rb') as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 4096))
+            tail = f.read().decode(errors='replace').splitlines()[-lines:]
+    except OSError:
+        tail = []
+    return f"exit code {code}; last output: " + ' | '.join(t.strip() for t in tail)
+
+
 def _running(port: int) -> bool:
     by_path = subprocess.run(['pgrep', '-f', _pattern()],
                              capture_output=True).returncode == 0

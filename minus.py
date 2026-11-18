@@ -211,6 +211,7 @@ import adaptive_delay
 import loading_overlay
 from asr_clips import ASRClipCollector
 from ustreamer_proc import kill_ustreamer
+import ustreamer_proc
 from config import MinusConfig, USTREAMER_PATH, OCR_MODEL_DIR, STREAM_FPS, ENCODE_SCALE
 from capture import UstreamerCapture
 from screenshots import ScreenshotManager
@@ -1555,11 +1556,7 @@ class Minus:
 
             logger.info(f"[Recovery] Starting ustreamer: {' '.join(ustreamer_cmd)}")
 
-            self.ustreamer_process = subprocess.Popen(
-                ustreamer_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self.ustreamer_process = ustreamer_proc.spawn(ustreamer_cmd)
 
             time.sleep(2)
 
@@ -1570,7 +1567,8 @@ class Minus:
                     logger.info("[Recovery] Also restarting video pipeline...")
                     self.ad_blocker.restart()
             else:
-                logger.error("[Recovery] ustreamer failed to restart")
+                logger.error("[Recovery] ustreamer failed to restart: "
+                             + ustreamer_proc.exit_report(self.ustreamer_process))
 
         except Exception as e:
             logger.error(f"[Recovery] Error restarting ustreamer: {e}")
@@ -3429,16 +3427,13 @@ class Minus:
                     subprocess.run(['sudo', 'rm', '-f', str(f)], capture_output=True)
         time.sleep(0.5)
 
-        self.ustreamer_process = subprocess.Popen(
-            ustreamer_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        self.ustreamer_process = ustreamer_proc.spawn(ustreamer_cmd)
 
         time.sleep(2)
 
         if self.ustreamer_process.poll() is not None:
-            logger.error("ustreamer failed to start")
+            logger.error("ustreamer failed to start: "
+                         + ustreamer_proc.exit_report(self.ustreamer_process))
             return False
 
         logger.info(f"ustreamer started on port {port}")
