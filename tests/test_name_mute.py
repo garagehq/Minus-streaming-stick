@@ -690,13 +690,64 @@ class TestJamesContext(unittest.TestCase):
         self._say(ctl, "LeBron James with the dunk", time.monotonic())
         self.assertEqual((ctl.asr_hits, ctl.james_hits), (1, 0))
 
-    def test_edge_james_ignored(self):
+    def test_james_at_window_start_ignored(self):
+        # The tail of a word cut off by the window start.
         ctl, sch = self._ctl()
         t0 = time.monotonic()
         self._say(ctl, "LeBron at the line", t0)
-        ctl.on_asr_words("James", [("James", 2.85, 3.0)], t0 + 10)   # cut-off "Jameson"
+        skips = ctl.edge_king_skips
+        ctl.on_asr_words("James drives", [("James", 0.0, 0.2), ("drives", 0.3, 0.7)], t0 + 10)
         self.assertEqual(ctl.james_hits, 0)
-        self.assertGreaterEqual(ctl.edge_king_skips, 1)
+        self.assertEqual(ctl.edge_king_skips, skips + 1)
+
+    def test_james_at_window_end_is_muted(self):
+        # A sentence-opening "James" at the end of a window mutes from this
+        # window, not 0.5 s later from the next one.
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        self._say(ctl, "LeBron at the line", t0)
+        before = len(sch._windows)
+        skips = ctl.edge_king_skips
+        ctl.on_asr_words("the James", [("the", 2.4, 2.55), ("James", 2.6, 2.95)], t0 + 10)
+        self.assertEqual(ctl.james_hits, 1)
+        self.assertEqual(ctl.edge_king_skips, skips)
+        self.assertEqual(len(sch._windows), before + 1)
+
+    def test_james_at_window_end_mutes_before_the_word(self):
+        # The mute must start no later than the word reaches the speakers.
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        self._say(ctl, "LeBron at the line", t0)
+        ctl.on_asr_words("the James", [("the", 2.4, 2.55), ("James", 2.6, 2.95)], t0 + 10)
+        play_start = sch._windows[-1][0]
+        heard = t0 + 10 + 2.6 + 4.0          # word start + delay_fn (4.0 s)
+        self.assertLessEqual(play_start, heard)
+
+    def test_james_in_middle_of_window_unaffected(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        self._say(ctl, "LeBron at the line", t0)
+        skips = ctl.edge_king_skips
+        ctl.on_asr_words("and James scores", [("and", 1.0, 1.2), ("James", 1.3, 1.6),
+                                              ("scores", 1.7, 2.1)], t0 + 10)
+        self.assertEqual(ctl.james_hits, 1)
+        self.assertEqual(ctl.edge_king_skips, skips)
+
+    def test_king_still_ignored_at_both_edges(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        skips = ctl.edge_king_skips
+        ctl.on_asr_words("king", [("king", 0.0, 0.2)], t0)            # "...making"
+        ctl.on_asr_words("the king", [("the", 2.4, 2.6), ("king", 2.8, 3.0)], t0 + 5)  # "Kings"
+        self.assertEqual((ctl.asr_hits, len(sch._windows)), (0, 0))
+        self.assertEqual(ctl.edge_king_skips, skips + 2)
+
+    def test_king_james_at_window_end_is_one_mention(self):
+        # "King James" is a name in its own right, not a bare James.
+        ctl, sch = self._ctl()
+        ctl.on_asr_words("the King James", [("the", 2.0, 2.2), ("King", 2.3, 2.6),
+                                            ("James", 2.65, 2.95)], time.monotonic())
+        self.assertEqual((ctl.asr_hits, ctl.james_hits), (1, 0))
 
     def test_captions(self):
         ctl, sch = self._ctl()

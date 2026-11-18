@@ -666,12 +666,20 @@ class NameMuteController:
 
     def _drop_edge_king(self, words, spans, james_spans=()):
         """Remove bare-"king" spans that touch a window edge (see EDGE_KING_S).
-        Context "James" spans get the same rule (a cut-off "Jameson")."""
+
+        Context "James" spans are dropped only at the window START (the tail
+        of a word cut off by the window). At the window end it is kept:
+        dropping it there left the next window to catch a sentence-opening
+        "James" ~0.5 s late, so its start leaked (live, 2026-11-18: 4 of 72
+        mutes, "James lays it in"); a cut-off "Jameson" mutes briefly instead.
+        """
         kings = {(s, e) for w, s, e in words if _WORD_KING_RE.match(_norm(w))}
-        kings |= set(james_spans)
+        james = set(james_spans) - kings
         keep = []
         for s, e in spans:
-            if (s, e) in kings and (s <= self.EDGE_KING_S or e >= self.window_s - self.EDGE_KING_S):
+            at_start = s <= self.EDGE_KING_S
+            at_end = e >= self.window_s - self.EDGE_KING_S
+            if ((s, e) in kings and (at_start or at_end)) or ((s, e) in james and at_start):
                 self.edge_king_skips += 1
                 continue
             keep.append((s, e))

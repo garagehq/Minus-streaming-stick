@@ -401,8 +401,10 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   "James" mutes too, from ASR and captions; each new mention restarts it,
   a "James" does not. A window that hears LeBron counts for the whole
   window (ASR windows overlap, and "LeBron at the line. James hits both"
-  fits in one). Edge "James" is ignored like edge "king" (a cut-off
-  "Jameson"), and a "James" next to another James's name is not him
+  fits in one). A "James" at the start of a window is ignored (tail of a
+  cut-off word); at the end it is kept (dropping it there made the next
+  window catch a sentence-opening "James" ~0.5 s late: 4 of 72 live mutes
+  leaked its start), and a "James" next to another James's name is not him
   (Bronny, Bryce, Mike, ... / Harden, Worthy, Johnson, ...;
   `_OTHER_JAMES_*`, also applied to `name_mute_surname`). Live, ESPN
   2002 archive of his high school game, 5 min: 5 bare "James" muted
