@@ -386,6 +386,12 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   `/api/status` -> `asr` adds `workers_ready`, `workers_total`,
   `worker_restarts`, `worker_start_failures`.
   `tests/test_asr_worker_recovery.py`.
+- **Misread letters no longer split words (2026-11-18).** `name_mute._norm`
+  turned every non a-z character into a space, so OCR's "Boöking.com" on a
+  Booking.com ad became "bo king com" and muted the TV for the bare "king".
+  It now folds accents (ö -> o, "LeBrón" -> "lebron") and keeps a digit or
+  non-ASCII letter between two letters inside the word; spaces, dots and
+  hyphens still split ("LeBron-James" matches).
 - **Input capped at 4K30 / 1080p60 (2026-11-11).** A non-HDCP source
   showed No Signal on this unit: under the 24-30 Hz-only EDID it sent no
   TMDS at all (`hdmirx_wait_lock_and_get_timing signal not lock,

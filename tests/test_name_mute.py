@@ -38,6 +38,19 @@ class TestNameMatcher(unittest.TestCase):
             [("King", 0, .3), ("James", .3, .7)]), [(0, .7)])
         self.assertEqual(self.m.find_word_spans([("Kings", 0, .3)]), [])
 
+    def test_misread_letter_does_not_split_a_word(self):
+        # Live false mute (kingblocker9000, 2026-11-18): OCR read a
+        # Booking.com ad as "Boöking.com", the "ö" became a space and the
+        # bare "king" matched.
+        for t in ["Boöking.com", "Booking.com", "Bo0king.com", "lo0king good",
+                  "maķing", "taIking"]:
+            self.assertFalse(self.m.find(t), t)
+        # Accents fold onto the name, and real separators still split.
+        for t in ["LeBrón James", "Lébron", "LeBron-James", "the king.",
+                  "家 King James", "LeBron23 jersey"]:
+            self.assertTrue(self.m.find(t), t)
+        self.assertEqual(self.m.find_word_spans([("Boöking", 0, .3)]), [])
+
     def test_text_non_matches(self):
         for t in ["The Bronx team", "James Harden for three", "lebanon",
                   "brontosaurus", "", "James Jones"]:

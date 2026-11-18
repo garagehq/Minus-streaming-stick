@@ -27,12 +27,25 @@ import os
 import re
 import threading
 import time
+import unicodedata
 
 logger = logging.getLogger('Minus.NameMute')
 
 
+# A digit or non-ASCII letter between two letters is an OCR misread inside
+# one word, not a word break.
+_IN_WORD_NOISE_RE = re.compile(r"(?<=[a-z])[^\W_a-z]+(?=[a-z])")
+
+
 def _norm(text: str) -> str:
     text = text.lower().replace("’", "'")
+    # Fold accents ("LeBrón" -> "lebron", OCR's "Boöking" -> "booking").
+    text = unicodedata.normalize('NFKD', text)
+    text = ''.join(c for c in text if not unicodedata.combining(c))
+    # Before this, every non a-z character became a space, so a misread
+    # letter split a word: "Boöking.com" on an ad read as "bo king com" and
+    # muted the TV for the bare "king" (kingblocker9000, 2026-11-18).
+    text = _IN_WORD_NOISE_RE.sub('x', text)
     text = re.sub(r"[^a-z' ]+", ' ', text)
     return re.sub(r'\s+', ' ', text).strip()
 
