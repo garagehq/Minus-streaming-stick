@@ -369,6 +369,23 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
 - **ASR gate** follows the selected engine (`asr.is_asr_available`); it
   used to require faster-whisper, so a SenseVoice-only unit ran deaf.
 - **Training clips off by default** (`MINUS_ASR_CLIPS=1` to collect).
+- **ASR comes back on its own (2026-11-18).** This unit has no RTC battery:
+  it boots with a stale wall clock and NTP steps it forward ~30 s after
+  boot (2 min 47 s / 2 h 11 min seen; tailscaled logs "time jump
+  detected"), right while the SenseVoice worker loads. The load wait was
+  one `multiprocessing` `ready_event.wait(timeout=30)`, whose deadline is
+  wall-clock, so the step expired it instantly, the worker was killed ~1 s
+  before ready, and ASR stayed off for the whole boot (two boots in a row,
+  captions the only name detector). Now: ASR and OCR poll the load on the
+  monotonic clock (as VLM already did), and each ASR loop restarts its own
+  worker when it is not running (`ASRManager._ensure_worker`): at once
+  after a death, then 5 s, 10 s, 20 s ... capped at 5 min
+  (`MINUS_ASR_RETRY_BASE_S`, `MINUS_ASR_RETRY_MAX_S`), forever. That also
+  covers a mid-run crash or a failed hard-timeout reload, which used to
+  leave ASR returning "worker not running" until the service restarted.
+  `/api/status` -> `asr` adds `workers_ready`, `workers_total`,
+  `worker_restarts`, `worker_start_failures`.
+  `tests/test_asr_worker_recovery.py`.
 - **Input capped at 4K30 / 1080p60 (2026-11-11).** A non-HDCP source
   showed No Signal on this unit: under the 24-30 Hz-only EDID it sent no
   TMDS at all (`hdmirx_wait_lock_and_get_timing signal not lock,

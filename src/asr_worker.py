@@ -483,26 +483,44 @@ class ASRProcess:
                     else:
                         os.environ[k] = v
 
-        start = time.time()
+        start = time.monotonic()
         logger.info(f"[ASRProcess] Waiting for worker to load "
                     f"(PID {self.process.pid}, model={self.model_name})...")
 
-        ok = self.ready_event.wait(timeout=self.WORKER_LOAD_TIMEOUT)
+        # Poll against the monotonic clock. A single
+        # ready_event.wait(timeout=30) does not work here: multiprocessing
+        # waits on a semaphore with a wall-clock deadline, and units with no
+        # RTC battery boot with a stale clock that NTP steps forward ~30 s
+        # after boot -- right while this worker loads. The step (2 min 47 s
+        # and 2 h 11 min on kingblocker9000) expired the wait at once and
+        # the worker was killed ~1 s before it was ready.
+        ok = False
+        while time.monotonic() - start < self.WORKER_LOAD_TIMEOUT:
+            if self.ready_event.wait(timeout=0.5):
+                ok = True
+                break
+            if not self.process.is_alive():
+                break
+        elapsed = time.monotonic() - start
         if ok and not self.failed_event.is_set() and self.process.is_alive():
-            elapsed = time.time() - start
             self.is_ready = True
             logger.info(f"[ASRProcess] Worker ready in {elapsed:.1f}s")
             return True
 
-        # Either timeout or worker died during load. Tear it down so
-        # the next start() attempt gets a clean slate.
-        if ok:
-            logger.error("[ASRProcess] Worker failed to load the model "
-                         "(see the [ASRWorker] error above)")
-        else:
-            logger.error(f"[ASRProcess] Worker failed to become ready "
-                         f"after {self.WORKER_LOAD_TIMEOUT}s — killing")
-        self._kill_process_locked()
+        # Timeout, or the worker died or failed during load. Tear it down
+        # so the next start() attempt gets a clean slate.
+        with self._call_lock:
+            if ok:
+                logger.error("[ASRProcess] Worker failed to load the model "
+                             "(see the [ASRWorker] error above)")
+            elif self.process is not None and not self.process.is_alive():
+                logger.error(f"[ASRProcess] Worker exited (code "
+                             f"{self.process.exitcode}) before becoming ready "
+                             f"after {elapsed:.1f}s")
+            else:
+                logger.error(f"[ASRProcess] Worker failed to become ready "
+                             f"after {elapsed:.1f}s — killing")
+            self._kill_process_locked()
         return False
 
     def stop(self):

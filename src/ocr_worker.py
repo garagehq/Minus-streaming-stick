@@ -231,13 +231,19 @@ class OCRProcess:
         )
         self.process.start()
 
-        # Wait for models to load (up to 30s)
-        if self.ready_event.wait(timeout=30.0):
-            self.is_ready = True
-            return True
-        else:
-            self.kill()
-            return False
+        # Wait for models to load (up to 30s). Poll against the monotonic
+        # clock: a single ready_event.wait(timeout=30) uses a wall-clock
+        # deadline, and the NTP step at boot on units without an RTC battery
+        # (minutes to hours) expires it instantly. See ASRProcess.start().
+        start = time.monotonic()
+        while time.monotonic() - start < 30.0:
+            if self.ready_event.wait(timeout=0.5):
+                self.is_ready = True
+                return True
+            if not self.process.is_alive():
+                break
+        self.kill()
+        return False
 
     def kill(self):
         """Kill the OCR worker process."""

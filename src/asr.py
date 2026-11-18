@@ -192,6 +192,8 @@ class ASRManager:
         self.timeout_count = 0
         self.failure_count = 0
         self.killed_count = 0
+        self.worker_restarts = 0        # workers brought back by _ensure_worker
+        self.worker_start_failures = 0  # failed attempts to bring one back
         self.last_transcript = ''
         self.last_marker_hits = 0
         self.last_inference_time = 0.0
@@ -215,10 +217,15 @@ class ASRManager:
             logger.warning("[ASR] faster-whisper not installed — ASR disabled")
             return
 
-        procs = [p for p in self._processes if p.start()]
-        if not procs:
-            logger.warning("[ASR] worker process failed to start — ASR disabled")
-            return
+        # Try every worker once now; one that fails is restarted by its own
+        # loop with backoff (_ensure_worker), so a failed load never leaves
+        # ASR off for the rest of the boot.
+        procs = list(self._processes)
+        started = [p.start() for p in procs]
+        if not any(started):
+            logger.warning(f"[ASR] worker process failed to start — retrying in "
+                           f"{self._retry_delay(1):.0f}s (backoff to "
+                           f"{self.WORKER_RETRY_MAX_S:.0f}s)")
 
         self._stop_event.clear()
         self.is_running = True
@@ -265,11 +272,20 @@ class ASRManager:
                                      + self.MIN_CYCLE_S * index / count):
             pass
 
+        # Worker restart state for this loop's process (see _ensure_worker).
+        retry = {'fails': 0 if self._worker_alive(proc) else 1}
+        retry['next'] = (time.monotonic() + self._retry_delay(1)
+                         if retry['fails'] else 0.0)
+
         while not self._stop_event.is_set():
             cycle_start = time.monotonic()
             try:
                 if not self.enabled:
                     self._stop_event.wait(max(self.INFERENCE_INTERVAL_S, 0.5))
+                    continue
+
+                if not self._ensure_worker(proc, retry):
+                    self._stop_event.wait(1.0)
                     continue
 
                 if hasattr(self._tap, 'snapshot_window'):
@@ -304,6 +320,61 @@ class ASRManager:
             self._stop_event.wait(max(
                 self.INFERENCE_INTERVAL_S,
                 self.MIN_CYCLE_S * count - (time.monotonic() - cycle_start)))
+
+    # ----- worker recovery -----
+
+    # Backoff between attempts to bring a dead/failed worker back:
+    # 5, 10, 20, ... seconds, capped at WORKER_RETRY_MAX_S. Retries never
+    # stop while ASR is running; the cap keeps a permanently broken model
+    # (missing files, NPU fault) from spawning a worker every few seconds.
+    WORKER_RETRY_BASE_S = float(os.environ.get('MINUS_ASR_RETRY_BASE_S', '5'))
+    WORKER_RETRY_MAX_S = float(os.environ.get('MINUS_ASR_RETRY_MAX_S', '300'))
+
+    @classmethod
+    def _retry_delay(cls, fails: int) -> float:
+        return min(cls.WORKER_RETRY_BASE_S * (2 ** max(fails - 1, 0)),
+                   cls.WORKER_RETRY_MAX_S)
+
+    @staticmethod
+    def _worker_alive(proc) -> bool:
+        p = getattr(proc, 'process', None)
+        return bool(proc.is_ready and p is not None and p.is_alive())
+
+    def _ensure_worker(self, proc, retry: dict) -> bool:
+        """True if `proc` is ready for a transcribe. Otherwise, once its
+        backoff has elapsed, try to start it again (blocks up to the worker
+        load timeout). `retry` holds {'fails', 'next'} for this loop.
+
+        Covers a load that failed at startup and a worker that died later
+        (crash, or a hard-timeout restart whose reload failed): before this,
+        either left ASR off until the service restarted."""
+        if self._worker_alive(proc):
+            return True
+        now = time.monotonic()
+        if retry['fails'] == 0:
+            # Was healthy and just died: retry right away.
+            logger.warning("[ASR] worker not running — restarting it")
+            retry['next'] = now
+        if now < retry['next']:
+            return False
+        attempt = retry['fails'] + 1
+        ok = proc.start()
+        if self._stop_event.is_set():
+            # stop() ran while we were loading; don't leave a worker behind.
+            if ok:
+                proc.stop()
+            return False
+        if ok:
+            self.worker_restarts += 1
+            logger.info(f"[ASR] worker back up (attempt {attempt})")
+            retry['fails'] = 0
+            return True
+        retry['fails'] = attempt
+        retry['next'] = time.monotonic() + self._retry_delay(attempt)
+        self.worker_start_failures += 1
+        logger.warning(f"[ASR] worker start attempt {attempt} failed — next try in "
+                       f"{self._retry_delay(attempt):.0f}s")
+        return False
 
     def _record_result(self, status: str, transcript: str, latency: float):
         hits = count_marker_hits(transcript) if status == 'ok' else 0
@@ -410,6 +481,10 @@ class ASRManager:
             'available': is_asr_available(),
             'enabled': self.enabled,
             'running': self.is_running,
+            'workers_ready': sum(1 for p in self._processes if self._worker_alive(p)),
+            'workers_total': len(self._processes),
+            'worker_restarts': self.worker_restarts,
+            'worker_start_failures': self.worker_start_failures,
             'engine': self.engine,
             'model': self.model_label,
             'inference_count': self.inference_count,
