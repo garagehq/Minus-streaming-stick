@@ -392,6 +392,33 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   It now folds accents (ö -> o, "LeBrón" -> "lebron") and keeps a digit or
   non-ASCII letter between two letters inside the word; spaces, dots and
   hyphens still split ("LeBron-James" matches).
+- **Context "James" (2026-11-18, client idea, off by default).** A bare
+  "James" is not muted (every other James), but right after a LeBron /
+  King / King James mention it is nearly always him. With
+  `name_mute_james_context` on (`POST /api/name-mute/settings
+  {"james_context": true}`), any such mention opens a window of
+  `MINUS_NAME_MUTE_JAMES_CONTEXT_S` (180 s, capture time) in which a bare
+  "James" mutes too, from ASR and captions; each new mention restarts it,
+  a "James" does not. A window that hears LeBron counts for the whole
+  window (ASR windows overlap, and "LeBron at the line. James hits both"
+  fits in one). Edge "James" is ignored like edge "king" (a cut-off
+  "Jameson"), and a "James" next to another James's name is not him
+  (Bronny, Bryce, Mike, ... / Harden, Worthy, Johnson, ...;
+  `_OTHER_JAMES_*`, also applied to `name_mute_surname`). Live, ESPN
+  2002 archive of his high school game, 5 min: 5 bare "James" muted
+  ("there's james with a follow", "give james the..."), all LeBron, none
+  muted before. `/api/name-mute` -> `james_context`,
+  `james_context_remaining_s`, `james_hits`. Tests: `TestJamesContext`,
+  `TestOtherJameses` in `tests/test_name_mute.py`.
+- **Stale clock, no Wi-Fi.** Shipped units boot with a stale clock and
+  usually never get Wi-Fi. Nothing at boot waits for the network
+  (`minus.service` is after `multi-user.target` only). Timing that matters
+  (name-mute scheduling, James window, adaptive delay, worker load waits)
+  is on the monotonic clock; a live +3 h / -3 h clock step (2026-11-18)
+  changed nothing (ASR kept inferring, no restarts, mutes on time). The
+  remaining `time.time()` timers are refreshed per buffer/cycle, so a step
+  skews at most one comparison; the "Still waiting for HDMI-TX (180m
+  elapsed)" log line after a step is cosmetic.
 - **Input capped at 4K30 / 1080p60 (2026-11-11).** A non-HDCP source
   showed No Signal on this unit: under the 24-30 Hz-only EDID it sent no
   TMDS at all (`hdmirx_wait_lock_and_get_timing signal not lock,

@@ -608,3 +608,137 @@ class TestBanners(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class TestJamesContext(unittest.TestCase):
+    """A bare "James" mutes only within JAMES_CONTEXT_S of a LeBron/King
+    mention, and only with james_context on."""
+
+    @staticmethod
+    def _w(text, start=0.5):
+        return [(x, start + i * 0.3, start + i * 0.3 + 0.25)
+                for i, x in enumerate(text.split())]
+
+    def _ctl(self, on=True):
+        sch = NameMuteScheduler(FakeAudio(), lambda: 4.0)
+        ctl = NameMuteController(sch, james_context=on)
+        ctl.window_s = 3.0
+        return ctl, sch
+
+    def _say(self, ctl, text, t):
+        ctl.on_asr_words(text, self._w(text), t)
+
+    def test_off_by_default(self):
+        sch = NameMuteScheduler(FakeAudio(), lambda: 4.0)
+        ctl = NameMuteController(sch)
+        self.assertFalse(ctl.james_context)
+        t0 = time.monotonic()
+        self._say(ctl, "LeBron at the line", t0)
+        self._say(ctl, "James hits both", t0 + 20)
+        self.assertEqual((ctl.asr_hits, ctl.james_hits, len(sch._windows)), (1, 0, 1))
+
+    def test_james_after_lebron_is_muted(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        self._say(ctl, "LeBron at the line", t0)
+        self._say(ctl, "James hits both", t0 + 20)
+        self.assertEqual((ctl.asr_hits, ctl.james_hits, len(sch._windows)), (2, 1, 2))
+
+    def test_james_after_king_is_muted(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        self._say(ctl, "the King is here", t0)
+        self._say(ctl, "and James scores", t0 + 60)
+        self.assertEqual(ctl.james_hits, 1)
+
+    def test_james_without_a_name_is_not_muted(self):
+        ctl, sch = self._ctl()
+        self._say(ctl, "James Harden for three", time.monotonic())
+        self.assertEqual((ctl.asr_hits, len(sch._windows)), (0, 0))
+
+    def test_context_expires(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        self._say(ctl, "LeBron at the line", t0)
+        self._say(ctl, "James hits both", t0 + ctl.JAMES_CONTEXT_S + 10)
+        self.assertEqual(ctl.james_hits, 0)
+
+    def test_james_does_not_extend_the_window(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        self._say(ctl, "LeBron at the line", t0)
+        self._say(ctl, "James hits both", t0 + ctl.JAMES_CONTEXT_S - 30)
+        self._say(ctl, "James again", t0 + ctl.JAMES_CONTEXT_S + 30)
+        self.assertEqual(ctl.james_hits, 1)
+
+    def test_same_window(self):
+        ctl, sch = self._ctl()
+        self._say(ctl, "LeBron at the line James hits both", time.monotonic())
+        self.assertEqual((ctl.asr_hits, ctl.james_hits), (2, 1))
+
+    def test_overlapping_window_that_started_before_the_name(self):
+        # The next window began before LeBron was said but ends after it.
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        ctl.on_asr_words("LeBron at", [("LeBron", 2.0, 2.4), ("at", 2.45, 2.6)], t0)
+        ctl.on_asr_words("LeBron at the line James",
+                         [("LeBron", 1.5, 1.9), ("at", 1.95, 2.1), ("the", 2.1, 2.2),
+                          ("line", 2.2, 2.4), ("James", 2.45, 2.7)], t0 + 0.5)
+        self.assertEqual(ctl.james_hits, 1)
+
+    def test_lebron_james_is_one_mention(self):
+        ctl, sch = self._ctl()
+        self._say(ctl, "LeBron James with the dunk", time.monotonic())
+        self.assertEqual((ctl.asr_hits, ctl.james_hits), (1, 0))
+
+    def test_edge_james_ignored(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        self._say(ctl, "LeBron at the line", t0)
+        ctl.on_asr_words("James", [("James", 2.85, 3.0)], t0 + 10)   # cut-off "Jameson"
+        self.assertEqual(ctl.james_hits, 0)
+        self.assertGreaterEqual(ctl.edge_king_skips, 1)
+
+    def test_captions(self):
+        ctl, sch = self._ctl()
+        t0 = time.monotonic()
+        ctl.on_caption_texts(["here comes LeBron with the drive"], t0)
+        ctl.on_caption_texts(["and James scores again"], t0 + 30)
+        self.assertEqual((ctl.caption_hits, ctl.james_hits), (2, 1))
+
+    def test_captions_off_context(self):
+        ctl, sch = self._ctl()
+        ctl.on_caption_texts(["and James scores again"], time.monotonic())
+        self.assertEqual(ctl.caption_hits, 0)
+
+    def test_status(self):
+        ctl, sch = self._ctl()
+        self._say(ctl, "LeBron at the line", time.monotonic())
+        st = ctl.get_status()
+        self.assertTrue(st['james_context'])
+        self.assertGreater(st['james_context_remaining_s'], ctl.JAMES_CONTEXT_S - 5)
+        self.assertEqual(st['james_hits'], 0)
+
+
+class TestOtherJameses(unittest.TestCase):
+    def test_other_jameses_are_not_bare_james(self):
+        m = NameMatcher()
+        w = lambda t: [(x, i * 0.3 + 0.5, i * 0.3 + 0.75) for i, x in enumerate(t.split())]
+        for t in ("Bronny James at the line", "and Bryce James", "James Harden for three",
+                  "James Worthy watching", "Mike James scores"):
+            self.assertEqual(m.find_word_spans(w(t), surname=True), [], t)
+            self.assertEqual(m.find(t, surname=True), [], t)
+        for t in ("James at the line", "give James the ball"):
+            self.assertEqual(len(m.find_word_spans(w(t), surname=True)), 1, t)
+        # LeBron James is still the full name.
+        self.assertEqual(len(m.find_word_spans(w("LeBron James"), surname=True)), 1)
+
+    def test_bronny_in_context_not_muted(self):
+        sch = NameMuteScheduler(FakeAudio(), lambda: 4.0)
+        ctl = NameMuteController(sch, james_context=True)
+        ctl.window_s = 3.0
+        t0 = time.monotonic()
+        w = lambda t: [(x, i * 0.3 + 0.5, i * 0.3 + 0.75) for i, x in enumerate(t.split())]
+        ctl.on_asr_words("LeBron at the line", w("LeBron at the line"), t0)
+        ctl.on_asr_words("Bronny James checks in", w("Bronny James checks in"), t0 + 20)
+        ctl.on_caption_texts(["and Bronny James scores"], t0 + 25)
+        self.assertEqual(ctl.james_hits, 0)

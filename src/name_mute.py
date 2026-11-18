@@ -68,6 +68,28 @@ def _is_graphic_name(line: str) -> bool:
     ("LEBRON 2011 Finals", "LeBRON JAMES") is an on-screen graphic."""
     return any(re.search(r"[A-Z]{4}", m.group(0)) for m in _RAW_NAME_RE.finditer(line))
 _SURNAME_RE = re.compile(r"\bjames(?:'?s)?\b")
+# A bare "James" next to one of these is someone else: his sons, and the
+# other Jameses commentary mentions alongside him. Used whenever a bare
+# "James" is muted (include_surname / context James).
+_OTHER_JAMES_FIRST = frozenset(('bronny', 'bryce', 'mike', 'justin', 'jerome', 'mr'))
+_OTHER_JAMES_LAST = frozenset(('harden', 'worthy', 'wiseman', 'johnson', 'posey',
+                               'ennis', 'naismith', 'bouknight', 'nnaji', 'dolan',
+                               'jones', 'franco', 'madison', 'brown', 'taylor'))
+
+
+def _other_james(prev_word: str, next_word: str) -> bool:
+    return prev_word in _OTHER_JAMES_FIRST or next_word in _OTHER_JAMES_LAST
+
+
+def _surname_hits(norm: str):
+    """Bare "James" matches in normalized text, minus other people's."""
+    out = []
+    for m in _SURNAME_RE.finditer(norm):
+        before = norm[:m.start()].split()
+        after = norm[m.end():].split()
+        if not _other_james(before[-1] if before else '', after[0] if after else ''):
+            out.append(m)
+    return out
 
 # Word-level forms (single token as Moonshine emits it).
 _WORD_FIRST_RE = re.compile(r"^(?:le ?bron+|lebrun|la ?bron)(?:'?s)?$")
@@ -96,24 +118,26 @@ class NameMatcher:
     def __init__(self, include_surname: bool = False):
         self.include_surname = include_surname
 
-    def find(self, text: str) -> list:
-        """Return the matched name phrases in `text` (empty if none)."""
+    def find(self, text: str, surname: bool = False) -> list:
+        """Return the matched name phrases in `text` (empty if none).
+        surname=True also matches a bare "James" for this call."""
         t = _norm(text)
         if not t:
             return []
         hits = []
         for rx in (_FULL_NAME_RE, _FIRST_NAME_RE, _KING_JAMES_RE):
             hits.extend(m.group(0) for m in rx.finditer(t))
-        if self.include_surname and not hits:
-            hits.extend(m.group(0) for m in _SURNAME_RE.finditer(t))
+        if (self.include_surname or surname) and not hits:
+            hits.extend(m.group(0) for m in _surname_hits(t))
         return hits
 
-    def find_word_spans(self, words) -> list:
+    def find_word_spans(self, words, surname: bool = False) -> list:
         """Return (start, end) spans of name words.
 
         words: iterable of (word, start_s, end_s). A "LeBron James" pair
         becomes one span; a lone "Bron"/"Bronx" counts only when followed
-        by "James" (so "the Bronx" stays unmuted).
+        by "James" (so "the Bronx" stays unmuted). surname=True also
+        matches a bare "James" for this call.
         """
         toks = [(_norm(w), s, e) for w, s, e in words]
         spans = []
@@ -134,7 +158,9 @@ class NameMatcher:
                     i += 2
                     continue
                 spans.append((s, e))
-            elif self.include_surname and _WORD_JAMES_RE.match(w):
+            elif ((self.include_surname or surname) and _WORD_JAMES_RE.match(w)
+                  and not _other_james(toks[i - 1][0] if i else '',
+                                       nxt[0] if nxt is not None else '')):
                 spans.append((s, e))
             i += 1
         return spans
@@ -490,11 +516,21 @@ class NameMuteController:
     # turns it off); live it cut fine-tuned SenseVoice's false mutes on
     # non-LeBron video to ~0.6/h with no lost mentions.
     EDGE_KING_S = 0.25
+    # Context "James": a bare "James" is not muted on its own (it matches
+    # every other James), but right after a LeBron / King / King James
+    # mention it is almost always him ("...LeBron at the line. James hits
+    # both"). With james_context on, any such mention opens a window of
+    # JAMES_CONTEXT_S (capture time) in which a bare "James" mutes too, from
+    # ASR and captions. Each new mention restarts the window.
+    JAMES_CONTEXT_S = float(os.environ.get('MINUS_NAME_MUTE_JAMES_CONTEXT_S', '180'))
 
     def __init__(self, scheduler: NameMuteScheduler, matcher: NameMatcher = None,
-                 partial_names: bool = False):
+                 partial_names: bool = False, james_context: bool = False):
         self.scheduler = scheduler
         self.matcher = matcher or NameMatcher()
+        self.james_context = james_context
+        self._last_name_capture = None   # capture time of the last non-James mention
+        self.james_hits = 0
         self.enabled = True
         self.use_asr = True
         env = os.environ.get('MINUS_NAME_MUTE_PARTIAL')
@@ -551,12 +587,23 @@ class NameMuteController:
                     'words': [(w, round(s, 3), round(e, 3)) for w, s, e in (words or [])]}) + '\n')
             except (OSError, ValueError, TypeError):
                 pass
-        spans = self.matcher.find_word_spans(words) if words else []
-        if not spans and self.matcher.find(transcript):
+        name_spans = self.matcher.find_word_spans(words) if words else []
+        # A bare "James" counts if a LeBron / King mention opened the window
+        # before this one ends, or is heard in this window itself.
+        james = self.james_context and (
+            bool(name_spans) or self._james_in_context(window_start + self.window_s))
+        spans = (self.matcher.find_word_spans(words, surname=True)
+                 if james and words else name_spans)
+        # Spans that are bare "James" (muted only in context); the rest are
+        # LeBron / King mentions, which open the context.
+        james_spans = set(spans) - set(name_spans)
+        if not spans and self.matcher.find(transcript, surname=james):
             # No usable word timings: mute the whole window.
             spans = [(0.0, max((e for _, _, e in words), default=2.5))]
+            if not self.matcher.find(transcript):
+                james_spans = set(spans)
         elif self.edge_king and spans:
-            spans = self._drop_edge_king(words, spans)
+            spans = self._drop_edge_king(words, spans, james_spans)
         if words:
             self._cancel_unheard_captions(words, window_start, bool(spans))
         if self.partial_names and words:
@@ -569,6 +616,7 @@ class NameMuteController:
         for s, e in spans:
             if e - s < self.ASR_MIN_WORD_S:
                 continue
+            is_james = (s, e) in james_spans
             truncated = s <= 0.05 or e >= self.window_s - 0.05
             if s <= 0.05:
                 # Word was already under way when this window began.
@@ -589,6 +637,10 @@ class NameMuteController:
             if not near:
                 self.asr_hits += 1
                 self.caption_lag.asr(c0)
+                if is_james:
+                    self.james_hits += 1
+            if not is_james:
+                self._note_name(c1)
             # The ASR word span is the most precise timing there is: it
             # narrows any coarser mute (caption line, partial name, cut-off
             # word) for the same mention to itself -- except that an
@@ -602,9 +654,21 @@ class NameMuteController:
                                                      'asr_partial', 'asr_edge'),
                                     keep_head_sources=('caption',))
 
-    def _drop_edge_king(self, words, spans):
-        """Remove bare-"king" spans that touch a window edge (see EDGE_KING_S)."""
+    def _james_in_context(self, capture_time: float) -> bool:
+        """Is a bare "James" at this capture time inside a context window?"""
+        return (self.james_context and self._last_name_capture is not None
+                and 0 <= capture_time - self._last_name_capture <= self.JAMES_CONTEXT_S)
+
+    def _note_name(self, capture_time: float):
+        """A LeBron / King mention was muted: (re)open the James window."""
+        if self._last_name_capture is None or capture_time > self._last_name_capture:
+            self._last_name_capture = capture_time
+
+    def _drop_edge_king(self, words, spans, james_spans=()):
+        """Remove bare-"king" spans that touch a window edge (see EDGE_KING_S).
+        Context "James" spans get the same rule (a cut-off "Jameson")."""
         kings = {(s, e) for w, s, e in words if _WORD_KING_RE.match(_norm(w))}
+        kings |= set(james_spans)
         keep = []
         for s, e in spans:
             if (s, e) in kings and (s <= self.EDGE_KING_S or e >= self.window_s - self.EDGE_KING_S):
@@ -708,8 +772,15 @@ class NameMuteController:
                 if small:
                     self.caption_small_skips += 1
                     continue
-            for m in (_FULL_NAME_RE, _FIRST_NAME_RE, _KING_JAMES_RE):
-                for hit in m.finditer(norm):
+            hits = [hit for m in (_FULL_NAME_RE, _FIRST_NAME_RE, _KING_JAMES_RE)
+                    for hit in m.finditer(norm)]
+            name_hits = list(hits)
+            if self.james_context and (name_hits or self._james_in_context(capture_time)):
+                # Bare "James" not already part of "LeBron James"/"King James".
+                hits += [j for j in _surname_hits(norm)
+                         if not any(h.start() <= j.start() < h.end() for h in name_hits)]
+            for hit in hits:
+                    is_james = hit not in name_hits
                     if _is_graphic_name(line):
                         continue
                     # Key: the text before this mention plus its first word.
@@ -748,6 +819,10 @@ class NameMuteController:
                                for n in earlier))
                     if mid:
                         self._recent_mid.append(capture_time)
+                    if is_james:
+                        self.james_hits += 1
+                    else:
+                        self._note_name(capture_time)
                     self.scheduler.schedule(capture_time, capture_time,
                                             'caption_mid' if mid else 'caption',
                                             line.strip()[:80], meta,
@@ -812,6 +887,12 @@ class NameMuteController:
             'use_asr': self.use_asr,
             'use_captions': self.use_captions,
             'include_surname': self.matcher.include_surname,
+            'james_context': self.james_context,
+            'james_context_s': self.JAMES_CONTEXT_S,
+            'james_context_remaining_s': (
+                round(max(0.0, self.JAMES_CONTEXT_S - (time.monotonic() - self._last_name_capture)), 1)
+                if self.james_context and self._last_name_capture is not None else 0.0),
+            'james_hits': self.james_hits,
             'asr_hits': self.asr_hits,
             'partial_names': self.partial_names,
             'partial_hits': self.partial_hits,

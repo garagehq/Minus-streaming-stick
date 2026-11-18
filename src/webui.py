@@ -2744,14 +2744,16 @@ class WebUI:
 
         @self.app.route('/api/name-mute/settings', methods=['POST'])
         def api_name_mute_settings():
-            """Body (all optional): {"enabled", "surname", "ad_blocking"}.
+            """Body (all optional): {"enabled", "surname", "ad_blocking",
+            "james_context"}.
             Persisted to system settings; applied live."""
             nm = getattr(self.minus, 'name_mute', None)
             data = request.get_json(silent=True) or {}
             try:
                 result = self.minus.set_name_mute_settings(
                     enabled=data.get('enabled'), surname=data.get('surname'),
-                    ad_blocking=data.get('ad_blocking'))
+                    ad_blocking=data.get('ad_blocking'),
+                    james_context=data.get('james_context'))
                 return jsonify(result)
             except Exception as e:
                 return jsonify({'success': False, 'error': str(e)}), 500

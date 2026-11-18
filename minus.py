@@ -1119,7 +1119,8 @@ class Minus:
                     scheduler,
                     NameMatcher(include_surname=bool(
                         self._system_settings.get('name_mute_surname', False))),
-                    partial_names=getattr(self.asr, 'engine', '') == 'sensevoice')
+                    partial_names=getattr(self.asr, 'engine', '') == 'sensevoice',
+                    james_context=bool(self._system_settings.get('name_mute_james_context', False)))
                 self.name_mute.enabled = bool(self._system_settings.get('name_mute', True))
                 if self.asr_tap is not None:
                     # Caption hits over silence are title cards: not muted.
@@ -2840,8 +2841,13 @@ class Minus:
     # System Settings
     # =========================================================================
 
-    def set_name_mute_settings(self, enabled=None, surname=None, ad_blocking=None) -> dict:
+    def set_name_mute_settings(self, enabled=None, surname=None, ad_blocking=None,
+                               james_context=None) -> dict:
         """Update and persist name-mute / ad-blocking settings (None = keep)."""
+        if james_context is not None:
+            self._system_settings['name_mute_james_context'] = bool(james_context)
+            if self.name_mute is not None:
+                self.name_mute.james_context = bool(james_context)
         if enabled is not None:
             self._system_settings['name_mute'] = bool(enabled)
             if self.name_mute is not None:
@@ -2856,6 +2862,7 @@ class Minus:
         return {'success': True,
                 'name_mute': self._system_settings.get('name_mute'),
                 'name_mute_surname': self._system_settings.get('name_mute_surname'),
+                'name_mute_james_context': self._system_settings.get('name_mute_james_context'),
                 'ad_blocking': self._system_settings.get('ad_blocking')}
 
     @property
@@ -2887,6 +2894,9 @@ class Minus:
             # the target name is spoken (ASR) or captioned (OCR).
             'name_mute': True,
             'name_mute_surname': False,   # also match a bare "James"
+            # A bare "James" within MINUS_NAME_MUTE_JAMES_CONTEXT_S (180 s) of a
+            # LeBron / King mention is muted too.
+            'name_mute_james_context': False,
         }
         try:
             if SYSTEM_SETTINGS_FILE.exists():
