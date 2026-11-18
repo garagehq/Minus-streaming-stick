@@ -15,7 +15,8 @@
 #   6  HDMI-RX EDID (24-30 Hz only, so sources send 4K30)
 #   7  groups (gpio/spi/video/audio) for the radxa user
 #   8  hostname + mDNS (only when MINUS_HOSTNAME is set)
-#   9  silent boot, auto-login (tty2 + desktop), never sleep/lock, desktop off
+#   9  silent boot, auto-login (tty2 + desktop), never sleep/lock, desktop off,
+#      board status LED off (minus-board-leds.service; not the mute LED)
 #   10 systemd service
 #   11 screenshot dirs, login shell, unattended-upgrades, journald size limits
 #   12 factory Wi-Fi networks (saved, not connected; tools/add_wifi_networks.sh)
@@ -365,6 +366,16 @@ else
 fi
 systemctl daemon-reload
 echo "    console auto-login on ${CONSOLE_TTY} as ${RUN_USER}; sleep/suspend masked"
+
+# ---------------------------------------------------------------------------
+# Board status/activity LED off at every boot (the power LED is hard-wired;
+# the mute LED on pin 40 is a separate GPIO and is not touched).
+sed "s#/home/radxa/Minus#${SCRIPT_DIR}#" "${SCRIPT_DIR}/minus-board-leds.service"     > /etc/systemd/system/minus-board-leds.service
+chmod 644 /etc/systemd/system/minus-board-leds.service
+systemctl daemon-reload
+systemctl enable -q minus-board-leds.service
+systemctl restart minus-board-leds.service 2>/dev/null || true
+echo "    board status LED: off"
 
 # ---------------------------------------------------------------------------
 step 10 "Installing the systemd service..."

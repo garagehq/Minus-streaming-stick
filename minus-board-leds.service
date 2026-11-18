@@ -1,0 +1,11 @@
+[Unit]
+Description=Turn off the board's status/activity LED (not the mute LED)
+After=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh /home/radxa/Minus/tools/board_leds_off.sh
+
+[Install]
+WantedBy=multi-user.target

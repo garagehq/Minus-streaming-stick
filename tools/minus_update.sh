@@ -41,7 +41,7 @@ git_u() { as_user git -C "$US_DIR" "$@"; }
 if [ -e /etc/minus/no-auto-update ]; then
     log "disabled (/etc/minus/no-auto-update)"; exit 0
 fi
-if [ -e "$STAMP" ]; then
+if [ -e "$STAMP" ] && [ -z "${MINUS_UPDATE_FROM:-}" ]; then
     exit 0                                    # already updated this boot
 fi
 if ! nmcli -t -f STATE general 2>/dev/null | grep -q '^connected'; then
@@ -75,9 +75,19 @@ if ! timeout 60 "${AS_USER[@]}" git -C "$MINUS_DIR" fetch -q origin "$BRANCH"; t
     log "can't reach origin; will retry"; exit 0
 fi
 touch "$STAMP"
-OLD="$(git_m rev-parse HEAD)"
+HEAD_BEFORE="$(git_m rev-parse HEAD)"
 sync_checkout git_m "$BRANCH" "Minus"
 NEW="$(git_m rev-parse HEAD)"
+# If this pull changed the updater itself, the running bash still has the
+# old copy open: re-run the new one now, from the same starting commit, so
+# new install steps apply in this update rather than the next one.
+if [ -z "${MINUS_UPDATE_FROM:-}" ] && [ "$HEAD_BEFORE" != "$NEW" ] \
+   && ! git_m diff --quiet "$HEAD_BEFORE" "$NEW" -- tools/minus_update.sh; then
+    log "updater changed; running the new version"
+    exec env MINUS_UPDATE_FROM="$HEAD_BEFORE" MINUS_DIR="$MINUS_DIR" \
+        /bin/bash "$MINUS_DIR/tools/minus_update.sh"
+fi
+OLD="${MINUS_UPDATE_FROM:-$HEAD_BEFORE}"
 CHANGED=0
 if [ "$OLD" != "$NEW" ]; then
     CHANGED=1
@@ -91,6 +101,17 @@ if [ "$OLD" != "$NEW" ]; then
         if ! git_m diff --quiet "$OLD" "$NEW" -- "$unit"; then
             install -m 644 "$MINUS_DIR/$unit" "/etc/systemd/system/$unit"
             systemctl daemon-reload
+        fi
+    done
+    # Boot-time units that are new or changed: install, enable, run now.
+    for unit in minus-board-leds.service; do
+        if [ -f "$MINUS_DIR/$unit" ] && ! git_m diff --quiet "$OLD" "$NEW" -- "$unit"; then
+            sed "s#/home/radxa/Minus#$MINUS_DIR#" "$MINUS_DIR/$unit" > "/etc/systemd/system/$unit"
+            chmod 644 "/etc/systemd/system/$unit"
+            systemctl daemon-reload
+            systemctl enable -q "$unit"
+            systemctl restart "$unit"
+            log "Minus: installed $unit"
         fi
     done
     if ! git_m diff --quiet "$OLD" "$NEW" -- journald/90-kingblocker.conf; then

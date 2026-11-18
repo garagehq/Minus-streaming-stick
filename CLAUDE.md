@@ -400,6 +400,14 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   start of an ASR window is ignored (tail of a cut-off word); at the window
   end it mutes (dropping it there leaked a sentence-opening "James" ~0.5 s).
   `/api/name-mute` -> `james_hits`. Tests: `TestEveryJames`.
+- **Board LEDs off (2026-11-18).** `minus-board-leds.service` runs
+  `tools/board_leds_off.sh` at boot: every `gpio-leds` LED gets trigger
+  `none`, brightness 0. On the ROCK 5B+ that is only `user-led2`, the
+  blinking status/activity LED (heartbeat by default). The power LED is
+  wired to the power rail (not in the device tree) and can only be covered
+  or desoldered. The red mute LED (pin 40, `src/mute_led.py`) is a plain
+  GPIO line, not a `gpio-leds` LED, so it is never touched. Installed by
+  install.sh step 9; the auto-updater installs/enables it when it changes.
 - **Log bounds (2026-11-18).** `/tmp` is tmpfs (RAM) on these units.
   `/tmp/minus.log` rotates at 5 MB x 4. `/tmp/ustreamer.log` (ustreamer's
   output, added for the no-Wi-Fi bug) is trimmed while ustreamer runs: the
