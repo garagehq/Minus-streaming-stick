@@ -392,26 +392,27 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   It now folds accents (ö -> o, "LeBrón" -> "lebron") and keeps a digit or
   non-ASCII letter between two letters inside the word; spaces, dots and
   hyphens still split ("LeBron-James" matches).
-- **Context "James" (2026-11-18, client idea, on by default).** A bare
-  "James" is not muted (every other James), but right after a LeBron /
-  King / King James mention it is nearly always him. With
-  `name_mute_james_context` on (the default; `POST /api/name-mute/settings
-  {"james_context": false}` turns it off), any such mention opens a window of
-  `MINUS_NAME_MUTE_JAMES_CONTEXT_S` (180 s, capture time) in which a bare
-  "James" mutes too, from ASR and captions; each new mention restarts it,
-  a "James" does not. A window that hears LeBron counts for the whole
-  window (ASR windows overlap, and "LeBron at the line. James hits both"
-  fits in one). A "James" at the start of a window is ignored (tail of a
-  cut-off word); at the end it is kept (dropping it there made the next
-  window catch a sentence-opening "James" ~0.5 s late: 4 of 72 live mutes
-  leaked its start), and a "James" next to another James's name is not him
-  (Bronny, Bryce, Mike, ... / Harden, Worthy, Johnson, ...;
-  `_OTHER_JAMES_*`, also applied to `name_mute_surname`). Live, ESPN
-  2002 archive of his high school game, 5 min: 5 bare "James" muted
-  ("there's james with a follow", "give james the..."), all LeBron, none
-  muted before. `/api/name-mute` -> `james_context`,
-  `james_context_remaining_s`, `james_hits`. Tests: `TestJamesContext`,
-  `TestOtherJameses` in `tests/test_name_mute.py`.
+- **Every "James" is muted (2026-11-18, client decision).** `name_mute_surname`
+  now defaults on: a bare "James" mutes from ASR and captions, whoever it is
+  (Bronny, Harden, Worthy ...), false positives accepted. An earlier "context
+  James" (only within 180 s of a LeBron/King mention) and an other-Jameses
+  exclusion list were tried and removed. Kept: a bare "James" at the very
+  start of an ASR window is ignored (tail of a cut-off word); at the window
+  end it mutes (dropping it there leaked a sentence-opening "James" ~0.5 s).
+  `/api/name-mute` -> `james_hits`. Tests: `TestEveryJames`.
+- **Auto-update (2026-11-18).** `minus-update.timer` (install.sh step 13)
+  runs `tools/minus_update.sh` 3 min after boot, then every 5 min until it
+  has reached GitHub once that boot (stamp `/run/minus-update.done`). It
+  stashes local changes to tracked files, switches to and fast-forwards
+  `feature/kingblocker-9000` (`MINUS_UPDATE_BRANCH`), keeps diverged local
+  commits on `minus-update-backup-<time>` before resetting, reinstalls
+  `minus.service` / the update units if they changed, rebuilds ustreamer when
+  its fork's `asr-first` moved (`~/.minus_ustreamer_built_rev`; a failed
+  build keeps the old binary, previous one saved as `ustreamer-patched.prev`),
+  and restarts Minus only if something changed. Off on a dev box:
+  `sudo touch /etc/minus/no-auto-update`. Log: `journalctl -u minus-update`.
+  Replaces the old daily-06:00 units, which called a script that was never
+  in the repo.
 - **Trimmed web UI (2026-11-18).** Tabs are Home, Remote, Settings only. Not
   in this branch's UI (the code and APIs stay): Screenshots tab, Replace
   tab (+ photo modal), screenshot review modal, VLM badge and VLM / Both

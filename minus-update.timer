@@ -1,10 +1,11 @@
 [Unit]
-Description=Daily Minus update at 6am ET
+Description=Minus auto-update a few minutes after boot (retries every 5 min until online)
 
 [Timer]
-# 6am Eastern Time (handles DST automatically)
-OnCalendar=*-*-* 06:00:00 America/New_York
-Persistent=true
+# 3 min after boot, then 5 min after each run. The script updates once per
+# boot (stamp in /run) and exits at once after that.
+OnBootSec=3min
+OnUnitInactiveSec=5min
 
 [Install]
 WantedBy=timers.target

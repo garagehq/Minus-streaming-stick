@@ -19,6 +19,8 @@
 #   10 systemd service
 #   11 screenshot dirs, login shell, unattended-upgrades
 #   12 factory Wi-Fi networks (saved, not connected; tools/add_wifi_networks.sh)
+#   13 auto-update a few minutes after boot (minus-update.timer ->
+#      tools/minus_update.sh: pulls this branch, rebuilds ustreamer if needed)
 #
 # Environment:
 #   MINUS_HOSTNAME=name      set the hostname (default: keep the current one)
@@ -45,7 +47,7 @@ USTREAMER_SRC="${RUN_HOME}/ustreamer-garagehq"
 USTREAMER_BIN="${RUN_HOME}/ustreamer-patched"
 ASR_MODELS="${RUN_HOME}/asr_models"
 SENSEVOICE_HF="https://huggingface.co/happyme531/SenseVoiceSmall-RKNN2/resolve/main"
-TOTAL=12
+TOTAL=13
 
 step() { echo; echo "[$1/${TOTAL}] $2"; }
 as_user() { sudo -u "${RUN_USER}" -H "$@"; }
@@ -177,6 +179,9 @@ else
     echo "    WARNING: ustreamer built without RGA (is librga-dev installed?)"
 fi
 install -o "${RUN_USER}" -g "${RUN_USER}" -m 755 "${USTREAMER_SRC}/ustreamer" "${USTREAMER_BIN}"
+# Tell the auto-updater which commit this binary is, so it rebuilds only
+# when the branch moves (tools/minus_update.sh).
+as_user git -C "${USTREAMER_SRC}" rev-parse HEAD > "${RUN_HOME}/.minus_ustreamer_built_rev"
 echo "    ${USTREAMER_BIN} ($(${USTREAMER_BIN} --version 2>/dev/null || echo '?'))"
 
 # ---------------------------------------------------------------------------
@@ -388,6 +393,20 @@ fi
 # ---------------------------------------------------------------------------
 step 12 "Factory Wi-Fi networks..."
 bash "${SCRIPT_DIR}/tools/add_wifi_networks.sh"
+
+# ---------------------------------------------------------------------------
+step 13 "Auto-update a few minutes after boot..."
+# Pulls feature/kingblocker-9000 (MINUS_UPDATE_BRANCH) and rebuilds ustreamer
+# when its branch moves (tools/minus_update.sh). Off on a dev box with
+#   sudo mkdir -p /etc/minus && sudo touch /etc/minus/no-auto-update
+for unit in minus-update.service minus-update.timer; do
+    sed "s#/home/radxa/Minus#${SCRIPT_DIR}#" "${SCRIPT_DIR}/${unit}" > "/etc/systemd/system/${unit}"
+    chmod 644 "/etc/systemd/system/${unit}"
+done
+systemctl daemon-reload
+systemctl enable -q minus-update.timer
+systemctl start minus-update.timer 2>/dev/null || true
+echo "    minus-update.timer: 3 min after boot, retried every 5 min until online"
 
 if [ "${MINUS_START:-0}" = "1" ]; then
     systemctl start minus-hdmirx-edid.service 2>/dev/null || true

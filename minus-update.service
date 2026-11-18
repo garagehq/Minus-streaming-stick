@@ -1,11 +1,10 @@
 [Unit]
-Description=Minus Daily Update - Pull latest code and rebuild
-After=network-online.target
-Wants=network-online.target
+Description=Minus auto-update: pull the release branch, rebuild ustreamer if needed
+After=network-online.target NetworkManager.service
 
 [Service]
 Type=oneshot
-ExecStart=/home/radxa/minus-update.sh
-User=root
+ExecStart=/bin/bash /home/radxa/Minus/tools/minus_update.sh
 StandardOutput=journal
 StandardError=journal
+TimeoutStartSec=900
