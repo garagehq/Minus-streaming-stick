@@ -15,6 +15,12 @@
 #     minus-update-backup-<time> branch before the checkout is reset;
 #   - touch /etc/minus/no-auto-update to turn it off on a dev box.
 # Output goes to the journal: journalctl -u minus-update
+#
+# Offline-safe by design: nothing waits on this service (only its timer
+# starts it). With no network it exits at once and the timer tries again
+# in 5 min; every network step is time-limited and hard-killed, so a
+# hotspot with no uplink or a hung NetworkManager can never stall it, and
+# nothing on the unit changes unless a fetch succeeded.
 
 set -u
 
@@ -44,8 +50,16 @@ fi
 if [ -e "$STAMP" ] && [ -z "${MINUS_UPDATE_FROM:-}" ]; then
     exit 0                                    # already updated this boot
 fi
-if ! nmcli -t -f STATE general 2>/dev/null | grep -q '^connected'; then
-    log "not online yet; will retry"; exit 0
+# Log "offline" once per boot, not every 5 minutes.
+offline() {
+    if [ ! -e /run/minus-update.offline ]; then
+        touch /run/minus-update.offline
+        log "$1; no update now, will retry every 5 min"
+    fi
+    exit 0
+}
+if ! timeout -k 5 10 nmcli -t -f STATE general 2>/dev/null | grep -q '^connected'; then
+    offline "not online"
 fi
 
 # Bring a checkout to origin/<branch>. $1 = git wrapper, $2 = branch, $3 = label.
@@ -71,8 +85,8 @@ sync_checkout() {
 }
 
 # ---- Minus -----------------------------------------------------------------
-if ! timeout 60 "${AS_USER[@]}" git -C "$MINUS_DIR" fetch -q origin "$BRANCH"; then
-    log "can't reach origin; will retry"; exit 0
+if ! timeout -k 10 30 "${AS_USER[@]}" git -C "$MINUS_DIR" fetch -q origin "$BRANCH"; then
+    offline "can't reach GitHub"
 fi
 touch "$STAMP"
 HEAD_BEFORE="$(git_m rev-parse HEAD)"
@@ -125,7 +139,7 @@ else
 fi
 
 # ---- ustreamer (only rebuilt when its branch moved) ------------------------
-if [ -d "$US_DIR/.git" ] && timeout 60 "${AS_USER[@]}" git -C "$US_DIR" fetch -q origin "$US_BRANCH"; then
+if [ -d "$US_DIR/.git" ] && timeout -k 10 30 "${AS_USER[@]}" git -C "$US_DIR" fetch -q origin "$US_BRANCH"; then
     sync_checkout git_u "$US_BRANCH" "ustreamer"
     US_REV="$(git_u rev-parse HEAD)"
     if [ "$(cat "$US_BUILT" 2>/dev/null)" != "$US_REV" ]; then

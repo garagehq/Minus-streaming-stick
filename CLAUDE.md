@@ -432,6 +432,13 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   `sudo touch /etc/minus/no-auto-update`. Log: `journalctl -u minus-update`.
   Replaces the old daily-06:00 units, which called a script that was never
   in the repo.
+  Offline-safe: only its timer starts it (nothing at boot waits on it);
+  with no network it exits in ~0.02 s and logs that once per boot; every
+  network step is `timeout -k` limited (nmcli 10 s, each fetch 30 s), and
+  nothing on the unit changes unless a fetch succeeded. Tested 2026-11-18:
+  no network, GitHub refused, and a server that accepts and never answers
+  (killed at 30 s) all exit 0 with Minus untouched. If a pull changes the
+  updater itself, it re-runs the new version from the same starting commit.
 - **Trimmed web UI (2026-11-18).** Tabs are Home, Remote, Settings only. Not
   in this branch's UI (the code and APIs stay): Screenshots tab, Replace
   tab (+ photo modal), screenshot review modal, VLM badge and VLM / Both
