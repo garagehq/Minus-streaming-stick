@@ -117,14 +117,19 @@ if [ "$OLD" != "$NEW" ]; then
             systemctl daemon-reload
         fi
     done
-    # Boot-time units that are new or changed: install, enable, run now.
-    for unit in minus-board-leds.service; do
+    # Boot-time units that are new or changed: install and enable.
+    for unit in minus-board-leds.service minus-first-boot.service \
+                minus-tailscale-enroll.service minus-tailscale-enroll.timer; do
         if [ -f "$MINUS_DIR/$unit" ] && ! git_m diff --quiet "$OLD" "$NEW" -- "$unit"; then
             sed "s#/home/radxa/Minus#$MINUS_DIR#" "$MINUS_DIR/$unit" > "/etc/systemd/system/$unit"
             chmod 644 "/etc/systemd/system/$unit"
             systemctl daemon-reload
-            systemctl enable -q "$unit"
-            systemctl restart "$unit"
+            case "$unit" in
+                *.timer)                  systemctl enable -q --now "$unit" ;;
+                minus-board-leds.service) systemctl enable -q "$unit"; systemctl restart "$unit" ;;
+                minus-tailscale-enroll.service) ;;          # started by its timer
+                *)                        systemctl enable -q "$unit" ;;
+            esac
             log "Minus: installed $unit"
         fi
     done

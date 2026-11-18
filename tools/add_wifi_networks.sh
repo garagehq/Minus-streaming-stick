@@ -43,9 +43,14 @@ for entry in "${NETWORKS[@]}"; do
     echo "    Wi-Fi network saved (not connected): $ssid"
 done
 
-# Retry every saved Wi-Fi network forever (NetworkManager's default is 4
-# attempts, then ~5 min without auto-connecting). Minus re-applies this to
-# networks added later (WiFiManager.ensure_retry_forever).
+# Every saved Wi-Fi network: retry forever (NetworkManager's default is 4
+# attempts, then ~5 min without auto-connecting) and public backup DNS next
+# to the network's own. Minus re-applies both to networks added later
+# (WiFiManager.ensure_profile_defaults).
 nmcli -t -f UUID,TYPE connection show | awk -F: '$2=="802-11-wireless"{print $1}' |
-    while read -r u; do nmcli connection modify "$u" connection.autoconnect-retries 0; done
-echo "    Saved Wi-Fi networks retry forever"
+    while read -r u; do
+        nmcli connection modify "$u" connection.autoconnect-retries 0
+        [ -n "$(nmcli -g ipv4.dns connection show "$u")" ] ||
+            nmcli connection modify "$u" ipv4.dns 1.1.1.1,9.9.9.9 ipv4.ignore-auto-dns no
+    done
+echo "    Saved Wi-Fi networks: retry forever, backup DNS 1.1.1.1 / 9.9.9.9"

@@ -1,0 +1,8 @@
+[Unit]
+Description=Join this unit to the KingBlocker tailnet (own node, unique name)
+After=tailscaled.service NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/radxa/Minus/tools/tailscale_enroll.sh
+TimeoutStartSec=180

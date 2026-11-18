@@ -1,0 +1,15 @@
+[Unit]
+Description=New SSH host keys / machine-id on a freshly cloned unit
+DefaultDependencies=no
+After=local-fs.target
+Before=ssh.service sshd.service tailscaled.service minus.service
+# Run when the clone marker exists OR the SSH host keys are missing.
+ConditionPathExists=|/etc/minus/.clone-fresh
+ConditionPathExists=|!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /home/radxa/Minus/tools/first_boot_identity.sh
+
+[Install]
+WantedBy=multi-user.target

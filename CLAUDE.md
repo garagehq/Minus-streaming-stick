@@ -400,6 +400,31 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   start of an ASR window is ignored (tail of a cut-off word); at the window
   end it mutes (dropping it there leaked a sentence-opening "James" ~0.5 s).
   `/api/name-mute` -> `james_hits`. Tests: `TestEveryJames`.
+- **Tailscale per unit, cloning, backup DNS (2026-11-18).** Units live on
+  a separate tailnet as `tag:kingblocker` (ACL: only cyengmann may reach
+  them, tcp 22/80; no grant has the tag as src, so units reach nothing).
+  - `minus-tailscale-enroll.timer` (20 s after boot, then every 2 min) runs
+    `tools/tailscale_enroll.sh`: not logged in + `/etc/minus/tailscale-authkey`
+    (reusable tagged key, root 0600, never in git) + online -> `tailscale up
+    --reset --auth-key=file:... --hostname=kingblocker-<last 4 of the Wi-Fi
+    MAC> --advertise-tags=tag:kingblocker --accept-dns=false`. Offline-safe,
+    time-limited, logs once per boot (`journalctl -u minus-tailscale-enroll`).
+  - `--accept-dns=false`: Tailscale had replaced /etc/resolv.conf with only
+    100.100.100.100, so a tailscaled problem meant no DNS at all. NM now owns
+    DNS, and every Wi-Fi profile gets backup resolvers 1.1.1.1 / 9.9.9.9 next
+    to the network's own (`WiFiManager.ensure_profile_defaults`, formerly
+    `ensure_retry_forever`, which also sets retry-forever; and
+    `tools/add_wifi_networks.sh`).
+  - Before imaging: `sudo tools/prepare_for_clone.sh --yes` logs out of
+    Tailscale and wipes its state, deletes SSH host keys, leaves
+    `/etc/minus/.clone-fresh`, clears the journal, shuts down. On first boot
+    `minus-first-boot.service` (before sshd) regenerates SSH host keys and the
+    machine-id; the enrollment timer then joins as a new node. The
+    machine-id is regenerated rather than left empty: an empty one makes
+    systemd re-apply unit presets on "first boot", which can re-enable the
+    desktop install.sh disabled.
+  - install.sh step 14 installs these; the auto-updater installs/enables them
+    on existing units when they change.
 - **Board LEDs off (2026-11-18).** `minus-board-leds.service` runs
   `tools/board_leds_off.sh` at boot: every `gpio-leds` LED gets trigger
   `none`, brightness 0. On the ROCK 5B+ that is only `user-led2`, the

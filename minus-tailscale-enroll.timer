@@ -1,0 +1,9 @@
+[Unit]
+Description=Tailscale enrollment check (20 s after boot, then every 2 min)
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=2min
+
+[Install]
+WantedBy=timers.target

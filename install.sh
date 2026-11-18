@@ -22,6 +22,8 @@
 #   12 factory Wi-Fi networks (saved, not connected; tools/add_wifi_networks.sh)
 #   13 auto-update a few minutes after boot (minus-update.timer ->
 #      tools/minus_update.sh: pulls this branch, rebuilds ustreamer if needed)
+#   14 Tailscale enrollment (own node per unit, tag:kingblocker) and
+#      first-boot identity for cloned cards (tools/prepare_for_clone.sh)
 #
 # Environment:
 #   MINUS_HOSTNAME=name      set the hostname (default: keep the current one)
@@ -48,7 +50,7 @@ USTREAMER_SRC="${RUN_HOME}/ustreamer-garagehq"
 USTREAMER_BIN="${RUN_HOME}/ustreamer-patched"
 ASR_MODELS="${RUN_HOME}/asr_models"
 SENSEVOICE_HF="https://huggingface.co/happyme531/SenseVoiceSmall-RKNN2/resolve/main"
-TOTAL=13
+TOTAL=14
 
 step() { echo; echo "[$1/${TOTAL}] $2"; }
 as_user() { sudo -u "${RUN_USER}" -H "$@"; }
@@ -424,6 +426,27 @@ systemctl daemon-reload
 systemctl enable -q minus-update.timer
 systemctl start minus-update.timer 2>/dev/null || true
 echo "    minus-update.timer: 3 min after boot, retried every 5 min until online"
+
+# ---------------------------------------------------------------------------
+step 14 "Tailscale enrollment and first-boot identity..."
+# Each unit joins the tailnet as its own node (kingblocker-<MAC>, tag
+# tag:kingblocker) using /etc/minus/tailscale-authkey, and Tailscale is kept
+# out of DNS. A cloned card regenerates its SSH host keys and machine-id on
+# first boot. Before imaging: sudo tools/prepare_for_clone.sh --yes
+install -d -m 755 /etc/minus
+for unit in minus-first-boot.service minus-tailscale-enroll.service minus-tailscale-enroll.timer; do
+    sed "s#/home/radxa/Minus#${SCRIPT_DIR}#" "${SCRIPT_DIR}/${unit}" > "/etc/systemd/system/${unit}"
+    chmod 644 "/etc/systemd/system/${unit}"
+done
+systemctl daemon-reload
+systemctl enable -q minus-first-boot.service minus-tailscale-enroll.timer
+systemctl start minus-tailscale-enroll.timer 2>/dev/null || true
+if [ -s /etc/minus/tailscale-authkey ]; then
+    echo "    Tailscale auth key: present"
+else
+    echo "    Tailscale auth key: MISSING. Add it with:"
+    echo "      sudo install -m 600 /dev/stdin /etc/minus/tailscale-authkey   (paste key, Enter, Ctrl-D)"
+fi
 
 if [ "${MINUS_START:-0}" = "1" ]; then
     systemctl start minus-hdmirx-edid.service 2>/dev/null || true

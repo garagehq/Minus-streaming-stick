@@ -379,34 +379,62 @@ class WiFiManager:
 
         return networks
 
-    def ensure_retry_forever(self) -> int:
-        """Set connection.autoconnect-retries=0 (retry forever) on every saved
-        Wi-Fi profile. NetworkManager's default is 4 attempts, after which it
-        stops auto-connecting the profile for ~5 min: a unit that booted while
-        its hotspot was off then ignored the hotspot for minutes after it came
-        back (2026-11-18). NetworkManager 1.42 does not accept this as a global
-        default in conf.d, so it is set per profile, whichever way the profile
-        was made (setup page, provisioning, by hand). Returns how many changed."""
-        ok, out = self._run_nmcli(['-t', '-f', 'UUID,TYPE,NAME', 'connection', 'show'])
+    # Public resolvers added to every saved Wi-Fi profile next to the
+    # network's own DNS, so name lookups (auto-update, NTP) keep working if
+    # the local DNS is bad. Tailscale does not manage DNS on these units
+    # (tools/tailscale_enroll.sh uses --accept-dns=false).
+    BACKUP_DNS = '1.1.1.1,9.9.9.9'
+
+    def ensure_profile_defaults(self) -> int:
+        """Apply the unit's defaults to every saved Wi-Fi profile, whichever
+        way it was made (setup page, provisioning, by hand):
+
+        - connection.autoconnect-retries=0 (retry forever). NetworkManager's
+          default is 4 attempts, then ~5 min without auto-connecting: a unit
+          that booted while its hotspot was off ignored the hotspot for
+          minutes after it came back (2026-11-18). NM 1.42 rejects this as a
+          conf.d default, so it is set per profile.
+        - ipv4.dns = BACKUP_DNS, kept alongside the DHCP-provided servers.
+
+        The active connection is re-applied when changed (no disconnect).
+        Returns how many profiles changed."""
+        ok, out = self._run_nmcli(['-t', '-f', 'UUID,TYPE,NAME,DEVICE', 'connection', 'show'])
         if not ok:
             return 0
         changed = 0
+        reapply = set()
         for line in out.splitlines():
-            parts = line.split(':', 2)
+            parts = line.split(':', 3)
             if len(parts) < 3 or parts[1] != '802-11-wireless':
                 continue
             if parts[2] == self._ap_connection_name:
                 continue
-            ok, val = self._run_nmcli(['-g', 'connection.autoconnect-retries',
-                                       'connection', 'show', parts[0]])
-            if ok and val.strip() == '0':
+            uuid, device = parts[0], (parts[3] if len(parts) > 3 else '')
+            ok, vals = self._run_nmcli(['-g', 'connection.autoconnect-retries,ipv4.dns',
+                                        'connection', 'show', uuid])
+            lines = vals.splitlines() if ok else []
+            retries = lines[0].strip() if lines else ''
+            dns = lines[1].strip() if len(lines) > 1 else ''
+            args = []
+            if retries != '0':
+                args += ['connection.autoconnect-retries', '0']
+            if not dns:
+                args += ['ipv4.dns', self.BACKUP_DNS, 'ipv4.ignore-auto-dns', 'no']
+            if not args:
                 continue
-            if self._run_nmcli(['connection', 'modify', parts[0],
-                                'connection.autoconnect-retries', '0'])[0]:
+            if self._run_nmcli(['connection', 'modify', uuid] + args)[0]:
                 changed += 1
+                if device and 'ipv4.dns' in args:
+                    reapply.add(device)
+        for device in reapply:
+            self._run_nmcli(['device', 'reapply', device])
         if changed:
-            logger.info(f"[WiFi] {changed} saved network(s) set to retry forever")
+            logger.info(f"[WiFi] {changed} saved network(s) set to retry forever "
+                        f"with backup DNS {self.BACKUP_DNS}")
         return changed
+
+    # Old name, kept for callers that still use it.
+    ensure_retry_forever = ensure_profile_defaults
 
     def connect_to_network(self, ssid: str, password: str = '') -> Dict[str, Any]:
         """Connect to a WiFi network."""
@@ -454,7 +482,7 @@ class WiFiManager:
                 if self.is_wifi_connected():
                     self._last_wifi_connected_time = time.time()
                     logger.info(f"[WiFi] Connected to {ssid}")
-                    self.ensure_retry_forever()   # a new profile may have been made
+                    self.ensure_profile_defaults()   # a new profile may have been made
                     return {'success': True, 'ssid': ssid}
                 else:
                     self._last_connection_error = 'Connection established but verification failed'
@@ -717,7 +745,7 @@ class WiFiManager:
         """Background thread that monitors WiFi and auto-starts AP if needed."""
         disconnect_time = None
         try:
-            self.ensure_retry_forever()
+            self.ensure_profile_defaults()
         except Exception as e:
             logger.warning(f"[WiFi] Could not set saved networks to retry forever: {e}")
 

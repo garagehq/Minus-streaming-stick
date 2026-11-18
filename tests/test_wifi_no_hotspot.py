@@ -98,35 +98,57 @@ class TestNoHotspot(unittest.TestCase):
         mgr.start_ap_mode.assert_called_once_with(auto=True)
 
 
-class TestRetryForever(unittest.TestCase):
+class TestProfileDefaults(unittest.TestCase):
+    """Every saved Wi-Fi profile retries forever and has backup DNS."""
 
-    def test_sets_retries_on_wifi_profiles_only(self):
+    def _mgr(self, profiles):
         mgr = make_manager()
         mgr._ap_connection_name = 'KingBlocker9000'
-        retries = {'u-home': '-1', 'u-test': '0', 'u-ap': '-1'}
         calls = []
 
         def nmcli(args, timeout=30):
             calls.append(args)
-            if args[:3] == ['-t', '-f', 'UUID,TYPE,NAME']:
-                return True, ('u-home:802-11-wireless:The Garden\n'
-                              'u-test:802-11-wireless:TestNetwork1337\n'
-                              'u-ap:802-11-wireless:KingBlocker9000\n'
-                              'u-ts:tun:tailscale0\n')
-            if args[:2] == ['-g', 'connection.autoconnect-retries']:
-                return True, retries[args[-1]]
+            if args[:3] == ['-t', '-f', 'UUID,TYPE,NAME,DEVICE']:
+                return True, ''.join(f"{u}:{t}:{n}:{d}\n" for u, t, n, d, _, _ in profiles)
+            if args[:1] == ['-g']:
+                p = next(p for p in profiles if p[0] == args[-1])
+                return True, f"{p[4]}\n{p[5]}"
             return True, ''
         mgr._run_nmcli = nmcli
-        self.assertEqual(mgr.ensure_retry_forever(), 1)
-        modified = [a[2] for a in calls if a[:2] == ['connection', 'modify']]
-        self.assertEqual(modified, ['u-home'])   # not the AP, not already-0, not tun
+        return mgr, calls
+
+    def test_sets_retries_and_dns_where_missing(self):
+        mgr, calls = self._mgr([
+            ('u-home', '802-11-wireless', 'Home', 'wlan0', '-1', ''),        # needs both
+            ('u-test', '802-11-wireless', 'TestNetwork1337', '', '0', '1.1.1.1,9.9.9.9'),  # done
+            ('u-ap', '802-11-wireless', 'KingBlocker9000', '', '-1', ''),    # AP: skipped
+            ('u-ts', 'tun', 'tailscale0', 'tailscale0', '-1', ''),           # not Wi-Fi
+        ])
+        self.assertEqual(mgr.ensure_profile_defaults(), 1)
+        mods = [a for a in calls if a[:2] == ['connection', 'modify']]
+        self.assertEqual(len(mods), 1)
+        self.assertEqual(mods[0][2], 'u-home')
+        self.assertIn('connection.autoconnect-retries', mods[0])
+        self.assertIn('ipv4.dns', mods[0])
+        self.assertIn(['device', 'reapply', 'wlan0'], calls)   # active: applied now
+
+    def test_existing_dns_is_kept(self):
+        mgr, calls = self._mgr([('u', '802-11-wireless', 'Office', '', '-1', '10.0.0.53')])
+        mgr.ensure_profile_defaults()
+        mod = next(a for a in calls if a[:2] == ['connection', 'modify'])
+        self.assertNotIn('ipv4.dns', mod)                       # their own DNS untouched
+        self.assertIn('connection.autoconnect-retries', mod)
+
+    def test_old_name_still_works(self):
+        mgr, _ = self._mgr([])
+        self.assertEqual(mgr.ensure_retry_forever(), 0)
 
     def test_runs_when_monitor_starts(self):
         mgr = make_manager()
-        mgr.ensure_retry_forever = MagicMock(return_value=0)
+        mgr.ensure_profile_defaults = MagicMock(return_value=0)
         mgr.is_wifi_connected = MagicMock(return_value=True)
         run_monitor(mgr, iterations=1)
-        mgr.ensure_retry_forever.assert_called_once()
+        mgr.ensure_profile_defaults.assert_called_once()
 
 
 class TestInterfaceDetection(unittest.TestCase):
