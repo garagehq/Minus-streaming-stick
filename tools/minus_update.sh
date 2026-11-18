@@ -18,7 +18,9 @@
 
 set -u
 
-MINUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The checkout to update: this script's repo, or MINUS_DIR (to run a newer
+# copy of this script against an older checkout).
+MINUS_DIR="${MINUS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RUN_USER="${MINUS_UPDATE_USER:-radxa}"
 RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 BRANCH="${MINUS_UPDATE_BRANCH:-feature/kingblocker-9000}"
