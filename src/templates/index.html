@@ -23,8 +23,6 @@
         <nav class="tab-nav">
             <button class="tab-nav-btn active" onclick="showTab('home')">Home</button>
             <button class="tab-nav-btn" onclick="showTab('remote')">Remote</button>
-            <button class="tab-nav-btn" onclick="showTab('screenshots')">Screenshots</button>
-            <button class="tab-nav-btn" onclick="showTab('replace')">Replace</button>
             <button class="tab-nav-btn" onclick="showTab('settings')">Settings</button>
         </nav>
 
@@ -189,8 +187,6 @@
                     <span class="test-label">Test blocking:</span>
                     <div class="test-buttons">
                         <button onclick="testBlock(10, 'ocr')" class="test-btn">OCR 10s</button>
-                        <button onclick="testBlock(10, 'vlm')" class="test-btn">VLM 10s</button>
-                        <button onclick="testBlock(20, 'both')" class="test-btn">Both 20s</button>
                         <button onclick="stopTestBlock()" class="test-btn stop">Stop</button>
                     </div>
                 </div>
@@ -266,7 +262,6 @@
             <section class="system-section">
                 <div class="system-info">
                     <span id="ocr-status" class="system-badge">OCR: --</span>
-                    <span id="vlm-status" class="system-badge">VLM: --</span>
                     <span id="asr-status" class="system-badge">ASR: --</span>
                     <span id="cpu-status" class="system-badge" title="CPU usage, all cores">CPU: --</span>
                     <span id="memory-status" class="system-badge">Mem: --</span>
@@ -468,89 +463,6 @@
             </section>
         </div>
 
-        <!-- ===== SCREENSHOTS TAB ===== -->
-        <div id="tab-screenshots" class="tab-content">
-            <section class="screenshots-section">
-                <h2>Screenshots</h2>
-                <div class="screenshot-tabs">
-                    <button class="tab-btn active" onclick="showScreenshotTab('ads')">Ads</button>
-                    <button class="review-btn" onclick="openReviewModal('ads')" title="Review Ads">👀</button>
-                    <button class="tab-btn" onclick="showScreenshotTab('non_ads')">Non-Ads</button>
-                    <button class="review-btn" onclick="openReviewModal('non_ads')" title="Review Non-Ads">👀</button>
-                    <button class="tab-btn" onclick="showScreenshotTab('vlm_spastic')">VLM Spastic</button>
-                    <button class="review-btn" onclick="openReviewModal('vlm_spastic')" title="Review VLM Spastic">👀</button>
-                    <button class="tab-btn" onclick="showScreenshotTab('static')">Static</button>
-                    <button class="review-btn" onclick="openReviewModal('static')" title="Review Static">👀</button>
-                    <button class="tab-btn debug-tab" onclick="showScreenshotTab('debug')">📷 Debug</button>
-                </div>
-                <div id="screenshots-grid" class="screenshots-grid">
-                    <div class="empty-state">Select a tab to load</div>
-                </div>
-                <div id="screenshots-pagination" class="pagination hidden">
-                    <button onclick="loadScreenshotsPage(currentScreenshotPage - 1)" id="prev-page-btn" class="page-btn" disabled>&laquo; Prev</button>
-                    <span id="page-info" class="page-info">Page 1 of 1</span>
-                    <button onclick="loadScreenshotsPage(currentScreenshotPage + 1)" id="next-page-btn" class="page-btn">Next &raquo;</button>
-                </div>
-                <div id="screenshots-total" class="screenshots-total"></div>
-            </section>
-
-            <!-- Debug Snapshots Section (shown when debug tab is active) -->
-            <section id="debug-snapshots-section" class="debug-snapshots-section hidden">
-                <h3>Debug Snapshots</h3>
-                <p class="help-text">Each snapshot includes a screenshot, log file, and status JSON for debugging.</p>
-                <div id="debug-snapshots-list" class="debug-snapshots-list">
-                    <div class="empty-state">No debug snapshots</div>
-                </div>
-            </section>
-        </div>
-
-        <!-- ===== REPLACE TAB ===== -->
-        <div id="tab-replace" class="tab-content">
-            <section class="settings-section">
-                <h2>Replace</h2>
-                <p class="help-text">What shows in place of the ad. One kind is rolled per ad break and sticks for that break (30s cooldown before a new roll). The greyscaled preview of the ad stays in the bottom-right corner for every mode.</p>
-
-                <div class="setting-item">
-                    <span class="setting-label">Spanish Vocabulary</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="replace-mode-vocab" checked onchange="saveReplacementModes()">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-
-                <div class="setting-item">
-                    <span class="setting-label">Did You Know? facts</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="replace-mode-fact" checked onchange="saveReplacementModes()">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-
-                <div class="setting-item">
-                    <span class="setting-label">Photo Screensaver</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="replace-mode-photos" onchange="saveReplacementModes()">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text">Cycles your uploaded photos every 5 seconds during an ad block. Needs at least one photo uploaded below to take effect.</p>
-            </section>
-
-            <section class="settings-section">
-                <h2>Photos</h2>
-                <p class="help-text">Uploads are auto-converted to JPEG at up to 1920px (long edge). EXIF orientation is honoured, transparency flattened, any format Pillow can open (HEIC/PNG/WebP/GIF/...) is accepted. Cap: 200 photos / 200 MB (oldest evicted when full).</p>
-                <form id="photo-upload-form" onsubmit="return uploadPhoto(event)">
-                    <input type="file" id="photo-upload-input" accept="image/*" multiple onchange="updatePhotoPickerLabel()" />
-                    <label for="photo-upload-input" class="file-picker-btn">Choose files</label>
-                    <span id="photo-picker-label" class="help-text">no files selected</span>
-                    <button type="submit" class="photo-upload-btn">Upload</button>
-                    <span id="photo-upload-status" class="help-text"></span>
-                </form>
-                <div id="photo-list" class="photo-grid"></div>
-                <p class="help-text" id="photo-library-stats"></p>
-            </section>
-        </div>
-
         <!-- ===== SETTINGS TAB ===== -->
         <div id="tab-settings" class="tab-content">
             <!-- Display Settings -->
@@ -637,7 +549,7 @@
                 <p class="help-text">If audio is out of sync with video, click to reset. Causes ~300ms audio dropout.</p>
             </section>
 
-            <!-- Detection Settings -->
+            <!-- System Updates -->
             <section class="settings-section">
                 <h2>System Updates</h2>
                 <div class="setting-item">
@@ -651,217 +563,6 @@
                     <span class="status-text">Status: <span id="unattended-status-text">Loading...</span></span>
                 </div>
                 <p class="help-text">Applies Debian <em>security</em> updates automatically once a day via <code>unattended-upgrades</code>. It never reboots on its own, and never touches the kernel, u-boot, Rockchip MPP/RGA, GStreamer, Mesa, RKNN or Tailscale packages the video path was validated against &mdash; those are updated deliberately. If the status says the package is missing, install it with <code>sudo apt-get install unattended-upgrades</code> (or re-run <code>sudo ./install.sh</code>) and this toggle will activate.</p>
-            </section>
-
-            <section class="settings-section">
-                <h2>Detection Settings</h2>
-                <div class="setting-item">
-                    <span class="setting-label">VLM (minus-v0.1)</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="vlm-toggle" onchange="toggleVLM(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="vlm-status" id="vlm-status-info">
-                    <span class="status-text">Status: <span id="vlm-status-text">Loading...</span></span>
-                </div>
-                <p class="help-text">Disabling VLM unloads the model from the Axera NPU to free memory. Re-enabling takes ~13 seconds to load.</p>
-                <div class="setting-item" style="margin-top: 1rem;">
-                    <span class="setting-label">Preload VLM at Startup</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="vlm-preload-toggle" checked onchange="toggleVLMPreload(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text">When enabled, VLM loads immediately at startup (even without HDMI signal). When disabled, VLM waits for HDMI signal before loading. Takes effect on next restart.</p>
-                <div class="setting-item" style="margin-top: 1rem;">
-                    <span class="setting-label">ASR (faster-whisper audio)</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="asr-toggle" checked onchange="toggleASR(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="vlm-status" id="asr-status-info">
-                    <span class="status-text">Status: <span id="asr-status-text">Loading...</span></span>
-                </div>
-                <p class="help-text">Listens to the audio for marketing language to confirm or veto VLM-only ad blocks (e.g. a product placement in a show). Never blocks on its own and never affects OCR detection. Disabling stops the whisper worker and frees its memory.</p>
-            </section>
-
-            <!-- Blocking Optimizations -->
-            <section class="settings-section">
-                <h2>Blocking Optimizations</h2>
-                <div class="setting-item">
-                    <span class="setting-label">Block-duration Falloff</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="block-falloff-toggle" checked onchange="toggleOptimization('block_falloff', this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text">Minimum blocking time shrinks 3.0s &rarr; 1.0s as consecutive ads fire (floor 1.5s when OCR+VLM both agree). Lets the block end right as the ad does instead of holding for a full 3s every time.</p>
-
-                <div class="setting-item" style="margin-top: 1rem;">
-                    <span class="setting-label">HDMI Reconnect Grace (90s)</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="hdmi-grace-toggle" checked onchange="toggleOptimization('hdmi_reconnect_grace', this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text">After the TV reconnects, suppress ad blocking for 90 seconds so you can navigate menus without overlays jumping in.</p>
-
-                <div class="setting-item" style="margin-top: 1rem;">
-                    <span class="setting-label">Greyscale Ad Preview</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="greyscale-preview-toggle" checked onchange="toggleOptimization('greyscale_preview', this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text">Desaturates the corner preview of the blocked ad so the Spanish overlay (bright, colorful) is more appealing than the ad.</p>
-
-                <div class="setting-item" style="margin-top: 1rem;">
-                    <span class="setting-label">Low-bandwidth Preview</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="low-bw-preview-toggle" onchange="setLowBandwidthPreview(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text">The Home live feed pulls a full-rate 4K MJPEG stream — about 175&nbsp;Mbit/s per viewer, sent at the capture frame rate even when the picture is paused. This replaces it with a few-frames-per-second snapshot poll (~12-20x less WiFi traffic), which matters because the radio shares the SoC's thermal budget. Choppier, but far cooler. Stored per browser.</p>
-            </section>
-
-            <!-- Autonomous Mode Settings -->
-            <section class="settings-section">
-                <h2>Autonomous Mode</h2>
-                <div class="setting-item">
-                    <span class="setting-label">Enable</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="autonomous-toggle" onchange="toggleAutonomousMode(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="autonomous-schedule">
-                    <div class="schedule-row" id="schedule-time-row">
-                        <label class="schedule-label">Schedule:</label>
-                        <select id="auto-start-hour" onchange="updateAutonomousSchedule()">
-                            <option value="0">12 AM</option><option value="1">1 AM</option><option value="2">2 AM</option>
-                            <option value="3">3 AM</option><option value="4">4 AM</option><option value="5">5 AM</option>
-                            <option value="6">6 AM</option><option value="7">7 AM</option><option value="8">8 AM</option>
-                            <option value="9">9 AM</option><option value="10">10 AM</option><option value="11">11 AM</option>
-                            <option value="12">12 PM</option><option value="13">1 PM</option><option value="14">2 PM</option>
-                            <option value="15">3 PM</option><option value="16">4 PM</option><option value="17">5 PM</option>
-                            <option value="18">6 PM</option><option value="19">7 PM</option><option value="20">8 PM</option>
-                            <option value="21">9 PM</option><option value="22">10 PM</option><option value="23">11 PM</option>
-                        </select>
-                        <span class="schedule-to">to</span>
-                        <select id="auto-end-hour" onchange="updateAutonomousSchedule()">
-                            <option value="0">12 AM</option><option value="1">1 AM</option><option value="2">2 AM</option>
-                            <option value="3">3 AM</option><option value="4">4 AM</option><option value="5">5 AM</option>
-                            <option value="6">6 AM</option><option value="7">7 AM</option><option value="8" selected>8 AM</option>
-                            <option value="9">9 AM</option><option value="10">10 AM</option><option value="11">11 AM</option>
-                            <option value="12">12 PM</option><option value="13">1 PM</option><option value="14">2 PM</option>
-                            <option value="15">3 PM</option><option value="16">4 PM</option><option value="17">5 PM</option>
-                            <option value="18">6 PM</option><option value="19">7 PM</option><option value="20">8 PM</option>
-                            <option value="21">9 PM</option><option value="22">10 PM</option><option value="23">11 PM</option>
-                        </select>
-                        <span class="schedule-tz">ET</span>
-                    </div>
-                    <div class="setting-item">
-                        <span class="setting-label">24/7 Mode</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="auto-always-on" onchange="updateAutonomousSchedule()">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </div>
-                    <div class="setting-item" title="Steer playback toward music videos using OCR/VLM — music videos carry far more ads, so more training data per hour">
-                        <span class="setting-label">Music Videos</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="auto-music-mode" onchange="toggleAutonomousMusicMode(this.checked)">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </div>
-                </div>
-                <div class="autonomous-status" id="autonomous-status-info">
-                    <span class="status-text">Status: <span id="autonomous-status-text">Loading...</span></span>
-                    <span class="status-detail" id="autonomous-time-et"></span>
-                </div>
-                <div class="autonomous-stats" id="autonomous-stats">
-                    <span id="autonomous-videos">Videos: --</span>
-                    <span id="autonomous-ads">Ads: --</span>
-                </div>
-                <p class="help-text">Plays YouTube during scheduled hours to collect ad training data. Requires Fire TV.</p>
-                <div class="autonomous-actions">
-                    <button onclick="startAutonomousModeNow()" class="action-btn" id="autonomous-start-btn">Start Now</button>
-                </div>
-
-                <!-- IR Transmitter (REI 8K HDMI switch) -->
-                <div class="setting-item" style="margin-top: 1rem;">
-                    <span class="setting-label">IR Remote (HDMI Switch)</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="ir-toggle" onchange="toggleIRTransmitter(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text" id="ir-help-text">Controls the REI 8K HDMI switch via IR (header pin 38, PWM3). Lets autonomous mode rotate inputs to vary training data.</p>
-                <div id="ir-remote-panel" class="hidden" style="margin-top: 0.75rem;">
-                    <div class="remote-grid compact">
-                        <div class="remote-row">
-                            <button class="remote-btn select" onclick="sendIRCommand('input_1')">Input 1</button>
-                            <button class="remote-btn select" onclick="sendIRCommand('input_2')">Input 2</button>
-                            <button class="remote-btn select" onclick="sendIRCommand('input_3')">Input 3</button>
-                        </div>
-                        <div class="remote-row">
-                            <button class="remote-btn" onclick="sendIRCommand('power')">&#9211; Power</button>
-                            <button class="remote-btn nav" onclick="sendIRCommand('next')">Next &#8594;</button>
-                            <button class="remote-btn" onclick="sendIRCommand('auto')">Auto</button>
-                        </div>
-                    </div>
-                    <div class="ir-status-line" id="ir-status-line"></div>
-                </div>
-
-                <!-- Status LED strip (WS2812B on SPI0 MOSI) -->
-                <div class="setting-item" style="margin-top: 1rem;">
-                    <span class="setting-label">Status LEDs</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="leds-toggle" onchange="toggleStatusLEDs(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text" id="leds-help-text">8 WS2812B LEDs on header pin 19 indicate device state (initializing / idle / blocking / paused / no-signal / autonomous / wifi / error). Requires the SPI0-M2 overlay enabled.</p>
-                <div id="leds-state-panel" class="hidden" style="margin-top: 0.75rem;">
-                    <div class="setting-item" style="margin-bottom: 0.5rem;">
-                        <span class="setting-label" style="font-size: 0.85rem;">Only when display is on</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="leds-require-display-toggle" onchange="toggleLEDRequireDisplay(this.checked)">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </div>
-                    <p class="help-text" style="font-size: 0.75rem; margin-top: 0;">When on (default), the strip stays dark while the HDMI-TX display is disconnected or powered off. The state machine still runs — animations resume seamlessly when the display comes back.</p>
-                    <div class="remote-grid compact">
-                        <div class="remote-row">
-                            <button class="remote-btn select" data-led-state="off" onclick="setStatusLEDState('off')">Off</button>
-                            <button class="remote-btn select" data-led-state="initializing" onclick="setStatusLEDState('initializing')">Init</button>
-                            <button class="remote-btn select" data-led-state="idle" onclick="setStatusLEDState('idle')">Idle</button>
-                            <button class="remote-btn select" data-led-state="blocking" onclick="setStatusLEDState('blocking')">Blocking</button>
-                        </div>
-                        <div class="remote-row">
-                            <button class="remote-btn" data-led-state="no_signal" onclick="setStatusLEDState('no_signal')">No Signal</button>
-                            <button class="remote-btn nav" data-led-state="autonomous" onclick="setStatusLEDState('autonomous')">Autonomous</button>
-                            <button class="remote-btn" data-led-state="error" onclick="setStatusLEDState('error')">Error</button>
-                        </div>
-                    </div>
-                    <div class="ir-status-line" id="leds-status-line"></div>
-                </div>
-            </section>
-
-            <!-- Fire TV Settings (hidden when not using Fire TV) -->
-            <section class="settings-section" id="firetv-settings-section">
-                <h2>Fire TV Settings</h2>
-                <div class="setting-item">
-                    <span class="setting-label">Keep-Alive Pings</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="keepalive-toggle" onchange="toggleKeepalive(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="help-text">Sends periodic pings to prevent Fire TV ADB disconnects (every ~5 minutes with jitter).</p>
             </section>
 
             <!-- System -->
@@ -937,19 +638,6 @@
                 </div>
             </section>
 
-            <!-- ADB Keys (hidden when not using Fire TV) -->
-            <section class="adb-section" id="adb-keys-section">
-                <h2>ADB Keys (Fire TV)</h2>
-                <div id="adb-key-info" class="adb-key-info">
-                    <div class="empty-state">Loading...</div>
-                </div>
-                <div class="adb-actions">
-                    <button onclick="copyFingerprint()" class="action-btn" id="copy-fp-btn">Copy Fingerprint</button>
-                    <button onclick="revokeAdbKeys()" class="danger-btn">Revoke Keys</button>
-                </div>
-                <p class="help-text">Revoking keys will require re-authorization on the Fire TV.</p>
-            </section>
-
             <!-- Service Controls -->
             <section class="service-section">
                 <h2>Service</h2>
@@ -1005,18 +693,6 @@
         </div>
     </div>
 
-    <!-- Photo Preview Modal (Replace tab) -->
-    <div id="photo-modal" class="modal hidden" onclick="closePhotoModalBackdrop(event)">
-        <div class="modal-content photo-modal-content">
-            <img id="photo-modal-img" alt="preview" />
-            <p id="photo-modal-name" class="help-text"></p>
-            <div class="modal-buttons">
-                <button onclick="closePhotoModal()" class="modal-btn cancel">Close</button>
-                <button onclick="deletePhotoFromModal()" class="modal-btn confirm" style="background: var(--danger, #c93d3d);">Delete</button>
-            </div>
-        </div>
-    </div>
-
     <script>
         // State
         let isPaused = false;
@@ -1056,12 +732,9 @@
             }
 
             // Load data for specific tabs
-            if (tabName === 'screenshots') {
-                loadScreenshots();
-            } else if (tabName === 'settings') {
+            if (tabName === 'settings') {
                 loadWifiStatus();
                 loadWifiConnections();
-                loadAdbKeys();
                 loadNetworkInfo();
                 refreshLogs();
             } else if (tabName === 'remote') {
@@ -1076,7 +749,10 @@
         // content is moving — a paused video costs exactly as much as
         // action. Polling snapshots at a few fps is 12-20x cheaper on the
         // WiFi radio, which shares the SoC's thermal budget.
-        let lowBandwidthPreview = localStorage.getItem('minus_low_bw_preview') === '1';
+        // Only while its Settings toggle exists (removed on this branch), so a
+        // browser that stored "on" earlier can't get stuck on snapshot polling.
+        let lowBandwidthPreview = !!document.getElementById('low-bw-preview-toggle')
+            && localStorage.getItem('minus_low_bw_preview') === '1';
         let snapshotPollTimer = null;
         const SNAPSHOT_POLL_MS = 400;   // ~2.5 fps
 
@@ -1354,7 +1030,9 @@
                 }
 
                 const vlmStatus = document.getElementById('vlm-status');
-                if (status.vlm_available === false) {
+                if (!vlmStatus) {
+                    // VLM badge not shown on this branch
+                } else if (status.vlm_available === false) {
                     vlmStatus.textContent = 'VLM: Off';
                     vlmStatus.className = 'system-badge warning';
                 } else if (status.vlm_disabled) {
@@ -3712,20 +3390,13 @@
         updateDetections();
         fetchPreviewState();
         fetchDebugOverlayState();
-        fetchKeepaliveState();
         fetchColorSettings();
         updateFireTVStatus();
-        updateVLMStatus();
-        loadVLMPreloadSetting();
         loadUnattendedUpgrades();
-        loadASRSetting();
-        loadOptimizationSettings();
-        loadIRStatus();
-        loadStatusLEDs();
-        loadLEDRequireDisplay();
-        loadReplacementModes();
-        loadPhotoLibrary();
-        updateAutonomousModeStatus();
+        // Screenshots, Replace, VLM, Detection Settings, Blocking
+        // Optimizations, Autonomous Mode (IR, LEDs) and Fire TV / ADB key
+        // controls are not in this branch's UI; their loaders stay defined
+        // but are not called.
 
         setInterval(updateStatus, 1000);
         setInterval(updateStats, 2000);
@@ -3733,9 +3404,6 @@
         setInterval(updateVocabulary, 3000);
         setInterval(updateAudioStatus, 2000);
         setInterval(updateFireTVStatus, 5000);
-        setInterval(updateVLMStatus, 3000);
-        setInterval(updateAutonomousModeStatus, 5000);
-        setInterval(loadStatusLEDs, 2500);
     // =========================================================================
     // Screenshot Review Modal (Tinder-style swipe classification)
     // =========================================================================
@@ -4394,23 +4062,5 @@
         }
     }, 5000);
     </script>
-
-    <!-- Review Modal -->
-    <div id="review-modal" class="review-modal">
-        <div class="review-modal-header">
-            <span id="review-category-label" class="review-category-label"></span>
-            <span id="review-counter" class="review-counter"></span>
-            <div class="review-modal-actions">
-                <button onclick="undoReview()" class="review-undo-btn" title="Undo (Ctrl+Z)">&#8630; Undo</button>
-                <button onclick="closeReviewModal()" class="review-close-btn">&times;</button>
-            </div>
-        </div>
-        <div id="review-info" class="review-info" style="display:none"></div>
-        <div id="review-stack" class="review-stack"></div>
-        <div class="review-hints">
-            <span class="hint-left">&larr; <span id="hint-left-label">Reclassify</span></span>
-            <span class="hint-right"><span id="hint-right-label">Approve</span> &rarr;</span>
-        </div>
-    </div>
 </body>
 </html>

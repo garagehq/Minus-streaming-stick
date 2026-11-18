@@ -410,6 +410,21 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   muted before. `/api/name-mute` -> `james_context`,
   `james_context_remaining_s`, `james_hits`. Tests: `TestJamesContext`,
   `TestOtherJameses` in `tests/test_name_mute.py`.
+- **Trimmed web UI (2026-11-18).** Tabs are Home, Remote, Settings only. Not
+  in this branch's UI (the code and APIs stay): Screenshots tab, Replace
+  tab (+ photo modal), screenshot review modal, VLM badge and VLM / Both
+  test-block buttons, and the Settings sections Detection Settings (VLM,
+  VLM preload, ASR toggle -- ASR is still switchable from the Home "ASR
+  Live" panel), Blocking Optimizations (incl. low-bandwidth preview),
+  Autonomous Mode (incl. IR remote and status-LED toggles), Fire TV
+  Settings and ADB Keys (Fire TV). Their JS loaders/pollers are no longer
+  called at init. The Playwright UI tests for those panels
+  (`test_review_ui.py`, `test_ir_ui.py`, `test_status_leds_ui.py`) do not
+  apply to this branch.
+- **Factory Wi-Fi network.** `tools/add_wifi_networks.sh` (install.sh step
+  12) saves `TestNetwork1337` (WPA-PSK, autoconnect priority -10, below a
+  user's own network) if missing; it never connects. The passphrase is in
+  the repo in plain text.
 - **Stale clock, no Wi-Fi.** Shipped units boot with a stale clock and
   usually never get Wi-Fi. Nothing at boot waits for the network
   (`minus.service` is after `multi-user.target` only). Timing that matters

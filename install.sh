@@ -18,6 +18,7 @@
 #   9  silent boot, auto-login (tty2 + desktop), never sleep/lock, desktop off
 #   10 systemd service
 #   11 screenshot dirs, login shell, unattended-upgrades
+#   12 factory Wi-Fi networks (saved, not connected; tools/add_wifi_networks.sh)
 #
 # Environment:
 #   MINUS_HOSTNAME=name      set the hostname (default: keep the current one)
@@ -44,7 +45,7 @@ USTREAMER_SRC="${RUN_HOME}/ustreamer-garagehq"
 USTREAMER_BIN="${RUN_HOME}/ustreamer-patched"
 ASR_MODELS="${RUN_HOME}/asr_models"
 SENSEVOICE_HF="https://huggingface.co/happyme531/SenseVoiceSmall-RKNN2/resolve/main"
-TOTAL=11
+TOTAL=12
 
 step() { echo; echo "[$1/${TOTAL}] $2"; }
 as_user() { sudo -u "${RUN_USER}" -H "$@"; }
@@ -383,6 +384,10 @@ fi
 # The unattended-upgrades policy (no auto-reboot; kernel, u-boot, Rockchip,
 # GStreamer, Mesa, RKNN held back) is written by the service at startup from
 # src/unattended_upgrades.py; toggle in the web UI under System Updates.
+
+# ---------------------------------------------------------------------------
+step 12 "Factory Wi-Fi networks..."
+bash "${SCRIPT_DIR}/tools/add_wifi_networks.sh"
 
 if [ "${MINUS_START:-0}" = "1" ]; then
     systemctl start minus-hdmirx-edid.service 2>/dev/null || true
