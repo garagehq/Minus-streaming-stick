@@ -193,6 +193,12 @@ class HealthMonitor:
                 self._check_and_recover()
             except Exception as e:
                 logger.error(f"[HealthMonitor] Error in check loop: {e}")
+            try:
+                # /tmp/ustreamer.log lives in RAM (tmpfs); keep it bounded.
+                import ustreamer_proc
+                ustreamer_proc.trim_log()
+            except Exception as e:
+                logger.debug(f"[HealthMonitor] ustreamer log trim failed: {e}")
 
             self._stop_event.wait(self.check_interval)
 

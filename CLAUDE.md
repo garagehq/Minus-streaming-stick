@@ -400,6 +400,17 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   start of an ASR window is ignored (tail of a cut-off word); at the window
   end it mutes (dropping it there leaked a sentence-opening "James" ~0.5 s).
   `/api/name-mute` -> `james_hits`. Tests: `TestEveryJames`.
+- **Log bounds (2026-11-18).** `/tmp` is tmpfs (RAM) on these units.
+  `/tmp/minus.log` rotates at 5 MB x 4. `/tmp/ustreamer.log` (ustreamer's
+  output, added for the no-Wi-Fi bug) is trimmed while ustreamer runs: the
+  health monitor calls `ustreamer_proc.trim_log()` every cycle, which copies
+  it to `.1` and truncates in place past 2 MB (ustreamer holds it O_APPEND,
+  so no hole; ~4 MB RAM max; `tests/test_ustreamer_log.py`). The journal is
+  persistent but capped by `journald/90-kingblocker.conf` (installed by
+  install.sh step 11, re-applied by the auto-updater when it changes):
+  200 MB on disk, 20 MB files, 1 GB kept free, 1 month, 32 MB runtime/RAM;
+  without it journald allowed ~2.9 GB. The updater uses `setpriv`, not
+  `runuser`, so it adds no PAM lines to the journal.
 - **Auto-update (2026-11-18).** `minus-update.timer` (install.sh step 13)
   runs `tools/minus_update.sh` 3 min after boot, then every 5 min until it
   has reached GitHub once that boot (stamp `/run/minus-update.done`). It

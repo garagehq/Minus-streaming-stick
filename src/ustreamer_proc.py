@@ -55,6 +55,26 @@ def spawn(cmd) -> subprocess.Popen:
             out.close()   # the child keeps its own copy of the descriptor
 
 
+def trim_log(max_bytes: int = USTREAMER_LOG_MAX) -> bool:
+    """Bound USTREAMER_LOG while ustreamer is running (call periodically).
+
+    /tmp is tmpfs (RAM) on these units, and spawn() only rotates when
+    ustreamer is relaunched, so a long-running ustreamer grew the log
+    without limit. Copy it to .1 and truncate in place: ustreamer holds it
+    with O_APPEND, so its next write lands at the new end (no hole). At most
+    ~2 x max_bytes of RAM. Returns True if it trimmed."""
+    import os
+    import shutil
+    try:
+        if os.path.getsize(USTREAMER_LOG) <= max_bytes:
+            return False
+        shutil.copyfile(USTREAMER_LOG, USTREAMER_LOG + '.1')
+        os.truncate(USTREAMER_LOG, 0)
+        return True
+    except OSError:
+        return False
+
+
 def exit_report(proc, lines: int = 8) -> str:
     """Exit code and the last lines ustreamer wrote, for the error log."""
     code = proc.poll()

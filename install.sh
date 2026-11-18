@@ -17,7 +17,7 @@
 #   8  hostname + mDNS (only when MINUS_HOSTNAME is set)
 #   9  silent boot, auto-login (tty2 + desktop), never sleep/lock, desktop off
 #   10 systemd service
-#   11 screenshot dirs, login shell, unattended-upgrades
+#   11 screenshot dirs, login shell, unattended-upgrades, journald size limits
 #   12 factory Wi-Fi networks (saved, not connected; tools/add_wifi_networks.sh)
 #   13 auto-update a few minutes after boot (minus-update.timer ->
 #      tools/minus_update.sh: pulls this branch, rebuilds ustreamer if needed)
@@ -374,7 +374,13 @@ systemctl daemon-reload
 systemctl enable -q ${SERVICE_NAME}
 
 # ---------------------------------------------------------------------------
-step 11 "Screenshot dirs, login shell, unattended-upgrades..."
+step 11 "Screenshot dirs, login shell, unattended-upgrades, journal limits..."
+# Bounded system journal (200 MB on disk, 32 MB in RAM; journald/90-kingblocker.conf).
+install -d /etc/systemd/journald.conf.d
+install -m 644 "${SCRIPT_DIR}/journald/90-kingblocker.conf" /etc/systemd/journald.conf.d/
+systemctl restart systemd-journald
+journalctl --vacuum-size=200M --vacuum-time=1month >/dev/null 2>&1 || true
+echo "    journal: $(journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*[KMG]' | head -1) (max 200M)"
 for d in ads non_ads vlm_spastic static; do
     mkdir -p "${SCRIPT_DIR}/screenshots/${d}"
 done

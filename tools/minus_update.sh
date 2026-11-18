@@ -31,7 +31,10 @@ US_BUILT="${RUN_HOME}/.minus_ustreamer_built_rev"
 STAMP=/run/minus-update.done
 
 log() { echo "[minus-update] $*"; }
-as_user() { runuser -u "$RUN_USER" -- "$@"; }
+# setpriv rather than runuser/su: no PAM session, so no journal lines per call.
+AS_USER=(setpriv --reuid="$RUN_USER" --regid="$RUN_USER" --init-groups
+         env HOME="$RUN_HOME" USER="$RUN_USER")
+as_user() { "${AS_USER[@]}" "$@"; }
 git_m() { as_user git -C "$MINUS_DIR" "$@"; }
 git_u() { as_user git -C "$US_DIR" "$@"; }
 
@@ -68,7 +71,7 @@ sync_checkout() {
 }
 
 # ---- Minus -----------------------------------------------------------------
-if ! timeout 60 runuser -u "$RUN_USER" -- git -C "$MINUS_DIR" fetch -q origin "$BRANCH"; then
+if ! timeout 60 "${AS_USER[@]}" git -C "$MINUS_DIR" fetch -q origin "$BRANCH"; then
     log "can't reach origin; will retry"; exit 0
 fi
 touch "$STAMP"
@@ -90,12 +93,18 @@ if [ "$OLD" != "$NEW" ]; then
             systemctl daemon-reload
         fi
     done
+    if ! git_m diff --quiet "$OLD" "$NEW" -- journald/90-kingblocker.conf; then
+        install -d /etc/systemd/journald.conf.d
+        install -m 644 "$MINUS_DIR/journald/90-kingblocker.conf" /etc/systemd/journald.conf.d/
+        systemctl restart systemd-journald
+        log "Minus: updated journald limits"
+    fi
 else
     log "Minus: up to date ($(git_m log --oneline -1))"
 fi
 
 # ---- ustreamer (only rebuilt when its branch moved) ------------------------
-if [ -d "$US_DIR/.git" ] && timeout 60 runuser -u "$RUN_USER" -- git -C "$US_DIR" fetch -q origin "$US_BRANCH"; then
+if [ -d "$US_DIR/.git" ] && timeout 60 "${AS_USER[@]}" git -C "$US_DIR" fetch -q origin "$US_BRANCH"; then
     sync_checkout git_u "$US_BRANCH" "ustreamer"
     US_REV="$(git_u rev-parse HEAD)"
     if [ "$(cat "$US_BUILT" 2>/dev/null)" != "$US_REV" ]; then
