@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=KingBlocker9000
+Description=KingBlocker9000 boot screen: logo on green, white loading bar
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/kingblocker
+ScriptFile=/usr/share/plymouth/themes/kingblocker/kingblocker.script

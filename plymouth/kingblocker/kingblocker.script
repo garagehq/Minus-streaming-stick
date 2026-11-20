@@ -1,0 +1,95 @@
+# KingBlocker9000 boot splash (Plymouth script plugin).
+#
+# The 1920x1080 design (assets/screens/boot_background.png) scaled to the
+# screen, with the white loading bar drawn over it.
+#
+# Bar: Plymouth's boot progress, which it learns from the previous boot's
+# timing (how long until Minus took the screen over), fills it. Just before
+# Minus quits Plymouth it sends the status "kingblocker-finish"
+# (src/boot_screen.py) and the bar runs the rest of the way to 100%.
+# Bar geometry in the design: x=680 y=950, 560 x 10 (tools/render_screens.py).
+
+Window.SetBackgroundTopColor(0.157, 0.8, 0.584);      # #28CC95
+Window.SetBackgroundBottomColor(0.157, 0.8, 0.584);
+
+screen_w = Window.GetWidth();
+screen_h = Window.GetHeight();
+bg = Image("boot_background.png");
+scale = Math.Min(screen_w / bg.GetWidth(), screen_h / bg.GetHeight());
+ox = Window.GetX() + (screen_w - bg.GetWidth() * scale) / 2;
+oy = Window.GetY() + (screen_h - bg.GetHeight() * scale) / 2;
+
+bg_sprite = Sprite(bg.Scale(bg.GetWidth() * scale, bg.GetHeight() * scale));
+bg_sprite.SetPosition(ox, oy, 0);
+
+bar_x = ox + 680 * scale;
+bar_y = oy + 950 * scale;
+bar_w = 560 * scale;
+bar_h = Math.Int(10 * scale + 0.5);
+cap_w = Math.Int(5 * scale + 0.5);
+
+track = Sprite(Image("bar_track.png").Scale(bar_w, bar_h));
+track.SetPosition(bar_x, bar_y, 1);
+
+fill_left_img = Image("bar_fill_left.png").Scale(cap_w, bar_h);
+fill_mid_img = Image("bar_fill_mid.png");
+fill_right_img = Image("bar_fill_right.png").Scale(cap_w, bar_h);
+fill_left = Sprite(fill_left_img);
+fill_mid = Sprite();
+fill_right = Sprite(fill_right_img);
+fill_left.SetOpacity(0);
+fill_right.SetOpacity(0);
+
+STEP = 0.02;          # per frame while running to the end (~50 frames/s)
+bar = 0;
+finishing = 0;
+
+fun draw_bar(p) {
+    w = Math.Int(bar_w * p);
+    if (w < 2 * cap_w) w = 2 * cap_w;
+    mid_w = w - 2 * cap_w;
+    fill_left.SetPosition(bar_x, bar_y, 2);
+    fill_left.SetOpacity(1);
+    if (mid_w > 0) {
+        fill_mid.SetImage(fill_mid_img.Scale(mid_w, bar_h));
+        fill_mid.SetPosition(bar_x + cap_w, bar_y, 2);
+        fill_mid.SetOpacity(1);
+    }
+    else {
+        fill_mid.SetOpacity(0);
+    }
+    fill_right.SetPosition(bar_x + cap_w + mid_w, bar_y, 2);
+    fill_right.SetOpacity(1);
+}
+
+fun boot_progress_cb(duration, progress) {
+    if (!finishing) {
+        p = progress;
+        if (p > 1) p = 1;
+        if (p > bar) {
+            bar = p;
+            draw_bar(bar);
+        }
+    }
+}
+Plymouth.SetBootProgressFunction(boot_progress_cb);
+
+fun refresh_cb() {
+    if (finishing && bar < 1) {
+        bar = bar + STEP;
+        if (bar > 1) bar = 1;
+        draw_bar(bar);
+    }
+}
+Plymouth.SetRefreshFunction(refresh_cb);
+
+# systemd sends every unit's name as a status too; only Minus's counts.
+fun status_cb(status) {
+    if (status == "kingblocker-finish") finishing = 1;
+}
+Plymouth.SetUpdateStatusFunction(status_cb);
+
+# No text on screen: boot messages, password and question prompts are not
+# shown (units have no encrypted disks; fsck runs with fsck.repair=yes).
+fun no_message(text) { }
+Plymouth.SetMessageFunction(no_message);

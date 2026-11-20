@@ -547,6 +547,42 @@ ROCK 5B+, 192.168.1.15, set up from a fresh image with `install.sh` on
   counted in `/api/name-mute` -> `caption_silent_skips` and logged.
   A title card over music or commentary still mutes.
   `tests/test_caption_silence.py`.
+- **Card corrupted by a power cut (2026-11-18/20).** The unit was unplugged
+  while running; the root ext4 came back with a dirty orphan-file block and
+  four unattached inodes. The initramfs fsck (-a) won't fix those, so every
+  boot stopped in its recovery shell, which only the serial port shows:
+  black HDMI, no Wi-Fi, same on a new board. Repaired from another unit
+  (USB reader, `e2fsck -fy`). Now `fsck.repair=yes` is on the kernel
+  cmdline (install.sh step 9), so the initramfs runs fsck -y and boots on.
+  Unattended upgrades were ruled out (only small libs, boot files
+  untouched); on the client card they are off anyway (setting, apt config,
+  masked apt timers).
+- **Boot splash, INITIALIZING, NO SIGNAL (2026-11-20, client design).** All
+  on #28CC95 (`assets/screens/`, rendered by `tools/render_screens.py` from
+  the client's mockup + Jost italic, SIL OFL).
+  - *Boot splash:* Plymouth theme `plymouth/kingblocker` (installed by
+    `tools/install_boot_screen.sh`, install.sh step 9; rebuilds the
+    initramfs, keeps `/boot/initrd.img-*.bak-bootscreen`): logo, "A Kalshi
+    INVENTION", white loading bar. The bar follows Plymouth's boot progress,
+    which Plymouth learns from the previous boot (`/var/lib/plymouth/
+    boot-duration`), and runs to 100% when Minus takes over.
+  - *Needs `plymouth.ignore-serial-consoles`* on the kernel cmdline (the
+    script adds it): with ttyFIQ0 as the only console Plymouth otherwise
+    prints text on the serial port and draws nothing on HDMI.
+  - *Hand-off:* plymouth-quit and plymouth-quit-wait are no-ops (both run
+    before multi-user.target, which Minus starts after), so the splash stays
+    until Minus is about to draw (~26 s). `boot_screen.release_plymouth`
+    sends status `kingblocker-finish` (bar runs to 100% in ~0.5 s), then
+    `plymouth quit`; Plymouth holds DRM master until then. A 3-minute timer
+    quits it if Minus never does.
+  - *INITIALIZING* (`start_loading_mode`, while Minus starts with an input)
+    and *NO SIGNAL* are static images of white heavy-italic text, same font
+    (no bounce, no dots). They go straight to kmssink, never through
+    ustreamer, so OCR can't read them. A missing image falls back to the
+    old text screens; `MINUS_BOOT_SCREEN=0` forces that.
+  - The updater does not install the Plymouth theme (it would rebuild the
+    initramfs in the field); run `sudo tools/install_boot_screen.sh` by hand
+    when it changes. `tests/test_boot_screen.py`.
 - **Appliance boot:** no desktop, no sleep, silent boot on HDMI (kernel and
   systemd text to the serial port), nothing on tty1, auto-login shell on
   tty2. `MINUS_VERBOSE_BOOT=1` / `MINUS_KEEP_DESKTOP=1` for development.

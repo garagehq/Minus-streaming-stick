@@ -15,8 +15,9 @@
 #   6  HDMI-RX EDID (24-30 Hz only, so sources send 4K30)
 #   7  groups (gpio/spi/video/audio) for the radxa user
 #   8  hostname + mDNS (only when MINUS_HOSTNAME is set)
-#   9  silent boot, auto-login (tty2 + desktop), never sleep/lock, desktop off,
-#      board status LED off (minus-board-leds.service; not the mute LED)
+#   9  silent boot, boot screen (Plymouth theme, tools/install_boot_screen.sh),
+#      fsck.repair=yes, auto-login (tty2 + desktop), never sleep/lock, desktop
+#      off, board status LED off (minus-board-leds.service; not the mute LED)
 #   10 systemd service
 #   11 screenshot dirs, login shell, unattended-upgrades, journald size limits
 #   12 factory Wi-Fi networks (saved, not connected; tools/add_wifi_networks.sh)
@@ -297,6 +298,24 @@ if [ "${MINUS_VERBOSE_BOOT:-0}" != "1" ] && [ -f /etc/kernel/cmdline ]; then
 else
     systemctl unmask -q getty@tty1.service autovt@tty1.service 2>/dev/null || true
     CONSOLE_TTY=tty1
+fi
+# Repair the root filesystem at boot without asking. Units are unplugged
+# without a shutdown; one power cut (2026-11-18) left an orphan-file block and
+# four unattached inodes that the initramfs fsck (-a) would not fix on its
+# own, so every boot stopped in its recovery shell, which only the serial port
+# shows. fsck.repair=yes makes it run fsck -y and carry on booting.
+if [ -f /etc/kernel/cmdline ] && ! grep -qw 'fsck.repair=yes' /etc/kernel/cmdline; then
+    [ -f /etc/kernel/cmdline.bak-minus ] || cp /etc/kernel/cmdline /etc/kernel/cmdline.bak-minus
+    sed -i -E 's/(^| )fsck\.repair=[a-z]+//g; s/$/ fsck.repair=yes/; s/  +/ /g' /etc/kernel/cmdline
+    /usr/sbin/u-boot-update >/dev/null
+    REBOOT_NEEDED=1
+    echo "    boot: root filesystem repaired automatically (fsck.repair=yes)"
+fi
+# Boot screen: KingBlocker9000 logo on green with a loading bar, from early
+# boot until Minus shows its own copy of it (Plymouth theme, initramfs rebuilt).
+if [ "${MINUS_VERBOSE_BOOT:-0}" != "1" ]; then
+    bash "${SCRIPT_DIR}/tools/install_boot_screen.sh" ||
+        echo "    boot screen: install failed (the previous splash stays)"
 fi
 # Console auto-login (no password prompt with a keyboard attached).
 install -d /etc/systemd/system/getty@${CONSOLE_TTY}.service.d

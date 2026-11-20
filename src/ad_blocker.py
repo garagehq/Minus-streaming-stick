@@ -42,6 +42,7 @@ from vocabulary import SPANISH_VOCABULARY, VOCABULARY_COMBINED
 from facts import DID_YOU_KNOW
 from config import MinusConfig
 import loading_overlay
+import boot_screen
 from drm import (
     get_color_format, set_color_format, is_connector_connected,
     check_hdmi_i2c_errors, COLOR_FORMAT_YCBCR420, COLOR_FORMAT_NAMES,
@@ -682,6 +683,7 @@ class DRMAdBlocker:
             return {'success': False, 'error': str(e)}
 
     def start(self):
+        boot_screen.release_plymouth()   # it holds DRM master until now
         # Stop any animations before starting normal pipeline
         self._stop_loading_animation()
         self._stop_no_signal_animation()
@@ -1128,6 +1130,7 @@ class DRMAdBlocker:
         """
         try:
             logger.debug("[DRMAdBlocker] Starting no-signal mode...")
+            boot_screen.release_plymouth()   # it holds DRM master until now
             self._set_led_state('no_signal')
 
             # Stop the watchdog - we don't want it restarting the normal pipeline
@@ -1176,25 +1179,22 @@ class DRMAdBlocker:
                     logger.warning("[DRMAdBlocker] No connected HDMI output found for no-signal display — skipping pipeline creation")
                     return False
 
-            # Create a standalone pipeline for no-signal display with positioned text
-            # Uses valignment=position and halignment=position to enable xpos/ypos control
-            no_signal_pipeline = (
-                f"videotestsrc pattern=black ! "
-                f"video/x-raw,width=1920,height=1080,framerate=30/1 ! "
-                f"textoverlay name=no_signal_text text=\"[ NO SIGNAL ]\" "
-                f"valignment=position halignment=position xpos=0.5 ypos=0.5 "
-                f"font-desc=\"Sans Bold 24\" ! "
-                f"videoconvert ! video/x-raw,format=NV12 ! "
-                f"kmssink plane-id={self.plane_id} connector-id={self.connector_id} sync=false skip-vsync=true"
-                # Below the loading spinner's plane (src/loading_overlay.py).
-                + (f' plane-properties="props,zpos={loading_overlay.VIDEO_ZPOS}"'
-                   if loading_overlay.ENABLED else '')
-                # skip-vsync=true: the rockchip BSP's legacy drmModeSetPlane ioctl BLOCKS
-                # until the flip latches at vblank (measured 16.67ms/call), so kmssink's
-                # own internal vsync wait was a SECOND full vblank -> every frame took
-                # 2 vblanks -> display pinned at exactly 30fps on a 60Hz mode. Frame
-                # pacing/tearing is still handled by the blocking SetPlane itself.
-            )
+            # Standalone pipeline (no ustreamer): the green NO SIGNAL image
+            # (src/boot_screen.py), or the old bouncing text if it's missing.
+            image = boot_screen.screen_image('no_signal')
+            if image:
+                no_signal_pipeline = self._image_screen_pipeline(image)
+            else:
+                # Uses valignment=position and halignment=position to enable xpos/ypos control
+                no_signal_pipeline = (
+                    f"videotestsrc pattern=black ! "
+                    f"video/x-raw,width=1920,height=1080,framerate=30/1 ! "
+                    f"textoverlay name=no_signal_text text=\"[ NO SIGNAL ]\" "
+                    f"valignment=position halignment=position xpos=0.5 ypos=0.5 "
+                    f"font-desc=\"Sans Bold 24\" ! "
+                    f"videoconvert ! video/x-raw,format=NV12 ! "
+                    + self._screen_kmssink()
+                )
 
             logger.debug(f"[DRMAdBlocker] Creating no-signal pipeline (plane={self.plane_id}, connector={self.connector_id})...")
             self.pipeline = Gst.parse_launch(no_signal_pipeline)
@@ -1237,8 +1237,9 @@ class DRMAdBlocker:
             self.is_visible = True
             self.current_source = 'no_hdmi_device'
 
-            # Start the bouncing animation
-            self._start_no_signal_animation()
+            # The old text screen bounces; the image is static.
+            if not image:
+                self._start_no_signal_animation()
 
             logger.info("[DRMAdBlocker] No-signal display started successfully")
             return True
@@ -1345,6 +1346,8 @@ class DRMAdBlocker:
         animated dots (0-4 dots, increasing then decreasing).
         """
         try:
+            boot_screen.release_plymouth()   # it holds DRM master until now
+
             # Stop the watchdog - we don't want it restarting the normal pipeline
             self._stop_watchdog_thread()
 
@@ -1378,24 +1381,20 @@ class DRMAdBlocker:
                 logger.warning("[DRMAdBlocker] No connected HDMI output found for loading display — skipping pipeline creation")
                 return False
 
-            # Create a standalone pipeline for loading display
-            # Uses videotestsrc with named textoverlay for animation
-            loading_pipeline = (
-                f"videotestsrc pattern=black ! "
-                f"video/x-raw,width=1920,height=1080,framerate=30/1 ! "
-                f"textoverlay name=loading_text text=\"[ INITIALIZING ]\" "
-                f"valignment=center halignment=center font-desc=\"Sans Bold 24\" ! "
-                f"videoconvert ! video/x-raw,format=NV12 ! "
-                f"kmssink plane-id={self.plane_id} connector-id={self.connector_id} sync=false skip-vsync=true"
-                # Below the loading spinner's plane (src/loading_overlay.py).
-                + (f' plane-properties="props,zpos={loading_overlay.VIDEO_ZPOS}"'
-                   if loading_overlay.ENABLED else '')
-                # skip-vsync=true: the rockchip BSP's legacy drmModeSetPlane ioctl BLOCKS
-                # until the flip latches at vblank (measured 16.67ms/call), so kmssink's
-                # own internal vsync wait was a SECOND full vblank -> every frame took
-                # 2 vblanks -> display pinned at exactly 30fps on a 60Hz mode. Frame
-                # pacing/tearing is still handled by the blocking SetPlane itself.
-            )
+            # Standalone pipeline (no ustreamer): the green INITIALIZING image
+            # (src/boot_screen.py), or the old animated text if it's missing.
+            image = boot_screen.screen_image('initializing')
+            if image:
+                loading_pipeline = self._image_screen_pipeline(image)
+            else:
+                loading_pipeline = (
+                    f"videotestsrc pattern=black ! "
+                    f"video/x-raw,width=1920,height=1080,framerate=30/1 ! "
+                    f"textoverlay name=loading_text text=\"[ INITIALIZING ]\" "
+                    f"valignment=center halignment=center font-desc=\"Sans Bold 24\" ! "
+                    f"videoconvert ! video/x-raw,format=NV12 ! "
+                    + self._screen_kmssink()
+                )
 
             logger.debug("[DRMAdBlocker] Creating loading pipeline...")
             self.pipeline = Gst.parse_launch(loading_pipeline)
@@ -1425,8 +1424,9 @@ class DRMAdBlocker:
             self.is_visible = True
             self.current_source = 'loading'
 
-            # Start the loading animation thread
-            self._start_loading_animation()
+            # The old text screen animates its dots; the image is static.
+            if not image:
+                self._start_loading_animation()
 
             logger.info("[DRMAdBlocker] Loading display started")
             return True
@@ -1462,6 +1462,32 @@ class DRMAdBlocker:
             self._loading_anim_thread.join(timeout=1.0)
             self._loading_anim_thread = None
         self._loading_textoverlay = None
+
+    def _image_screen_pipeline(self, image_path):
+        """Pipeline showing a full-screen PNG (INITIALIZING / NO SIGNAL)."""
+        return (
+            f'filesrc location="{image_path}" ! pngdec ! '
+            f"videoconvert ! videoscale ! "
+            f"video/x-raw,format=NV12,width=1920,height=1080,colorimetry=bt601 ! "
+            # Converted once; imagefreeze repeats it at 5 fps (live, so it
+            # doesn't spin as fast as kmssink will take frames).
+            f"imagefreeze is-live=true ! video/x-raw,framerate=5/1 ! "
+            + self._screen_kmssink()
+        )
+
+    def _screen_kmssink(self):
+        """kmssink for the standalone loading / NO SIGNAL screens."""
+        return (
+            f"kmssink plane-id={self.plane_id} connector-id={self.connector_id} sync=false skip-vsync=true"
+            # Below the loading spinner's plane (src/loading_overlay.py).
+            + (f' plane-properties="props,zpos={loading_overlay.VIDEO_ZPOS}"'
+               if loading_overlay.ENABLED else '')
+            # skip-vsync=true: the rockchip BSP's legacy drmModeSetPlane ioctl BLOCKS
+            # until the flip latches at vblank (measured 16.67ms/call), so kmssink's
+            # own internal vsync wait was a SECOND full vblank -> every frame took
+            # 2 vblanks -> display pinned at exactly 30fps on a 60Hz mode. Frame
+            # pacing/tearing is still handled by the blocking SetPlane itself.
+        )
 
     def _loading_animation_loop(self):
         """Animate the loading text with ellipses (0-4 dots, increasing then decreasing)."""
